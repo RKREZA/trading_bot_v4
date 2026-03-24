@@ -3,9 +3,16 @@ TRADING BOT V3 - Backtest Engine
 Simulates trading strategy on historical data with proper bias handling.
 """
 
+import os
+import sys
 import logging
 from datetime import datetime
 from typing import List, Optional
+
+# Add the project root to sys.path so Python and linters can find 'dashboard' and 'core'
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 from dashboard import BacktestDashboard
 from core.strategy_engine import StrategyEngine, TradeSignal

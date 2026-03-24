@@ -207,9 +207,9 @@ class TradingBot:
             return
 
         logger.info("Fetching data for %s...", symbol)
-        h4_candles = self.data_fetcher.fetch_candles(symbol, "H4", 250)
-        m30_candles = self.data_fetcher.fetch_candles(symbol, "M30", 1540)
-        m15_candles = self.data_fetcher.fetch_candles(symbol, "M15", 2000)
+        h4_candles = self.data_fetcher.fetch_candles(symbol, "H4", 600)     # approx 100 days
+        m30_candles = self.data_fetcher.fetch_candles(symbol, "M30", 4800)  # approx 100 days
+        m15_candles = self.data_fetcher.fetch_candles(symbol, "M15", 9600)  # approx 100 days
 
         if not h4_candles or not m30_candles or not m15_candles:
             logger.error("Failed to fetch data for %s", symbol)
