@@ -9,7 +9,7 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -81,7 +81,7 @@ class TradingBot:
         Determine current trading session based on UTC+0 hour conventions.
         Correctly handles the London/NY overlap (13:00-16:59).
         """
-        hour = datetime.now().hour
+        hour = datetime.now(timezone.utc).hour  # Use UTC time
         if 13 <= hour < 17:
             return "LONDON/NY"
         if 8 <= hour < 17:
