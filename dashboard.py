@@ -216,6 +216,7 @@ class BacktestDashboard:
         tt = Table(box=box.SIMPLE_HEAVY, expand=True)
         tt.add_column("TIME", style=DIM, width=18)
         tt.add_column("DIR", width=5)
+        tt.add_column("LOT", justify="right")
         tt.add_column("ENTRY", justify="right")
         tt.add_column("RESULT", justify="center")
         tt.add_column("P/L", justify="right")
@@ -223,5 +224,5 @@ class BacktestDashboard:
             dir_style = GREEN if t['direction'] == 'BUY' else RED
             res_style = GREEN if t['result'] == 'TP' else RED
             pnl_color = GREEN if t['pnl'] >= 0 else RED
-            tt.add_row(t['time'], Text(t['direction'], style=f"bold {dir_style}"), f"{t['entry']:.2f}", Text(t['result'], style=f"bold {res_style}"), Text(f"{'+' if t['pnl'] >= 0 else ''}${t['pnl']:.2f}", style=pnl_color))
+            tt.add_row(t['time'], Text(t['direction'], style=f"bold {dir_style}"), f"{t.get('lot', 0):.2f}", f"{t['entry']:.2f}", Text(t['result'], style=f"bold {res_style}"), Text(f"{'+' if t['pnl'] >= 0 else ''}${t['pnl']:.2f}", style=pnl_color))
         self.console.print(Panel(tt, title="[bold yellow]TRADES[/]", border_style="yellow", box=box.ROUNDED, expand=True, padding=(1, 2)))

@@ -1,3 +1,4 @@
 MetaTrader5>=5.0.45
 rich>=13.0.0
 numpy>=1.20.0
+python-dotenv>=1.0.0

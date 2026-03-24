@@ -1,14 +1,35 @@
 """MT5 Connection Test Script"""
-import MetaTrader5 as mt5
+import os
 import time
 
-MT5_LOGIN = 463171405
-MT5_PASSWORD = "Mftx@1234"
-MT5_SERVER = "Exness-MT5Trial17"
+from dotenv import load_dotenv
+
+load_dotenv()
+
+try:
+    import MetaTrader5 as mt5
+except ImportError:
+    print("ERROR: MetaTrader5 not installed. Run: pip install MetaTrader5")
+    exit(1)
+
+# Load credentials from environment
+MT5_LOGIN = os.environ.get("MT5_LOGIN")
+MT5_PASSWORD = os.environ.get("MT5_PASSWORD")
+MT5_SERVER = os.environ.get("MT5_SERVER")
+
+if not all([MT5_LOGIN, MT5_PASSWORD, MT5_SERVER]):
+    print("ERROR: Missing MT5 credentials!")
+    print("Set environment variables: MT5_LOGIN, MT5_PASSWORD, MT5_SERVER")
+    print("Or create a .env file (see .env.example)")
+    exit(1)
+
+MT5_LOGIN = int(MT5_LOGIN)
 
 print("=" * 50)
 print("MT5 CONNECTION TEST")
 print("=" * 50)
+print(f"\nServer: {MT5_SERVER}")
+print(f"Login: {MT5_LOGIN}")
 
 print("\n[1] Checking MT5...")
 try:
@@ -18,7 +39,7 @@ try:
     else:
         print("    X MT5 not found!")
         exit(1)
-except:
+except Exception:
     print("    X MT5 not installed!")
     exit(1)
 
