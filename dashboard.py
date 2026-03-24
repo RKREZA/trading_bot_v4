@@ -180,8 +180,13 @@ class BacktestDashboard:
     def __init__(self, config):
         self.config = config
         self.console = Console()
+        self._live = None
 
     def show_progress(self, current, total, current_time, signal_count, trade_count):
+        if not self._live:
+            self._live = Live(console=self.console, refresh_per_second=10)
+            self._live.start()
+
         pct = (current / total * 100) if total > 0 else 0
         filled = int(pct / 100 * 40)
         progress = Text()
@@ -189,10 +194,13 @@ class BacktestDashboard:
         progress.append(BAR_FULL * filled, style=GREEN)
         progress.append(BAR_EMPTY * (40 - filled), style=DIM)
         progress.append(f" {pct:.1f}%\n\n {current_time} | Signals: {signal_count} | Trades: {trade_count}")
-        self.console.clear()
-        self.console.print(Panel(progress, title="[bold cyan]PROGRESS[/]", border_style="cyan", box=box.HEAVY, expand=True, padding=(1, 2)))
+        
+        panel = Panel(progress, title="[bold cyan]PROGRESS[/]", border_style="cyan", box=box.HEAVY, expand=True, padding=(1, 2))
+        self._live.update(panel)
 
     def show_results(self, r):
+        if self._live:
+            self._live.stop()
         self.console.clear()
         summary = Text()
         summary.append(f"\n {r['symbol']}: {r['start_date']} to {r['end_date']}\n", style=WHITE)
