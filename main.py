@@ -52,6 +52,7 @@ class TradingBot:
         self.win_count = 0
         self.loss_count = 0
         self.running = False
+        self.last_trade_time = {}
 
     @staticmethod
     def _load_config(config_path: str) -> dict:
@@ -181,6 +182,25 @@ class TradingBot:
                             ),
                         }
                         self._update_dashboard_state(signal, analysis_state)
+
+                        # --- Order Placement Logic ---
+                        if signal:
+                            current_candle_time = m15_candles[-1]["time"]
+                            last_trade = self.last_trade_time.get(symbol, 0)
+                            
+                            # Prevent duplicate trades on the same candle
+                            if current_candle_time > last_trade:
+                                lot_size = self.config.get("symbols_config", {}).get(symbol, {}).get("lot", 0.01)
+                                self.analysis_logger.log(f"Attempting to place {signal.direction} order for {symbol}", "INFO")
+                                
+                                result = self.connection.place_order(symbol, signal, lot_size)
+                                if result:
+                                    self.last_trade_time[symbol] = current_candle_time
+                                    self.daily_trades += 1
+                                    self.dashboard.daily_trades = self.daily_trades
+                                    self.analysis_logger.log(f"Trade executed: {result['ticket']}", "INFO")
+                                else:
+                                    self.analysis_logger.log(f"Failed to execute trade for {symbol}", "ERROR")
 
                 except Exception as e:
                     logger.exception("Error in trading cycle: %s", e)

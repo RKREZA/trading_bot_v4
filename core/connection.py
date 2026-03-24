@@ -170,3 +170,62 @@ class MT5Connection:
             "connected": True,
             "server_time": datetime.now().strftime("%H:%M:%S"),
         }
+
+    def place_order(self, symbol: str, signal, lot_size: float) -> Optional[dict]:
+        """
+        Place an order in MT5 based on the provided signal.
+        """
+        if not self.ensure_connected():
+            return None
+
+        symbol_info = mt5.symbol_info(symbol)
+        if symbol_info is None:
+            logger.error("%s not found, can not call order_check()", symbol)
+            return None
+
+        if not symbol_info.visible:
+            logger.info("%s, is not visible, trying to switch on", symbol)
+            if not mt5.symbol_select(symbol, True):
+                logger.error("symbol_select({}}) failed, exit", symbol)
+                return None
+
+        # Determine order type
+        if signal.direction == "BUY":
+            order_type = mt5.ORDER_TYPE_BUY
+            price = mt5.symbol_info_tick(symbol).ask
+        elif signal.direction == "SELL":
+            order_type = mt5.ORDER_TYPE_SELL
+            price = mt5.symbol_info_tick(symbol).bid
+        else:
+            logger.error("Invalid signal direction: %s", signal.direction)
+            return None
+
+        # Prepare the request
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": symbol,
+            "volume": float(lot_size),
+            "type": order_type,
+            "price": price,
+            "sl": float(signal.stop_loss),
+            "tp": float(signal.take_profit),
+            "deviation": 20,
+            "magic": 234000,
+            "comment": "Bot V3",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_IOC,
+        }
+
+        # Send order
+        result = mt5.order_send(request)
+        
+        if result.retcode != mt5.TRADE_RETCODE_DONE:
+            logger.error("Order failed: %s, %s", result.retcode, result.comment)
+            return None
+            
+        logger.info("Order placed successfully. Ticket: %s", result.order)
+        return {
+            "ticket": result.order,
+            "volume": result.volume,
+            "price": result.price
+        }
