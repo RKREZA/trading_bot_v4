@@ -150,6 +150,24 @@ class BacktestEngine:
             "max_loss_streak": self._calc_streak(trades, "SL"),
             "trades": trades,
         }
+
+        # Store all trades in a separate CSV file
+        import csv
+        results_dir = os.path.join(project_root, "backtest_results")
+        os.makedirs(results_dir, exist_ok=True)
+        filename = f"{symbol}_trades_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        filepath = os.path.join(results_dir, filename)
+        
+        if trades:
+            try:
+                with open(filepath, mode='w', newline='') as f:
+                    writer = csv.DictWriter(f, fieldnames=trades[0].keys())
+                    writer.writeheader()
+                    writer.writerows(trades)
+                logger.info("Saved %d trades to %s", len(trades), filepath)
+            except Exception as e:
+                logger.error("Failed to save trades to CSV: %s", e)
+
         bt_dashboard.show_results(results)
 
     def _simulate_trade(self, signal: TradeSignal, future_candles: List[dict], entry: float) -> str:

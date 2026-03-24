@@ -84,12 +84,13 @@ class Dashboard:
         return Group(*parts)
 
     def _render_conn(self) -> Panel:
-        mt5 = self.config.get("mt5", {})
         t = Table(show_header=False, box=None, padding=(0, 1), expand=True)
         t.add_column(style=DIM, width=10)
         t.add_column(style=WHITE)
         t.add_row("STATUS", Text("CONNECTED" if self.account_info.get('connected') else "OFFLINE", style=GREEN if self.account_info.get('connected') else RED))
-        t.add_row("SERVER", str(mt5.get('server', '-')))
+        # Safely fall back to '-' if server isn't available yet or config is empty
+        server_name = self.account_info.get('server') or self.config.get('mt5', {}).get('server', '-')
+        t.add_row("SERVER", str(server_name))
         t.add_row("SESSION", Text(self.session, style=ACCENT))
         return Panel(t, title="[bold cyan]CONNECTION[/]", border_style="cyan", box=box.ROUNDED, expand=True, padding=(0, 1))
 
@@ -226,11 +227,22 @@ class BacktestDashboard:
         tt.add_column("DIR", width=5)
         tt.add_column("LOT", justify="right")
         tt.add_column("ENTRY", justify="right")
+        tt.add_column("SL", justify="right", style=RED)
+        tt.add_column("TP", justify="right", style=GREEN)
         tt.add_column("RESULT", justify="center")
         tt.add_column("P/L", justify="right")
-        for t in r.get('trades', [])[-10:]:
+        for t in r.get('trades', [])[-50:]:
             dir_style = GREEN if t['direction'] == 'BUY' else RED
             res_style = GREEN if t['result'] == 'TP' else RED
             pnl_color = GREEN if t['pnl'] >= 0 else RED
-            tt.add_row(t['time'], Text(t['direction'], style=f"bold {dir_style}"), f"{t.get('lot', 0):.2f}", f"{t['entry']:.2f}", Text(t['result'], style=f"bold {res_style}"), Text(f"{'+' if t['pnl'] >= 0 else ''}${t['pnl']:.2f}", style=pnl_color))
+            tt.add_row(
+                t['time'], 
+                Text(t['direction'], style=f"bold {dir_style}"), 
+                f"{t.get('lot', 0):.2f}", 
+                f"{t['entry']:.2f}", 
+                f"{t.get('sl', 0):.2f}", 
+                f"{t.get('tp', 0):.2f}", 
+                Text(t['result'], style=f"bold {res_style}"), 
+                Text(f"{'+' if t['pnl'] >= 0 else ''}${t['pnl']:.2f}", style=pnl_color)
+            )
         self.console.print(Panel(tt, title="[bold yellow]TRADES[/]", border_style="yellow", box=box.ROUNDED, expand=True, padding=(1, 2)))

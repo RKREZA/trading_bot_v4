@@ -239,6 +239,8 @@ def main():
     bot.config["symbol"] = args.symbol
 
     if args.backtest:
+        # Suppress verbose strategy logs during backtest so they don't break the progress bar
+        logging.getLogger("trading_bot.strategy").setLevel(logging.WARNING)
         bot.run_backtest(args.symbol)
     else:
         bot.run_live()

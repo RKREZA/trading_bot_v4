@@ -30,11 +30,8 @@ def setup_logging(log_dir: str = "logs", level: int = logging.INFO) -> logging.L
         datefmt="%Y-%m-%d %H:%M:%S"
     )
     
-    # Console handler
-    console = logging.StreamHandler()
-    console.setLevel(level)
-    console.setFormatter(formatter)
-    root_logger.addHandler(console)
+    # Console handler removed to prevent disrupting the Rich Live dashboard
+    # All Python logging is saved to the file handler below
     
     # Rotating file handler
     log_file = os.path.join(log_dir, "trading_bot.log")
