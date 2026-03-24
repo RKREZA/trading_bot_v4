@@ -67,7 +67,7 @@ class TradingBot:
                 "max_daily_trades": 5,
                 "daily_goal": 100.0,
                 "strategy": {"min_confluence_score": 4, "min_confidence": 50, "cooldown_candles": 3},
-                "backtest": {"initial_balance": 1000, "spread_pips": {"XAUUSDm": 30, "BTCUSDm": 50}},
+                "backtest": {"initial_balance": 1000, "spread_pips": {"XAUUSDm": 30, "BTCUSDm": 50}, "candles": {"H4": 600, "M30": 4800, "M15": 9600}},
                 "symbols_config": {
                     "XAUUSDm": {"point": 0.01, "contract_size": 100, "lot": 0.1},
                     "BTCUSDm": {"point": 0.01, "contract_size": 1, "lot": 0.01},
@@ -207,9 +207,11 @@ class TradingBot:
             return
 
         logger.info("Fetching data for %s...", symbol)
-        h4_candles = self.data_fetcher.fetch_candles(symbol, "H4", 600)     # approx 100 days
-        m30_candles = self.data_fetcher.fetch_candles(symbol, "M30", 4800)  # approx 100 days
-        m15_candles = self.data_fetcher.fetch_candles(symbol, "M15", 9600)  # approx 100 days
+        
+        bt_candles = self.config.get("backtest", {}).get("candles", {"H4": 600, "M30": 4800, "M15": 9600})
+        h4_candles = self.data_fetcher.fetch_candles(symbol, "H4", bt_candles.get("H4", 600))
+        m30_candles = self.data_fetcher.fetch_candles(symbol, "M30", bt_candles.get("M30", 4800))
+        m15_candles = self.data_fetcher.fetch_candles(symbol, "M15", bt_candles.get("M15", 9600))
 
         if not h4_candles or not m30_candles or not m15_candles:
             logger.error("Failed to fetch data for %s", symbol)
