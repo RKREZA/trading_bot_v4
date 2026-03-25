@@ -1,0 +1,8 @@
+deepseek-ai/deepseek-coder-6.7b-instruct
+deepseek-ai/deepseek-r1-distill-llama-8b
+deepseek-ai/deepseek-r1-distill-qwen-14b
+deepseek-ai/deepseek-r1-distill-qwen-32b
+deepseek-ai/deepseek-r1-distill-qwen-7b
+deepseek-ai/deepseek-v3.1
+deepseek-ai/deepseek-v3.1-terminus
+deepseek-ai/deepseek-v3.2

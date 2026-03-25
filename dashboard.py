@@ -48,6 +48,7 @@ class Dashboard:
         self.running = True
         self.h4_trend = "RANGING"
         self.m30_structure = "NEUTRAL"
+        self.ai_context = {}  # Provided by TradingBot
 
     def start(self):
         self._live = Live(self._render(), console=self.console, refresh_per_second=4, screen=True)
@@ -77,9 +78,11 @@ class Dashboard:
         parts.append(self._equal_row(self._render_market(), self._render_perf()))
         # Row 3: Signal
         parts.append(self._render_signal())
-        # Row 4: Analysis + Setup
+        # Row 4: AI Advisor
+        parts.append(self._render_ai())
+        # Row 5: Analysis + Setup
         parts.append(self._equal_row(self._render_analysis(), self._render_setup()))
-        # Row 5: Logs
+        # Row 6: Logs
         parts.append(self._render_logs())
         return Group(*parts)
 
@@ -140,6 +143,36 @@ class Dashboard:
         else:
             content.append(" Scanning for opportunities...", style=DIM)
         return Panel(content, title="[bold cyan]SIGNAL[/]", border_style="cyan", box=box.HEAVY, expand=True, padding=(0, 1))
+
+    def _render_ai(self) -> Panel:
+        sess = self.ai_context.get("session")
+        if not sess:
+            return Panel(Text("  AI analyzing pre-session context...", style=DIM), title="[bold blue]AI ADVISOR[/]", border_style="blue", box=box.ROUNDED, expand=True, padding=(0, 1))
+        
+        t = Table(show_header=False, box=None, padding=(0, 1), expand=True)
+        t.add_column(style=DIM, width=12)
+        t.add_column()
+
+        # Risk & Multiplier
+        risk = sess.get("risk_level", "?")
+        r_color = {"LOW": GREEN, "MEDIUM": YELLOW, "HIGH": RED}.get(risk, WHITE)
+        mult = sess.get("recommended_lot_multiplier", 1.0)
+        t.add_row("SESSION RISK", Text(f"{risk} (Lot ×{mult})", style=r_color))
+
+        # Bias
+        bias = sess.get("overall_bias", "?")
+        b_color = {"BULLISH": GREEN, "BEARISH": RED, "NEUTRAL": DIM}.get(bias, WHITE)
+        t.add_row("MACRO BIAS", Text(f"{bias}", style=b_color))
+
+        # Last signal verdict
+        last = self.ai_context.get("last_signal_review")
+        if last:
+            v_color = GREEN if last.get("verdict") == "VALID" else (RED if last.get("verdict") == "AVOID" else YELLOW)
+            aligned = "✓" if last.get("aligned_with_bias") else "✗"
+            t.add_row("LAST SIGNAL", Text(f"{last.get('direction', '?')} → {last.get('verdict', '?')} [Bias {aligned}]", style=v_color))
+            t.add_row("REASONING", Text(last.get("reasoning", ""), style=DIM))
+
+        return Panel(t, title="[bold blue]AI ADVISOR[/]", border_style="blue", box=box.ROUNDED, expand=True, padding=(0, 1))
 
     def _render_analysis(self) -> Panel:
         t = Table(show_header=False, box=None, padding=(0, 1), expand=True)

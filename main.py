@@ -22,6 +22,7 @@ from core.connection import MT5Connection, PositionManager
 from core.data_fetcher import DataFetcher
 from core.backtest import BacktestEngine
 from core.strategy_engine import StrategyEngine
+from core.ai_advisor import AIAdvisor
 from dashboard import Dashboard, AnalysisLogger
 
 # Load .env file if it exists
@@ -45,12 +46,17 @@ class TradingBot:
     def __init__(self, config_path: str = "config.json"):
         self.config = self._load_config(config_path)
         self.analysis_logger = AnalysisLogger(max_entries=100)
+        self.ai_advisor = AIAdvisor(self.config, self.analysis_logger)
         self.strategy = StrategyEngine(self.config, self.analysis_logger)
         self.dashboard = Dashboard(self.config, self.analysis_logger)
         self.connection = MT5Connection()
         self.connection.config = self.config
         self.position_manager = PositionManager(self.connection)
         self.data_fetcher = DataFetcher()
+
+        # Run AI pre-session context at startup (async)
+        symbol = self.config.get("symbol", "BTCUSDm")
+        self.ai_advisor.run_pre_session(symbol)
 
         self.daily_pnl = 0.0
         self.daily_trades = 0
@@ -103,6 +109,15 @@ class TradingBot:
         """Reset daily counters if a new day has started."""
         today = date.today()
         if today != self.last_reset_day:
+            symbol = self.config.get("symbol", "BTCUSDm")
+            # 1. Run post-session review on yesterday's trades (if any)
+            if self.daily_trades > 0:
+                # We'd ideally pass the actual trade objects here, but for now
+                # we just trigger the end of day review placeholder.
+                # In a full setup, you'd load yesterday's CSV and pass it.
+                pass
+
+            # 2. Reset counters
             self.daily_pnl = 0.0
             self.daily_trades = 0
             self.daily_loss = 0.0
@@ -110,6 +125,9 @@ class TradingBot:
             self.loss_count = 0
             self.last_reset_day = today
             self.analysis_logger.log("Daily stats reset for new day", "INFO")
+
+            # 3. Trigger new daily pre-session AI context (async)
+            self.ai_advisor.run_pre_session(symbol)
 
     def _update_realized_pnl(self):
         """
@@ -150,6 +168,10 @@ class TradingBot:
         if analysis:
             self.dashboard.h4_trend = analysis.get("h4_trend", "RANGING")
             self.dashboard.m30_structure = analysis.get("m30_structure", "NEUTRAL")
+        
+        # Pass AI context to dashboard
+        self.dashboard.ai_context = self.ai_advisor.context
+        
         self.dashboard.session = self._get_session()
         self.dashboard.daily_pnl = self.daily_pnl
         self.dashboard.daily_trades = self.daily_trades
@@ -445,11 +467,22 @@ class TradingBot:
                                 # Calculate lot size based on risk
                                 risk_percent = self.config.get("risk_per_trade", 2.0)
                                 account_balance = self.connection.account_info.get("balance", 0)
-                                lot_size = self.position_manager.calculate_lot_size(symbol, signal, risk_percent, account_balance)
+                                base_lot = self.position_manager.calculate_lot_size(symbol, signal, risk_percent, account_balance)
+
+                                # Apply AI session risk multiplier
+                                ai_multi = self.ai_advisor.lot_multiplier
+                                lot_size = base_lot * ai_multi
 
                                 # Safety cap: never exceed max_lot_size from config
                                 max_lot = self.config.get("max_lot_size", 5.0)
                                 lot_size = min(lot_size, max_lot)
+
+                                # Ensure lot size meets broker minimums
+                                if lot_size < symbol_info.get("lot", 0.01):
+                                    lot_size = symbol_info.get("lot", 0.01)
+
+                                # Async per-signal check (does NOT block execution, just logs/verifies context)
+                                self.ai_advisor.evaluate_signal_async(signal, h4_trend, symbol)
 
                                 if lot_size <= 0:
                                     self.analysis_logger.log(f"Invalid lot size {lot_size}, skipping trade", "ERROR")
