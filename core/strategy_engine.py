@@ -54,9 +54,19 @@ class StrategyEngine:
         self.strategy_config = config.get("strategy", {})
         self.analysis_logger = analysis_logger
 
-        # Settings
+        # Settings (now configurable)
         self.min_confluence_score = self.strategy_config.get("min_confluence_score", 4)
         self.min_confidence = self.strategy_config.get("min_confidence", 50)
+        self.pullback_distance_pct = self.strategy_config.get("pullback_distance_pct", 0.5)
+        self.atr_period = self.strategy_config.get("atr_period", 14)
+        self.swing_lookback = self.strategy_config.get("swing_lookback", 20)
+        self.ema_fast = self.strategy_config.get("ema_fast", 20)
+        self.ema_slow = self.strategy_config.get("ema_slow", 50)
+
+        # Volatility filter
+        self.volatility_filter_enabled = self.strategy_config.get("volatility_filter", {}).get("enabled", False)
+        self.atr_multiplier = self.strategy_config.get("volatility_filter", {}).get("atr_multiplier", 1.5)
+        self.volatility_lookback = self.strategy_config.get("volatility_filter", {}).get("lookback", 100)
 
         # Track breakouts for pullback entries
         self.recent_breakouts = {}
@@ -65,6 +75,10 @@ class StrategyEngine:
         self._log("HYBRID BREAKOUT STRATEGY V3")
         self._log(f"Min Confluence: {self.min_confluence_score}")
         self._log(f"Min Confidence: {self.min_confidence}%")
+        self._log(f"Pullback Dist: {self.pullback_distance_pct}%")
+        self._log(f"ATR Period: {self.atr_period}")
+        self._log(f"Swing Lookback: {self.swing_lookback}")
+        self._log(f"Volatility Filter: {self.volatility_filter_enabled} (ATR > {self.atr_multiplier}× avg)")
         self._log("=" * 50)
 
     def _log(self, message: str, level: str = "INFO"):
@@ -75,7 +89,7 @@ class StrategyEngine:
 
     def analyze(self, symbol: str, h4_candles: List[dict], m30_candles: List[dict],
                 m15_candles: List[dict], current_price: float,
-                session: str = None) -> Optional[TradeSignal]:
+                session: str = None):
         """
         Main Analysis — Breakout + Pullback Strategy.
 
@@ -87,16 +101,20 @@ class StrategyEngine:
             current_price: Current market price
             session: Current trading session (e.g., "LONDON", "NEW_YORK").
                      If provided, signals are only generated during tradeable sessions.
+
+        Returns:
+            Tuple of (TradeSignal or None, h4_trend str) so callers don't
+            need to recompute the trend with a separate EMA pass.
         """
         if len(h4_candles) < 50 or len(m30_candles) < 100 or len(m15_candles) < 100:
-            return None
+            return None, "RANGING"
 
         # ==========================================
         # STEP 0: SESSION FILTER
         # ==========================================
         if session and session not in TRADEABLE_SESSIONS:
             self._log(f"Session: {session} — not tradeable, skipping")
-            return None
+            return None, "RANGING"
 
         # ==========================================
         # STEP 1: H4 TREND (Simple & Clear)
@@ -105,9 +123,23 @@ class StrategyEngine:
 
         if h4_trend == "RANGING" or h4_strength < 60:
             self._log(f"H4: {h4_trend} ({h4_strength}%) — SKIP")
-            return None
+            return None, h4_trend
 
         self._log(f"H4: {h4_trend} ({h4_strength}%)")
+
+        # ==========================================
+        # STEP 1.5: VOLATILITY FILTER  (ATR computed once, reused in STEP 4)
+        # ==========================================
+        atr = self._calculate_atr(m30_candles)  # compute once here
+        if self.volatility_filter_enabled:
+            # Use last N candles for average ATR
+            if len(m30_candles) >= self.volatility_lookback:
+                atr_avg = self._calculate_atr(m30_candles[-self.volatility_lookback:])
+            else:
+                atr_avg = atr
+            if atr > atr_avg * self.atr_multiplier:
+                self._log(f"Volatility too high: ATR {atr:.2f} > {atr_avg:.2f} × {self.atr_multiplier}, skipping")
+                return None, h4_trend
 
         # ==========================================
         # STEP 2: M30 STRUCTURE CONFIRMATION
@@ -116,7 +148,7 @@ class StrategyEngine:
 
         if not m30_structure:
             self._log("M30 structure NOT aligned")
-            return None
+            return None, h4_trend
 
         self._log(f"M30: {m30_trend} — Structure OK")
 
@@ -130,13 +162,12 @@ class StrategyEngine:
 
         if not signal:
             self._log("No valid entry signal")
-            return None
+            return None, h4_trend
 
         # ==========================================
-        # STEP 4: CALCULATE SL/TP (1:2 R:R)
+        # STEP 4: CALCULATE SL/TP (1:2–1:4 R:R)  — reuses atr from STEP 1.5
         # ==========================================
-        atr = self._calculate_atr(m30_candles)
-        signal = self._set_sl_tp(signal, atr, m30_candles)
+        signal = self._set_sl_tp(signal, atr, m30_candles, h4_strength)
 
         # ==========================================
         # STEP 5: FINAL CONFIDENCE CHECK
@@ -150,20 +181,20 @@ class StrategyEngine:
 
         if confluence < self.min_confluence_score:
             self._log(f"Confluence too low: {confluence}")
-            return None
+            return None, h4_trend
 
         confidence = self._calculate_confidence(confluence, h4_strength, signal)
         signal.confidence = confidence
 
         if confidence < self.min_confidence:
             self._log(f"Confidence too low: {confidence}%")
-            return None
+            return None, h4_trend
 
         self._log(f"✓ SIGNAL: {signal.direction} @ {signal.entry_price:.5f}")
         self._log(f"  SL: {signal.stop_loss:.5f} | TP: {signal.take_profit:.5f}")
         self._log(f"  R:R: {signal.rr_ratio:.2f} | Conf: {confidence:.0f}%")
 
-        return signal
+        return signal, h4_trend
 
     # ------------------------------------------------------------------
     # Trend Detection
@@ -179,8 +210,8 @@ class StrategyEngine:
 
         closes = np.array([c["close"] for c in candles])
 
-        ema20 = self._ema(closes, 20)
-        ema50 = self._ema(closes, 50)
+        ema20 = self._ema(closes, self.ema_fast)
+        ema50 = self._ema(closes, self.ema_slow)
 
         price = closes[-1]
 
@@ -267,7 +298,7 @@ class StrategyEngine:
     def _check_breakout_entry(self, m30_candles: List[dict], m15_candles: List[dict],
                                trend: str, current_price: float) -> Optional[TradeSignal]:
         """Detect breakout entry: price closes above/below recent swing level."""
-        lookback = 20
+        lookback = self.swing_lookback
         recent = m30_candles[-lookback:]
 
         if trend == "BULLISH":
@@ -298,14 +329,27 @@ class StrategyEngine:
 
     def _check_pullback_entry(self, m30_candles: List[dict], m15_candles: List[dict],
                                trend: str, current_price: float) -> Optional[TradeSignal]:
-        """Detect pullback entry: price pulls back to EMA20 within 0.5%."""
+        """
+        Detect pullback entry: price has pulled back *to* EMA20 (touched it from
+        the trend side) and is now bouncing in the trend direction.
+
+        The previous logic fired when price was merely *near* EMA (within 0.5%),
+        which on BTC ≈ $350 — essentially any candle. The fix requires that:
+          1. Price came close enough to EMA (within pullback_distance_pct).
+          2. The *prior* M30 candle actually crossed or touched the EMA band.
+          3. M15 shows at least 2 candles confirming the bounce direction.
+        """
         closes = np.array([c["close"] for c in m30_candles])
-        ema20 = self._ema(closes, 20)
+        ema20 = self._ema(closes, self.ema_fast)
         ema_value = ema20[-1]
+        ema_prev = ema20[-2]  # previous bar EMA for touch confirmation
 
         if trend == "BULLISH" and current_price > ema_value:
             distance_pct = (current_price - ema_value) / current_price * 100
-            if distance_pct < 0.5:
+            # Previous candle must have touched or dipped below EMA (the actual pullback touch)
+            prev_low = m30_candles[-2]["low"]
+            touched_ema = prev_low <= ema_prev * 1.001  # within 0.1% below EMA
+            if distance_pct < self.pullback_distance_pct and touched_ema:
                 m15_recent = m15_candles[-3:]
                 bullish_candles = sum(1 for c in m15_recent if c["close"] > c["open"])
                 if bullish_candles >= 2:
@@ -317,7 +361,10 @@ class StrategyEngine:
 
         elif trend == "BEARISH" and current_price < ema_value:
             distance_pct = (ema_value - current_price) / current_price * 100
-            if distance_pct < 0.5:
+            # Previous candle must have touched or risen above EMA
+            prev_high = m30_candles[-2]["high"]
+            touched_ema = prev_high >= ema_prev * 0.999  # within 0.1% above EMA
+            if distance_pct < self.pullback_distance_pct and touched_ema:
                 m15_recent = m15_candles[-3:]
                 bearish_candles = sum(1 for c in m15_recent if c["close"] < c["open"])
                 if bearish_candles >= 2:
@@ -333,23 +380,55 @@ class StrategyEngine:
     # SL/TP and Scoring
     # ------------------------------------------------------------------
 
-    def _set_sl_tp(self, signal: TradeSignal, atr: float, m30_candles: List[dict]) -> TradeSignal:
-        """Set Stop Loss and Take Profit with 1:2 R:R ratio."""
-        recent = m30_candles[-20:]
+    def _set_sl_tp(self, signal: TradeSignal, atr: float, m30_candles: List[dict],
+                   h4_strength: int = 60) -> TradeSignal:
+        """
+        Tight Stop Loss + Dynamic Take Profit (1:2 to 1:4 R:R).
+
+        SL placement:
+          - Uses the last 5 candles for the swing pivot (tight, precise)
+          - Adds a 0.2× ATR buffer beyond the swing to absorb wick noise
+          - Enforces a minimum SL size of 0.5× ATR so spread cannot trigger it
+
+        TP placement (trend-strength based):
+          - h4_strength >= 80  →  1:4 R:R (strong trend, ride it)
+          - h4_strength >= 70  →  1:3 R:R (moderate trend)
+          - default            →  1:2 R:R (minimum acceptable)
+        """
+        # 5-candle tight swing window
+        tight_window = 5
+        recent = m30_candles[-tight_window:]
+
+        # Determine R:R multiplier from trend strength
+        if h4_strength >= 80:
+            rr_multiplier = 4.0
+        elif h4_strength >= 70:
+            rr_multiplier = 3.0
+        else:
+            rr_multiplier = 2.0
+
+        min_sl_distance = atr * 0.5  # floor to avoid spread noise
 
         if signal.direction == "BUY":
             swing_low = min(c["low"] for c in recent)
-            signal.stop_loss = swing_low - atr * 0.5
+            raw_sl = swing_low - atr * 0.2
+            # Enforce minimum distance from entry
+            if signal.entry_price - raw_sl < min_sl_distance:
+                raw_sl = signal.entry_price - min_sl_distance
+            signal.stop_loss = raw_sl
             risk = signal.entry_price - signal.stop_loss
-            signal.take_profit = signal.entry_price + (risk * 2)
+            signal.take_profit = signal.entry_price + (risk * rr_multiplier)
         else:
             swing_high = max(c["high"] for c in recent)
-            signal.stop_loss = swing_high + atr * 0.5
+            raw_sl = swing_high + atr * 0.2
+            if raw_sl - signal.entry_price < min_sl_distance:
+                raw_sl = signal.entry_price + min_sl_distance
+            signal.stop_loss = raw_sl
             risk = signal.stop_loss - signal.entry_price
-            signal.take_profit = signal.entry_price - (risk * 2)
+            signal.take_profit = signal.entry_price - (risk * rr_multiplier)
 
-        actual_risk = abs(signal.entry_price - signal.stop_loss)
-        actual_reward = abs(signal.take_profit - signal.entry_price)
+        actual_risk   = abs(signal.entry_price - signal.stop_loss)
+        actual_reward = abs(signal.take_profit  - signal.entry_price)
         signal.rr_ratio = actual_reward / actual_risk if actual_risk > 0 else 0
 
         return signal
@@ -429,9 +508,10 @@ class StrategyEngine:
             ema[i] = (data[i] - ema[i - 1]) * mult + ema[i - 1]
         return ema
 
-    @staticmethod
-    def _calculate_atr(candles: List[dict], period: int = 14) -> float:
-        """Calculate Average True Range."""
+    def _calculate_atr(self, candles: List[dict], period: int = None) -> float:
+        """Calculate Average True Range using configured period."""
+        if period is None:
+            period = self.atr_period
         if len(candles) < period + 1:
             return 100.0
 
