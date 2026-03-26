@@ -1,0 +1,39 @@
+{
+  "symbol_defaults": {
+    "XAUUSD": {
+      "base_spread": 0.5,
+      "max_slippage": 0.2,
+      "contract_size": 100,
+      "point": 0.01,
+      "digits": 2
+    },
+    "BTCUSD": {
+      "base_spread": 50.0,
+      "max_slippage": 10.0,
+      "contract_size": 1,
+      "point": 0.01,
+      "digits": 2
+    }
+  },
+  "risk": {
+    "initial_balance": 10000,
+    "risk_per_trade_pct": 1.0,
+    "max_daily_loss_pct": 5.0,
+    "max_drawdown_pct": 20.0,
+    "max_daily_trades": 5
+  },
+  "execution": {
+    "delay_ms": 100,
+    "volatility_multiplier": 1.5,
+    "bid_ask_simulation": true
+  },
+  "ai_filter": {
+    "enabled": true,
+    "threshold": 0.75
+  },
+  "validation": {
+    "spread_sensitivity_multiplier": 2.0,
+    "slippage_stress_multiplier": 5.0,
+    "monte_carlo_iterations": 100
+  }
+}

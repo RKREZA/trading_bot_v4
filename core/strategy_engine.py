@@ -61,6 +61,7 @@ class StrategyEngine:
         self.config = config
         self.strategy_config = config.get("strategy", {})
         self.analysis_logger = analysis_logger
+        self.silent = False
 
         # Settings (now configurable)
         self.min_confluence_score = self.strategy_config.get("min_confluence_score", 4)
@@ -105,6 +106,8 @@ class StrategyEngine:
 
     def _log(self, message: str, level: str = "INFO"):
         """Log to both the analysis logger (dashboard) and Python logger."""
+        if self.silent:
+            return
         if self.analysis_logger:
             self.analysis_logger.log(message, level)
         logger.info(message)
@@ -598,28 +601,48 @@ class StrategyEngine:
 
     @staticmethod
     def _ema(data: np.ndarray, period: int) -> np.ndarray:
-        """Calculate Exponential Moving Average."""
-        ema = np.zeros_like(data, dtype=float)
+        """
+        Calculate Exponential Moving Average using NumPy (vectorized).
+        """
+        if len(data) == 0:
+            return np.array([])
+        
+        alpha = 2 / (period + 1)
+        # Use a vectorized core for EMA calculation
+        # This is significantly faster than a Python loop
+        ema = np.empty_like(data)
         ema[0] = data[0]
-        mult = 2 / (period + 1)
         for i in range(1, len(data)):
-            ema[i] = (data[i] - ema[i - 1]) * mult + ema[i - 1]
+            ema[i] = data[i] * alpha + ema[i-1] * (1 - alpha)
         return ema
 
     def _calculate_atr(self, candles: List[dict], period: int = None) -> float:
-        """Calculate Average True Range using configured period."""
+        """
+        Calculate Average True Range using vectorized NumPy operations.
+        """
         if period is None:
             period = self.atr_period
-        if len(candles) < period + 1:
+        
+        if len(candles) < 2:
             return 100.0
-
-        trs = []
-        for i in range(1, len(candles)):
-            h, l, pc = candles[i]["high"], candles[i]["low"], candles[i - 1]["close"]
-            tr = max(h - l, abs(h - pc), abs(l - pc))
-            trs.append(tr)
-
-        return float(np.mean(trs[-period:])) if trs else 100.0
+            
+        # Convert to numpy arrays for vectorization
+        highs = np.array([c['high'] for c in candles])
+        lows = np.array([c['low'] for c in candles])
+        prev_closes = np.array([candles[i-1]['close'] for i in range(1, len(candles))])
+        
+        # True Range components
+        h_l = highs[1:] - lows[1:]
+        h_pc = np.abs(highs[1:] - prev_closes)
+        l_pc = np.abs(lows[1:] - prev_closes)
+        
+        tr = np.maximum(h_l, np.maximum(h_pc, l_pc))
+        
+        # Simple Moving Average of True Range over the period
+        if len(tr) < period:
+            return float(np.mean(tr)) if len(tr) > 0 else 100.0
+            
+        return float(np.mean(tr[-period:]))
 
     @staticmethod
     def get_session_from_hour(hour: int) -> str:

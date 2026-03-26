@@ -14,13 +14,14 @@ from datetime import datetime, timezone, date
 from typing import Optional
 import itertools
 import copy
+import pandas as pd
 
 from dotenv import load_dotenv
 
 from core.logger import setup_logging
 from core.connection import MT5Connection, PositionManager
 from core.data_fetcher import DataFetcher
-from core.backtest import BacktestEngine
+from core.backtester import BacktestEngine
 from core.strategy_engine import StrategyEngine
 from core.ai_advisor import AIAdvisor
 from dashboard import Dashboard, AnalysisLogger
@@ -539,7 +540,27 @@ class TradingBot:
         logger.info("MT5 connection closed — running backtest offline")
 
         engine = BacktestEngine(self.config, self.strategy)
-        engine.run(symbol, h4_candles, m30_candles, m15_candles)
+        results = engine.run(symbol, h4_candles, m30_candles, m15_candles, quiet=True)
+
+        # Save results to CSV
+        if results.get("trades"):
+            os.makedirs("backtest_results", exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"backtest_results/{symbol}_trades_{timestamp}.csv"
+            df = pd.DataFrame(results["trades"])
+            df.to_csv(filename, index=False)
+            logger.info(f"Detailed trade history saved to: {filename}")
+
+        logger.info("-" * 50)
+        logger.info(f"BACKTEST COMPLETE FOR {symbol}")
+        logger.info(f"Initial Balance: {results.get('initial_balance', 0):.2f}")
+        logger.info(f"Final Balance:   {results.get('final_balance', 0):.2f}")
+        logger.info(f"Net Profit:      {results.get('net_profit', 0):.2f} ({((results.get('final_balance', 0)-results.get('initial_balance', 0))/results.get('initial_balance', 1)*100):.1f}%)")
+        logger.info(f"Win Rate:        {results.get('win_rate', 0):.1f}%")
+        logger.info(f"Profit Factor:   {results.get('profit_factor', 0):.2f}")
+        logger.info(f"Sharpe Ratio:    {results.get('sharpe_ratio', 0):.2f}")
+        logger.info(f"Max Drawdown:    {results.get('max_drawdown', 0):.1f}%")
+        logger.info("-" * 50)
 
     # ------------------------------------------------------------------
     # Optimization

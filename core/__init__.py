@@ -2,7 +2,7 @@
 from .strategy_engine import StrategyEngine, TradeSignal
 from .connection import MT5Connection
 from .data_fetcher import DataFetcher
-from .backtest import BacktestEngine
+from .backtester import BacktestEngine
 from .logger import setup_logging
 
 __all__ = [
