@@ -241,6 +241,8 @@ class BacktestDashboard:
         profit = r['final_balance'] - r['initial_balance']
         summary.append(f" Initial: ${r['initial_balance']:,.2f} | Final: ${r['final_balance']:,.2f}\n", style=DIM)
         summary.append(f" Return: {r['return_pct']:.1f}%\n", style=f"bold {GREEN if profit >= 0 else RED}")
+        if r.get('halted'):
+            summary.append(" ⚠ HALTED — Max drawdown breached\n", style=f"bold {RED}")
         self.console.print(Panel(summary, title="[bold green]SUMMARY[/]", border_style="green", box=box.ROUNDED, expand=True, padding=(1, 2)))
 
         stats = Table(box=box.SIMPLE_HEAVY, expand=True)
@@ -248,11 +250,18 @@ class BacktestDashboard:
         stats.add_column("VALUE", style=WHITE, justify="right")
         wr_color = GREEN if r['win_rate'] >= 60 else (YELLOW if r['win_rate'] >= 40 else RED)
         stats.add_row("Total Trades", str(r['total_trades']))
+        stats.add_row("  TP / SL / TSL", f"{r.get('tp_count', 0)} / {r.get('sl_count', 0)} / {r.get('tsl_count', 0)}")
         stats.add_row("Win Rate", Text(f"{r['win_rate']:.1f}%", style=f"bold {wr_color}"))
         stats.add_row("Profit Factor", f"{r['profit_factor']:.2f}")
         stats.add_row("Total Profit", f"${r['total_profit']:,.2f}")
         stats.add_row("Total Loss", f"${r['total_loss']:,.2f}")
-        stats.add_row("Max Drawdown", f"{r['max_drawdown']:.1f}%")
+        stats.add_row("Avg Win", f"${r.get('avg_win', 0):,.2f}")
+        stats.add_row("Avg Loss", f"${r.get('avg_loss', 0):,.2f}")
+        stats.add_row("Max Drawdown", Text(f"{r['max_drawdown']:.1f}%", style=f"bold {RED if r['max_drawdown'] > 20 else YELLOW}"))
+        stats.add_row("Sharpe Ratio", f"{r.get('sharpe_ratio', 0):.2f}")
+        stats.add_row("Win Streak", str(r.get('max_win_streak', 0)))
+        stats.add_row("Loss Streak", str(r.get('max_loss_streak', 0)))
+        stats.add_row("Daily Limit Hits", str(r.get('daily_limit_hits', 0)))
         self.console.print(Panel(stats, title="[bold cyan]STATS[/]", border_style="cyan", box=box.ROUNDED, expand=True, padding=(1, 2)))
 
         tt = Table(box=box.SIMPLE_HEAVY, expand=True)
@@ -260,22 +269,24 @@ class BacktestDashboard:
         tt.add_column("DIR", width=5)
         tt.add_column("LOT", justify="right")
         tt.add_column("ENTRY", justify="right")
+        tt.add_column("EXIT", justify="right")
         tt.add_column("SL", justify="right", style=RED)
         tt.add_column("TP", justify="right", style=GREEN)
         tt.add_column("RESULT", justify="center")
         tt.add_column("P/L", justify="right")
         for t in r.get('trades', [])[-50:]:
             dir_style = GREEN if t['direction'] == 'BUY' else RED
-            res_style = GREEN if t['result'] == 'TP' else RED
+            res_style = GREEN if t['result'] == 'TP' else (YELLOW if t['result'] == 'TSL' else RED)
             pnl_color = GREEN if t['pnl'] >= 0 else RED
             tt.add_row(
-                t['time'], 
-                Text(t['direction'], style=f"bold {dir_style}"), 
-                f"{t.get('lot', 0):.2f}", 
-                f"{t['entry']:.2f}", 
-                f"{t.get('sl', 0):.2f}", 
-                f"{t.get('tp', 0):.2f}", 
-                Text(t['result'], style=f"bold {res_style}"), 
+                t['time'],
+                Text(t['direction'], style=f"bold {dir_style}"),
+                f"{t.get('lot', 0):.3f}",
+                f"{t['entry']:.2f}",
+                f"{t.get('exit', 0):.2f}",
+                f"{t.get('sl', 0):.2f}",
+                f"{t.get('tp', 0):.2f}",
+                Text(t['result'], style=f"bold {res_style}"),
                 Text(f"{'+' if t['pnl'] >= 0 else ''}${t['pnl']:.2f}", style=pnl_color)
             )
         self.console.print(Panel(tt, title="[bold yellow]TRADES[/]", border_style="yellow", box=box.ROUNDED, expand=True, padding=(1, 2)))

@@ -68,6 +68,7 @@ class TradingBot:
         self.last_reset_day = date.today()
         self.peak_equity = 0.0
         self.max_drawdown_reached = 0.0
+        self.last_logged_session: Optional[str] = None
 
     @staticmethod
     def _load_config(config_path: str) -> dict:
@@ -94,16 +95,10 @@ class TradingBot:
     def _get_session() -> str:
         """
         Determine current trading session based on UTC+0 hour conventions.
-        Correctly handles the London/NY overlap (13:00-16:59).
+        Uses StrategyEngine.get_session_from_hour for consistency.
         """
         hour = datetime.now(timezone.utc).hour
-        if 13 <= hour < 17:
-            return "LONDON/NY"
-        if 8 <= hour < 13:   # exclusive of overlap range
-            return "LONDON"
-        if 17 <= hour < 22:
-            return "NEW_YORK"
-        return "CLOSED"  # Asia / off-hours not traded
+        return StrategyEngine.get_session_from_hour(hour)
 
     def _reset_daily_stats(self):
         """Reset daily counters if a new day has started."""
@@ -434,6 +429,9 @@ class TradingBot:
                         # (no longer called here in the 30s strategy loop)
 
                         session = self._get_session()
+                        if session != self.last_logged_session:
+                            self.analysis_logger.log(f"Market Session: {session}", "INFO")
+                            self.last_logged_session = session
                         signal, h4_trend = self.strategy.analyze(
                             symbol, h4_candles, m30_candles, m15_candles,
                             mid_price, session=session,

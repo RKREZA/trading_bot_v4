@@ -1,0 +1,19 @@
+{
+  "session": {
+    "risk_level": "LOW",
+    "overall_bias": "NEUTRAL",
+    "reasoning": "No major scheduled economic releases or central bank speakers today. A stable USD index and lack of fresh catalysts create a quiet, range-bound environment.",
+    "high_impact_times_utc": [],
+    "recommended_lot_multiplier": 0.7,
+    "recommended_sl_buffer_add": 0.15,
+    "key_levels_watch": [
+      "Prior session's high/low",
+      "$2200 psychological level",
+      "Weekly pivot point"
+    ],
+    "date": "2026-03-26",
+    "updated_at": "2026-03-26T05:40:45.773945+00:00"
+  },
+  "last_signal_review": null,
+  "post_session": null
+}
