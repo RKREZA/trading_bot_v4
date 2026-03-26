@@ -90,7 +90,7 @@ class BacktestEngine:
         idx = bisect.bisect_right(times, time_threshold) - 1
         return idx
 
-    def run(self, symbol: str, h4_candles: List[dict], m30_candles: List[dict], m15_candles: List[dict], quiet: bool = False):
+    def run(self, symbol: str, h4_candles: List[dict], m30_candles: List[dict], m5_candles: List[dict], quiet: bool = False):
         if quiet:
             self.strategy.silent = True
         
@@ -102,24 +102,24 @@ class BacktestEngine:
         open_trade: Optional[_OpenTrade] = None
         
         # Pre-calculate log returns and time lists for efficiency
-        m30_closes = np.array([c['close'] for c in m30_candles])
-        m30_returns = np.zeros_like(m30_closes)
-        m30_returns[1:] = np.diff(np.log(m30_closes))
+        m5_closes = np.array([c['close'] for c in m5_candles])
+        m5_returns = np.zeros_like(m5_closes)
+        m5_returns[1:] = np.diff(np.log(m5_closes))
         
         h4_times = [c['time'] for c in h4_candles]
-        m15_times = [c['time'] for c in m15_candles]
+        m30_times = [c['time'] for c in m30_candles]
         
-        pbar = tqdm(range(100, len(m30_candles)), desc=f"Backtesting {symbol}", unit=" candle")
+        pbar = tqdm(range(100, len(m5_candles)), desc=f"Backtesting {symbol}", unit=" candle")
         for i in pbar:
-            current_candle = m30_candles[i]
+            current_candle = m5_candles[i]
             candle_time = current_candle['time']
             
             # ANTI-LOOKAHEAD: Strictly use data available AT or BEFORE current_candle[i]
             
             # 1. RESOLVE OPEN TRADE (BID/ASK + REAL-TIME SL/TP)
             if open_trade:
-                # Volatility at the moment of resolution (using window up to current candle)
-                vol_window = m30_returns[max(0, i-20):i+1]
+                # Volatility at the moment of resolution (using window up to current M5 candle)
+                vol_window = m5_returns[max(0, i-60):i+1] # approx same time as 10 M30 candles
                 volatility = np.std(vol_window) if len(vol_window) > 0 else 0
                 spread_val = self._get_spread(symbol, volatility) * point
                 
@@ -176,15 +176,15 @@ class BacktestEngine:
             # 2. SIGNAL GENERATION (ANTI-LOOKAHEAD)
             if not open_trade:
                 h4_idx = self._find_slice_index(h4_times, candle_time)
-                m15_idx = self._find_slice_index(m15_times, candle_time)
+                m30_idx = self._find_slice_index(m30_times, candle_time)
                 
                 # Slices (inclusive of binary-searched indices)
                 h4_slice = h4_candles[:h4_idx + 1]
-                m30_slice = m30_candles[:i + 1]
-                m15_slice = m15_candles[:m15_idx + 1]
+                m30_slice = m30_candles[:m30_idx + 1]
+                m5_slice = m5_candles[:i + 1]
                 
                 # Volatility for spread/AI features
-                vol_window = m30_returns[max(0, i-20):i+1]
+                vol_window = m5_returns[max(0, i-60):i+1]
                 volatility = np.std(vol_window) if len(vol_window) > 0 else 0
                 spread_val = self._get_spread(symbol, volatility)
                 
@@ -192,7 +192,7 @@ class BacktestEngine:
                 ask = bid + (spread_val * point)
                 
                 # Analyze strategy (only data safe slices)
-                signal, _ = self.strategy.analyze(symbol, h4_slice, m30_slice, m15_slice, bid)
+                signal, _ = self.strategy.analyze(symbol, h4_slice, m30_slice, m5_slice, bid)
                 
                 if signal:
                     # Pass minimal data to AI filter (prevent leakage)

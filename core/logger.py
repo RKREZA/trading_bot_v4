@@ -8,13 +8,9 @@ import os
 from logging.handlers import RotatingFileHandler
 
 
-def setup_logging(log_dir: str = "logs", level: int = logging.INFO) -> logging.Logger:
+def setup_logging(log_dir: str = "logs", level: int = logging.INFO, console: bool = False) -> logging.Logger:
     """
     Configure application-wide logging with console and file handlers.
-    
-    Returns the root logger configured with:
-    - Console handler (INFO level)
-    - Rotating file handler (DEBUG level, 5MB max, 3 backups)
     """
     os.makedirs(log_dir, exist_ok=True)
     
@@ -30,8 +26,12 @@ def setup_logging(log_dir: str = "logs", level: int = logging.INFO) -> logging.L
         datefmt="%Y-%m-%d %H:%M:%S"
     )
     
-    # Console handler removed to prevent disrupting the Rich Live dashboard
-    # All Python logging is saved to the file handler below
+    # Console handler
+    if console:
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(level)
+        console_handler.setFormatter(formatter)
+        root_logger.addHandler(console_handler)
     
     # Rotating file handler
     log_file = os.path.join(log_dir, "trading_bot.log")

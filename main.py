@@ -85,7 +85,7 @@ class TradingBot:
                 "max_daily_trades": 5,
                 "daily_goal": 100.0,
                 "strategy": {"min_confluence_score": 4, "min_confidence": 50, "cooldown_candles": 3},
-                "backtest": {"initial_balance": 1000, "spread_pips": {"XAUUSDm": 30, "BTCUSDm": 50}, "candles": {"H4": 600, "M30": 4800, "M15": 9600}},
+                "backtest": {"initial_balance": 1000, "spread_pips": {"XAUUSDm": 30, "BTCUSDm": 50}, "candles": {"H4": 600, "M30": 4800, "M5": 9600}},
                 "symbols_config": {
                     "XAUUSDm": {"point": 0.01, "contract_size": 100, "lot": 0.1, "deviation": 20},
                     "BTCUSDm": {"point": 0.01, "contract_size": 1, "lot": 0.01, "deviation": 50},
@@ -423,9 +423,9 @@ class TradingBot:
                     # Fetch candles (cached per timeframe)
                     h4_candles = self.data_fetcher.fetch_candles(symbol, "H4", 250)
                     m30_candles = self.data_fetcher.fetch_candles(symbol, "M30", 1540)
-                    m15_candles = self.data_fetcher.fetch_candles(symbol, "M15", 2000)
+                    m5_candles = self.data_fetcher.fetch_candles(symbol, "M5", 2000)
 
-                    if h4_candles and m30_candles and m15_candles:
+                    if h4_candles and m30_candles and m5_candles:
                         # Trailing SL is now handled by the real-time thread
                         # (no longer called here in the 30s strategy loop)
 
@@ -434,7 +434,7 @@ class TradingBot:
                             self.analysis_logger.log(f"Market Session: {session}", "INFO")
                             self.last_logged_session = session
                         signal, h4_trend = self.strategy.analyze(
-                            symbol, h4_candles, m30_candles, m15_candles,
+                            symbol, h4_candles, m30_candles, m5_candles,
                             mid_price, session=session,
                         )
 
@@ -450,7 +450,7 @@ class TradingBot:
 
                         # --- Order Placement Logic ---
                         if signal:
-                            current_candle_time = m15_candles[-1]["time"]
+                            current_candle_time = m5_candles[-1]["time"]
                             last_trade = self.last_trade_time.get(symbol, 0)
 
                             # Prevent duplicate trades on the same candle
@@ -526,12 +526,12 @@ class TradingBot:
 
         logger.info("Fetching data for %s...", symbol)
 
-        bt_candles = self.config.get("backtest", {}).get("candles", {"H4": 600, "M30": 4800, "M15": 9600})
+        bt_candles = self.config.get("backtest", {}).get("candles", {"H4": 600, "M30": 4800, "M5": 9600})
         h4_candles = self.data_fetcher.fetch_candles(symbol, "H4", bt_candles.get("H4", 600))
         m30_candles = self.data_fetcher.fetch_candles(symbol, "M30", bt_candles.get("M30", 4800))
-        m15_candles = self.data_fetcher.fetch_candles(symbol, "M15", bt_candles.get("M15", 9600))
+        m5_candles = self.data_fetcher.fetch_candles(symbol, "M5", bt_candles.get("M5", 9600))
 
-        if not h4_candles or not m30_candles or not m15_candles:
+        if not h4_candles or not m30_candles or not m5_candles:
             logger.error("Failed to fetch data for %s", symbol)
             self.connection.disconnect()
             return
@@ -540,7 +540,7 @@ class TradingBot:
         logger.info("MT5 connection closed — running backtest offline")
 
         engine = BacktestEngine(self.config, self.strategy)
-        results = engine.run(symbol, h4_candles, m30_candles, m15_candles, quiet=True)
+        results = engine.run(symbol, h4_candles, m30_candles, m5_candles, quiet=True)
 
         # Save results to CSV
         if results.get("trades"):
@@ -574,12 +574,12 @@ class TradingBot:
             return
 
         # Fetch data once
-        bt_candles = self.config.get("backtest", {}).get("candles", {"H4": 600, "M30": 4800, "M15": 9600})
+        bt_candles = self.config.get("backtest", {}).get("candles", {"H4": 600, "M30": 4800, "M5": 9600})
         h4_candles = self.data_fetcher.fetch_candles(symbol, "H4", bt_candles.get("H4", 600))
         m30_candles = self.data_fetcher.fetch_candles(symbol, "M30", bt_candles.get("M30", 4800))
-        m15_candles = self.data_fetcher.fetch_candles(symbol, "M15", bt_candles.get("M15", 9600))
+        m5_candles = self.data_fetcher.fetch_candles(symbol, "M5", bt_candles.get("M5", 9600))
 
-        if not h4_candles or not m30_candles or not m15_candles:
+        if not h4_candles or not m30_candles or not m5_candles:
             logger.error("Failed to fetch data for %s", symbol)
             self.connection.disconnect()
             return
@@ -588,8 +588,10 @@ class TradingBot:
 
         # Parameter ranges
         param_grid = {
-            "min_confluence_score": [5, 6, 7],
-            "pullback_distance_pct": [0.3, 0.5, 0.7],
+            "min_confluence_score": [4, 5, 6],
+            "min_confidence": [65, 75, 85],
+            "sl_atr_buffer": [0.4, 0.6, 0.8],
+            "pullback_distance_pct": [0.5, 0.7, 0.9],
             "atr_period": [10, 14, 20],
             "swing_lookback": [15, 20, 25],
         }
@@ -601,29 +603,35 @@ class TradingBot:
             total_combos *= len(v)
 
         combo = 0
-        for min_conf, pullback, atr, swing in itertools.product(
+        for min_conf_scr, min_conf_pct, sl_buf, pullback, atr, swing in itertools.product(
             param_grid["min_confluence_score"],
+            param_grid["min_confidence"],
+            param_grid["sl_atr_buffer"],
             param_grid["pullback_distance_pct"],
             param_grid["atr_period"],
             param_grid["swing_lookback"]
         ):
             combo += 1
-            logger.info(f"Testing combo {combo}/{total_combos}: conf={min_conf}, pullback={pullback}, atr={atr}, swing={swing}")
+            logger.info(f"Testing combo {combo}/{total_combos}: score={min_conf_scr}, conf={min_conf_pct}, sl_buf={sl_buf}, pullback={pullback}, atr={atr}, swing={swing}")
 
             # Create temporary config copy
             tmp_config = copy.deepcopy(self.config)
-            tmp_config["strategy"]["min_confluence_score"] = min_conf
+            tmp_config["strategy"]["min_confluence_score"] = min_conf_scr
+            tmp_config["strategy"]["min_confidence"] = min_conf_pct
+            tmp_config["strategy"]["sl_atr_buffer"] = sl_buf
             tmp_config["strategy"]["pullback_distance_pct"] = pullback
             tmp_config["strategy"]["atr_period"] = atr
             tmp_config["strategy"]["swing_lookback"] = swing
 
             tmp_strategy = StrategyEngine(tmp_config, self.analysis_logger)
             engine = BacktestEngine(tmp_config, tmp_strategy)
-            results = engine.run(symbol, h4_candles, m30_candles, m15_candles, quiet=True)
+            results = engine.run(symbol, h4_candles, m30_candles, m5_candles, quiet=True)
             if results and results.get("sharpe_ratio", 0) > best_sharpe:
                 best_sharpe = results["sharpe_ratio"]
                 best_params = {
-                    "min_confluence_score": min_conf,
+                    "min_confluence_score": min_conf_scr,
+                    "min_confidence": min_conf_pct,
+                    "sl_atr_buffer": sl_buf,
                     "pullback_distance_pct": pullback,
                     "atr_period": atr,
                     "swing_lookback": swing,
@@ -642,14 +650,18 @@ class TradingBot:
 
 def main():
     """CLI entry point."""
-    setup_logging()
-
     parser = argparse.ArgumentParser(description="Trading Bot V3")
-    parser.add_argument("--backtest", action="store_true", help="Run backtest mode")
+    parser.add_argument("--backtest", action="store_true", help="Run backtest")
     parser.add_argument("--optimize", action="store_true", help="Run parameter optimization")
-    parser.add_argument("--symbol", type=str, default="BTCUSDm", help="Trading symbol")
+    parser.add_argument("--full", action="store_true", help="Run full validation suite (backtest + stress tests)")
+    parser.add_argument("--symbol", type=str, help="Symbol to trade/backtest")
     parser.add_argument("--config", type=str, default="config.json", help="Config file path")
     args = parser.parse_args()
+
+    # Initialize logging (console enabled for CLI modes)
+    from core.logger import setup_logging
+    is_cli = any([args.backtest, args.full, args.optimize])
+    setup_logging(console=is_cli)
 
     bot = TradingBot(args.config)
     bot.config["symbol"] = args.symbol

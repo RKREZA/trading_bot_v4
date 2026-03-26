@@ -9,21 +9,21 @@ class ValidationSuite:
         self.config = config
         self.strategy = strategy
 
-    def run_all_tests(self, symbol: str, h4: List, m30: List, m15: List) -> Dict:
+    def run_all_tests(self, symbol: str, h4: List, m30: List, m5: List) -> Dict:
         results = {}
         
         # Original Backtest
         tester = BacktestEngine(self.config, self.strategy)
-        results['base'] = tester.run(symbol, h4, m30, m15)
+        results['base'] = tester.run(symbol, h4, m30, m5)
         
         # 1. Spread Sensitivity Test (2x Spread)
-        results['spread_2x'] = self._spread_sensitivity_test(symbol, h4, m30, m15)
+        results['spread_2x'] = self._spread_sensitivity_test(symbol, h4, m30, m5)
         
         # 2. Slippage Stress Test (Significantly increased slippage)
-        results['slippage_stress'] = self._slippage_stress_test(symbol, h4, m30, m15)
+        results['slippage_stress'] = self._slippage_stress_test(symbol, h4, m30, m5)
         
         # 3. Randomized Entry Test
-        results['random_entry'] = self._random_entry_test(symbol, h4, m30, m15)
+        results['random_entry'] = self._random_entry_test(symbol, h4, m30, m5)
         
         # 4. Data Shuffle Test
         results['data_shuffle'] = self._data_shuffle_test(symbol, h4, m30, m15)

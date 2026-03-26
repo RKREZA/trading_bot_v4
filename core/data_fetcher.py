@@ -64,9 +64,23 @@ class DataFetcher:
 
         # Fetch from MT5
         try:
+            # Resilient fetching: if the full count fails, try to get as much as possible
             rates = mt5.copy_rates_from_pos(symbol, TIMEFRAME_MAP[timeframe], 0, count)
+            
             if rates is None or len(rates) == 0:
-                logger.warning("No data returned for %s %s", symbol, timeframe)
+                # Try to find exactly how much history is available
+                # Binary search or just try 50%
+                logger.warning("%s %s: Full history (%d) not available. Retrying with half...", symbol, timeframe, count)
+                temp_count = count // 2
+                while temp_count >= 100:
+                    rates = mt5.copy_rates_from_pos(symbol, TIMEFRAME_MAP[timeframe], 0, temp_count)
+                    if rates is not None and len(rates) > 0:
+                        logger.info("%s %s: Recovered %d candles (requested %d)", symbol, timeframe, len(rates), count)
+                        break
+                    temp_count //= 2
+            
+            if rates is None or len(rates) == 0:
+                logger.error("No data returned for %s %s after retries", symbol, timeframe)
                 return cached["data"] if cached else []
 
             candles = []

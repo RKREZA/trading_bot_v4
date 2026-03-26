@@ -75,9 +75,11 @@ class StrategyEngine:
         self.sl_atr_buffer = self.strategy_config.get("sl_atr_buffer", 0.4)
 
         # Volatility filter
-        self.volatility_filter_enabled = self.strategy_config.get("volatility_filter", {}).get("enabled", False)
-        self.atr_multiplier = self.strategy_config.get("volatility_filter", {}).get("atr_multiplier", 1.5)
-        self.volatility_lookback = self.strategy_config.get("volatility_filter", {}).get("lookback", 100)
+        self.vol_cfg = self.strategy_config.get("volatility_filter", {})
+        self.vol_enabled = self.vol_cfg.get("enabled", False)
+        self.vol_mult_high = self.vol_cfg.get("atr_multiplier_high", 2.5)
+        self.vol_mult_low = self.vol_cfg.get("atr_multiplier_low", 0.5)
+        self.vol_lookback = self.vol_cfg.get("lookback", 100)
 
         # Build tradeable sessions from config (true/false toggles)
         sessions_cfg = config.get("sessions", {})
@@ -100,7 +102,7 @@ class StrategyEngine:
         self._log(f"Pullback Dist: {self.pullback_distance_pct}%")
         self._log(f"ATR Period: {self.atr_period}")
         self._log(f"Swing Lookback: {self.swing_lookback}")
-        self._log(f"Volatility Filter: {self.volatility_filter_enabled} (ATR > {self.atr_multiplier}× avg)")
+        self._log(f"Volatility Filter: {self.vol_enabled} (High: {self.vol_mult_high}x, Low: {self.vol_mult_low}x)")
         self._log(f"Sessions: {', '.join(sorted(self.tradeable_sessions))}")
         self._log("=" * 50)
 
@@ -113,7 +115,7 @@ class StrategyEngine:
         logger.info(message)
 
     def analyze(self, symbol: str, h4_candles: List[dict], m30_candles: List[dict],
-                m15_candles: List[dict], current_price: float,
+                m5_candles: List[dict], current_price: float,
                 session: str = None):
         """
         Main Analysis — Breakout + Pullback Strategy.
@@ -122,7 +124,7 @@ class StrategyEngine:
             symbol: Trading symbol
             h4_candles: H4 timeframe candle data
             m30_candles: M30 timeframe candle data
-            m15_candles: M15 timeframe candle data
+            m5_candles: M5 timeframe candle data
             current_price: Current market price
             session: Current trading session (e.g., "LONDON", "NEW_YORK").
                      If provided, signals are only generated during tradeable sessions.
@@ -131,7 +133,7 @@ class StrategyEngine:
             Tuple of (TradeSignal or None, h4_trend str) so callers don't
             need to recompute the trend with a separate EMA pass.
         """
-        if len(h4_candles) < 50 or len(m30_candles) < 100 or len(m15_candles) < 100:
+        if len(h4_candles) < 50 or len(m30_candles) < 100 or len(m5_candles) < 100:
             return None, "RANGING"
 
         # ==========================================
@@ -153,18 +155,31 @@ class StrategyEngine:
         self._log(f"H4: {h4_trend} ({h4_strength}%)")
 
         # ==========================================
-        # STEP 1.5: VOLATILITY FILTER  (ATR computed once, reused in STEP 4)
+        # STEP 1.5: VOLATILITY FILTER (Tiered)
         # ==========================================
-        atr = self._calculate_atr(m30_candles)  # compute once here
-        if self.volatility_filter_enabled:
+        atr = self._calculate_atr(m30_candles)
+        if self.vol_enabled:
             # Use last N candles for average ATR
-            if len(m30_candles) >= self.volatility_lookback:
-                atr_avg = self._calculate_atr(m30_candles[-self.volatility_lookback:])
+            if len(m30_candles) >= self.vol_lookback:
+                atr_avg = self._calculate_atr(m30_candles[-self.vol_lookback:])
             else:
                 atr_avg = atr
-            if atr > atr_avg * self.atr_multiplier:
-                self._log(f"Volatility too high: ATR {atr:.2f} > {atr_avg:.2f} × {self.atr_multiplier}, skipping")
+            
+            # 1. TOO HIGH: ATR > ATR_avg * self.vol_mult_high
+            if atr > atr_avg * self.vol_mult_high:
+                self._log(f"Volatility TOO HIGH: ATR {atr:.2f} > {atr_avg:.2f} × {self.vol_mult_high}, skipping")
                 return None, h4_trend
+            
+            # 2. TOO LOW: ATR < ATR_avg * self.vol_mult_low
+            if atr < atr_avg * self.vol_mult_low:
+                self._log(f"Volatility TOO LOW: ATR {atr:.2f} < {atr_avg:.2f} × {self.vol_mult_low}, skipping")
+                return None, h4_trend
+            
+            # 3. NORMAL HIGH / NORMAL LOW continue to trade
+            if atr > atr_avg * 1.5:
+                self._log(f"Volatility Normal High: ATR {atr:.2f}")
+            elif atr < atr_avg * 0.8:
+                self._log(f"Volatility Normal Low: ATR {atr:.2f}")
 
         # ==========================================
         # STEP 2: M30 STRUCTURE CONFIRMATION
@@ -180,8 +195,8 @@ class StrategyEngine:
         # ==========================================
         # STEP 3: FIND ENTRY SIGNAL
         # ==========================================
-        breakout_signal = self._check_breakout_entry(m30_candles, m15_candles, h4_trend, current_price)
-        pullback_signal = self._check_pullback_entry(m30_candles, m15_candles, h4_trend, current_price)
+        breakout_signal = self._check_breakout_entry(m30_candles, m5_candles, h4_trend, current_price)
+        pullback_signal = self._check_pullback_entry(m30_candles, m5_candles, h4_trend, current_price)
 
         signal = breakout_signal or pullback_signal
 
@@ -210,7 +225,7 @@ class StrategyEngine:
         # STEP 5: FINAL CONFIDENCE CHECK
         # ==========================================
         confluence, reasons = self._calculate_confluence(
-            h4_trend, h4_strength, m30_trend, signal, m30_candles, m15_candles
+            h4_trend, h4_strength, m30_trend, signal, m30_candles, m5_candles
         )
 
         signal.confluence_score = confluence
@@ -289,10 +304,10 @@ class StrategyEngine:
         if highs[-1] < highs[-3] and lows[-1] < lows[-3]:
             bear_score += 10
 
-        # Decision
-        if bull_score >= 70 and bull_score > bear_score + 20:
+        # Decision (relaxed to 60 for higher trade frequency)
+        if bull_score >= 60 and bull_score > bear_score + 15:
             return "BULLISH", bull_score
-        if bear_score >= 70 and bear_score > bull_score + 20:
+        if bear_score >= 60 and bear_score > bull_score + 15:
             return "BEARISH", bear_score
 
         return "RANGING", max(bull_score, bear_score)
@@ -329,22 +344,22 @@ class StrategyEngine:
         return "RANGING", False
 
     # ------------------------------------------------------------------
-    # M15 EMA Alignment Helper
+    # M5 EMA Alignment Helper
     # ------------------------------------------------------------------
 
-    def _check_m15_ema_alignment(self, m15_candles: List[dict], trend: str) -> bool:
+    def _check_m5_ema_alignment(self, m5_candles: List[dict], trend: str) -> bool:
         """
-        Check if M15 EMA20 slope aligns with the intended trade direction.
+        Check if M5 EMA20 slope aligns with the intended trade direction.
         Returns True if aligned, False otherwise.
         """
-        if len(m15_candles) < 30:
+        if len(m5_candles) < 30:
             return True  # not enough data, skip filter
 
-        m15_closes = np.array([c["close"] for c in m15_candles])
-        m15_ema = self._ema(m15_closes, self.ema_fast)
+        m5_closes = np.array([c["close"] for c in m5_candles])
+        m5_ema = self._ema(m5_closes, self.ema_fast)
 
-        # Slope over last 5 M15 candles (2.5 hours)
-        slope = (m15_ema[-1] - m15_ema[-5]) / m15_ema[-5] * 100 if m15_ema[-5] != 0 else 0
+        # Slope over last 5 M5 candles (25 mins)
+        slope = (m5_ema[-1] - m5_ema[-5]) / m5_ema[-5] * 100 if m5_ema[-5] != 0 else 0
 
         if trend == "BULLISH" and slope <= 0:
             return False
@@ -357,16 +372,16 @@ class StrategyEngine:
     # Entry Detection
     # ------------------------------------------------------------------
 
-    def _check_breakout_entry(self, m30_candles: List[dict], m15_candles: List[dict],
+    def _check_breakout_entry(self, m30_candles: List[dict], m5_candles: List[dict],
                                trend: str, current_price: float) -> Optional[TradeSignal]:
         """Detect breakout entry: price closes above/below recent swing level.
-        Requires M15 EMA20 slope alignment with trade direction."""
+        Requires M5 EMA20 slope alignment with trade direction."""
         lookback = self.swing_lookback
         recent = m30_candles[-lookback:]
 
-        # M15 EMA trend alignment check
-        m15_ema_aligned = self._check_m15_ema_alignment(m15_candles, trend)
-        if not m15_ema_aligned:
+        # M5 EMA trend alignment check
+        m5_ema_aligned = self._check_m5_ema_alignment(m5_candles, trend)
+        if not m5_ema_aligned:
             return None
 
         if trend == "BULLISH":
@@ -374,8 +389,9 @@ class StrategyEngine:
             # Current candle color must be green
             curr_candle_green = m30_candles[-1]["close"] > m30_candles[-1]["open"]
             if current_price > resistance and curr_candle_green:
-                m15_recent = m15_candles[-5:]
-                strong_close = all(c["close"] > resistance for c in m15_recent[-2:])
+                # Current: at least 1 M5 candle strong close
+                m5_recent = m5_candles[-5:]
+                strong_close = m5_recent[-1]["close"] > resistance
                 if strong_close:
                     return TradeSignal(
                         direction="BUY", entry_price=current_price,
@@ -388,8 +404,9 @@ class StrategyEngine:
             # Current candle color must be red
             curr_candle_red = m30_candles[-1]["close"] < m30_candles[-1]["open"]
             if current_price < support and curr_candle_red:
-                m15_recent = m15_candles[-5:]
-                strong_close = all(c["close"] < support for c in m15_recent[-2:])
+                # Current: at least 1 M5 candle strong close
+                m5_recent = m5_candles[-5:]
+                strong_close = m5_recent[-1]["close"] < support
                 if strong_close:
                     return TradeSignal(
                         direction="SELL", entry_price=current_price,
@@ -399,7 +416,7 @@ class StrategyEngine:
 
         return None
 
-    def _check_pullback_entry(self, m30_candles: List[dict], m15_candles: List[dict],
+    def _check_pullback_entry(self, m30_candles: List[dict], m5_candles: List[dict],
                                trend: str, current_price: float) -> Optional[TradeSignal]:
         """
         Detect pullback entry: price has pulled back *to* EMA20 (touched it from
@@ -408,12 +425,12 @@ class StrategyEngine:
         Requires:
           1. Price came close enough to EMA (within pullback_distance_pct).
           2. The *prior* M30 candle actually crossed or touched the EMA band.
-          3. M15 shows at least 2 candles confirming the bounce direction.
-          4. M15 EMA20 slope aligns with trade direction.
+          3. M5 shows at least 2 candles confirming the bounce direction.
+          4. M5 EMA20 slope aligns with trade direction.
         """
-        # M15 EMA trend alignment check
-        m15_ema_aligned = self._check_m15_ema_alignment(m15_candles, trend)
-        if not m15_ema_aligned:
+        # M5 EMA trend alignment check
+        m5_ema_aligned = self._check_m5_ema_alignment(m5_candles, trend)
+        if not m5_ema_aligned:
             return None
 
         closes = np.array([c["close"] for c in m30_candles])
@@ -427,10 +444,10 @@ class StrategyEngine:
             distance_pct = (current_price - ema_value) / current_price * 100
             # Previous candle must have touched or dipped below EMA (the actual pullback touch)
             prev_low = m30_candles[-2]["low"]
-            touched_ema = prev_low <= ema_prev * 1.001  # within 0.1% below EMA
+            touched_ema = prev_low <= ema_prev * 1.002  # within 0.2% below EMA
             if distance_pct < self.pullback_distance_pct and touched_ema and curr_candle_green:
-                m15_recent = m15_candles[-3:]
-                bullish_candles = sum(1 for c in m15_recent if c["close"] > c["open"])
+                m5_recent = m5_candles[-3:]
+                bullish_candles = sum(1 for c in m5_recent if c["close"] > c["open"])
                 if bullish_candles >= 2:
                     return TradeSignal(
                         direction="BUY", entry_price=current_price,
@@ -444,10 +461,10 @@ class StrategyEngine:
             distance_pct = (ema_value - current_price) / current_price * 100
             # Previous candle must have touched or risen above EMA
             prev_high = m30_candles[-2]["high"]
-            touched_ema = prev_high >= ema_prev * 0.999  # within 0.1% above EMA
+            touched_ema = prev_high >= ema_prev * 0.998  # within 0.2% above EMA
             if distance_pct < self.pullback_distance_pct and touched_ema and curr_candle_red:
-                m15_recent = m15_candles[-3:]
-                bearish_candles = sum(1 for c in m15_recent if c["close"] < c["open"])
+                m5_recent = m5_candles[-3:]
+                bearish_candles = sum(1 for c in m5_recent if c["close"] < c["open"])
                 if bearish_candles >= 2:
                     return TradeSignal(
                         direction="SELL", entry_price=current_price,
@@ -518,7 +535,7 @@ class StrategyEngine:
     def _calculate_confluence(self, h4_trend: str, h4_strength: int,
                                m30_trend: str, signal: TradeSignal,
                                m30_candles: List[dict],
-                               m15_candles: List[dict] = None) -> Tuple[int, List[str]]:
+                               m5_candles: List[dict] = None) -> Tuple[int, List[str]]:
         """Calculate confluence score based on multiple factors."""
         score = 0
         reasons = []
@@ -558,15 +575,15 @@ class StrategyEngine:
                 score += 1
                 reasons.append("Momentum")
 
-        # M15 EMA alignment (0-1 points) — NEW
-        if m15_candles and len(m15_candles) >= 30:
-            m15_closes = np.array([c["close"] for c in m15_candles])
-            m15_ema = self._ema(m15_closes, self.ema_fast)
-            m15_slope = (m15_ema[-1] - m15_ema[-5]) / m15_ema[-5] * 100 if m15_ema[-5] != 0 else 0
-            if (signal.direction == "BUY" and m15_slope > 0.05) or \
-               (signal.direction == "SELL" and m15_slope < -0.05):
+        # M5 EMA alignment (0-1 points)
+        if m5_candles and len(m5_candles) >= 30:
+            m5_closes = np.array([c["close"] for c in m5_candles])
+            m5_ema = self._ema(m5_closes, self.ema_fast)
+            m5_slope = (m5_ema[-1] - m5_ema[-5]) / m5_ema[-5] * 100 if m5_ema[-5] != 0 else 0
+            if (signal.direction == "BUY" and m5_slope > 0.05) or \
+               (signal.direction == "SELL" and m5_slope < -0.05):
                 score += 1
-                reasons.append("M15_EMA")
+                reasons.append("M5_EMA")
 
         # Clean candle structure (0-1 points) — NEW
         last_m30 = m30_candles[-1]
