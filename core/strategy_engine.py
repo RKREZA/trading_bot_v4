@@ -116,7 +116,7 @@ class StrategyEngine:
 
     def analyze(self, symbol: str, h4_candles: List[dict], m30_candles: List[dict],
                 m5_candles: List[dict], current_price: float,
-                session: str = None):
+                d1_candles: Optional[List[dict]] = None, session: Optional[str] = None):
         """
         Main Analysis — Breakout + Pullback Strategy.
 
@@ -147,6 +147,15 @@ class StrategyEngine:
         # STEP 1: H4 TREND (Simple & Clear)
         # ==========================================
         h4_trend, h4_strength = self._get_h4_trend(h4_candles)
+
+        # D1 Super-Filter (Optional)
+        d1_trend = "RANGING"
+        if d1_candles:
+            d1_trend, d1_strength = self._get_d1_trend(d1_candles)
+            if self.config.get("strategy", {}).get("use_d1_filter", True):
+                if d1_trend != "RANGING" and d1_trend != h4_trend:
+                    self._log(f"Signal rejected: D1 trend ({d1_trend}) conflicts with H4 trend ({h4_trend})")
+                    return None, h4_trend
 
         if h4_trend == "RANGING" or h4_strength < 60:
             self._log(f"H4: {h4_trend} ({h4_strength}%) — SKIP")
@@ -251,6 +260,32 @@ class StrategyEngine:
     # ------------------------------------------------------------------
     # Trend Detection
     # ------------------------------------------------------------------
+
+    def _get_d1_trend(self, d1_candles: list) -> tuple:
+        """Analyze Daily (D1) trend for long-term bias."""
+        if not d1_candles or len(d1_candles) < 50:
+            return "RANGING", 0
+        
+        closes = np.array([c["close"] for c in d1_candles])
+        
+        # EMA alignment for D1
+        ema_fast = self._ema(closes, self.ema_fast)
+        ema_slow = self._ema(closes, self.ema_slow)
+        
+        ema_aligned_bull = ema_fast[-1] > ema_slow[-1]
+        ema_aligned_bear = ema_fast[-1] < ema_slow[-1]
+        
+        highs = [c["high"] for c in d1_candles[-10:]]
+        lows = [c["low"] for c in d1_candles[-10:]]
+        hh_hl = highs[-1] > highs[-3] and lows[-1] > lows[-3]
+        lh_ll = highs[-1] < highs[-3] and lows[-1] < lows[-3]
+        
+        if ema_aligned_bull and hh_hl:
+            return "BULLISH", 80
+        if ema_aligned_bear and lh_ll:
+            return "BEARISH", 80
+            
+        return "RANGING", 40
 
     def _get_h4_trend(self, candles: List[dict]) -> Tuple[str, int]:
         """

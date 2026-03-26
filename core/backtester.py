@@ -26,7 +26,7 @@ class _OpenTrade:
     __slots__ = (
         "signal", "entry_price", "lot", "sl", "tp",
         "entry_time", "regime", "ai_score", "spread", "slippage",
-        "best_price", "trail_phase"
+        "best_price", "trail_phase", "partial_closed", "tp_partial"
     )
 
     def __init__(self, signal: TradeSignal, entry_price: float, lot: float,
@@ -43,6 +43,14 @@ class _OpenTrade:
         self.slippage = slippage
         self.best_price = entry_price
         self.trail_phase = 0
+        self.partial_closed = False
+        
+        # Calculate partial TP (1:1 RR)
+        risk = abs(entry_price - signal.stop_loss)
+        if signal.direction == "BUY":
+            self.tp_partial = entry_price + risk
+        else:
+            self.tp_partial = entry_price - risk
 
 class BacktestEngine:
     """
@@ -65,7 +73,7 @@ class BacktestEngine:
         return max(base_spread, base_spread * (1 + current_volatility * vol_mult))
 
     def _get_slippage(self, symbol: str) -> float:
-        max_slip = self.config.get("symbol_defaults", {}).get(symbol, {}).get("max_slippage", 0.2)
+        max_slip = self.config.get("symbols_config", {}).get(symbol, {}).get("max_slippage", 0.2)
         return random.uniform(0, max_slip)
 
     def _calc_lot_size(self, balance: float, entry: float, sl: float, point: float, contract_size: float) -> float:
@@ -90,7 +98,7 @@ class BacktestEngine:
         idx = bisect.bisect_right(times, time_threshold) - 1
         return idx
 
-    def run(self, symbol: str, h4_candles: List[dict], m30_candles: List[dict], m5_candles: List[dict], quiet: bool = False):
+    def run(self, symbol: str, h4_candles: List[dict], m30_candles: List[dict], m5_candles: List[dict], d1_candles: List[dict], quiet: bool = False):
         if quiet:
             self.strategy.silent = True
         
@@ -143,7 +151,38 @@ class BacktestEngine:
                     elif ask_l <= open_trade.tp:
                         exit_price, result_type, closed = open_trade.tp, "TP", True
                 
-                # Optional Trailing Stop logic can be added here
+                # Dynamic Trailing Stop (using config settings)
+                ts_cfg = self.config.get("trailing_stop", {})
+                if ts_cfg.get("enabled", True):
+                    risk = abs(open_trade.entry_price - open_trade.signal.stop_loss)
+                    move_to_be_rr = ts_cfg.get("breakeven_at_rr", 1.0)
+                    
+                    if open_trade.signal.direction == "BUY":
+                        dist = bid_h - open_trade.entry_price
+                        if not open_trade.partial_closed and dist >= risk * move_to_be_rr:
+                            open_trade.sl = open_trade.entry_price
+                            open_trade.partial_closed = True # Using this as BE flag
+                            if not quiet: pbar.write(f"[{current_candle['time']}] SL moved to BE (+ spread/slippage)")
+                        
+                        # Phase 2 Trailing (ATR based or step)
+                        trail_activation = ts_cfg.get("trail_phase2_at_rr", 1.5)
+                        if dist >= risk * trail_activation:
+                            # Move SL to half of profit
+                            new_sl = open_trade.entry_price + (dist * 0.5)
+                            if new_sl > open_trade.sl:
+                                open_trade.sl = new_sl
+                    else:
+                        dist = open_trade.entry_price - ask_l
+                        if not open_trade.partial_closed and dist >= risk * move_to_be_rr:
+                            open_trade.sl = open_trade.entry_price
+                            open_trade.partial_closed = True
+                            if not quiet: pbar.write(f"[{current_candle['time']}] SL moved to BE (+ spread/slippage)")
+                            
+                        trail_activation = ts_cfg.get("trail_phase2_at_rr", 1.5)
+                        if dist >= risk * trail_activation:
+                            new_sl = open_trade.entry_price - (dist * 0.5)
+                            if new_sl < open_trade.sl:
+                                open_trade.sl = new_sl
                 
                 if closed:
                     exit_slippage = self._get_slippage(symbol) * point
@@ -192,7 +231,7 @@ class BacktestEngine:
                 ask = bid + (spread_val * point)
                 
                 # Analyze strategy (only data safe slices)
-                signal, _ = self.strategy.analyze(symbol, h4_slice, m30_slice, m5_slice, bid)
+                signal, _ = self.strategy.analyze(symbol, h4_slice, m30_slice, m5_slice, bid, d1_candles=d1_candles)
                 
                 if signal:
                     # Pass minimal data to AI filter (prevent leakage)

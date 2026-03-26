@@ -1,18 +1,18 @@
 {
   "session": {
-    "risk_level": "LOW",
+    "risk_level": "MEDIUM",
     "overall_bias": "NEUTRAL",
-    "reasoning": "No major scheduled economic releases or central bank speakers create a low-volatility environment. Gold is likely consolidating within recent ranges without a clear macro catalyst.",
+    "reasoning": "No top-tier economic data is scheduled for today, reducing headline volatility. However, underlying USD strength and bond yield movements could pressure gold in a tight range.",
     "high_impact_times_utc": [],
-    "recommended_lot_multiplier": 0.5,
-    "recommended_sl_buffer_add": 0.3,
+    "recommended_lot_multiplier": 0.7,
+    "recommended_sl_buffer_add": 0.2,
     "key_levels_watch": [
-      "Previous session's high and low",
-      "Key psychological level at 2200.00",
-      "Recent swing low support"
+      "Prior session's high and low",
+      "Psychological $2200 level",
+      "50-period moving average on 4H chart"
     ],
     "date": "2026-03-26",
-    "updated_at": "2026-03-26T16:58:33.679628+00:00"
+    "updated_at": "2026-03-26T17:10:55.939089+00:00"
   },
   "last_signal_review": null,
   "post_session": null

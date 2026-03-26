@@ -85,7 +85,7 @@ class TradingBot:
                 "max_daily_trades": 5,
                 "daily_goal": 100.0,
                 "strategy": {"min_confluence_score": 4, "min_confidence": 50, "cooldown_candles": 3},
-                "backtest": {"initial_balance": 1000, "spread_pips": {"XAUUSDm": 30, "BTCUSDm": 50}, "candles": {"H4": 600, "M30": 4800, "M5": 9600}},
+                "backtest": {"initial_balance": 1000, "spread_pips": {"XAUUSDm": 30, "BTCUSDm": 50}, "candles": {"D1": 500, "H4": 2000, "M30": 10000, "M5": 9600}},
                 "symbols_config": {
                     "XAUUSDm": {"point": 0.01, "contract_size": 100, "lot": 0.1, "deviation": 20},
                     "BTCUSDm": {"point": 0.01, "contract_size": 1, "lot": 0.01, "deviation": 50},
@@ -423,9 +423,10 @@ class TradingBot:
                     # Fetch candles (cached per timeframe)
                     h4_candles = self.data_fetcher.fetch_candles(symbol, "H4", 250)
                     m30_candles = self.data_fetcher.fetch_candles(symbol, "M30", 1540)
+                    d1_candles = self.data_fetcher.fetch_candles(symbol, "D1", 100) # Added D1
                     m5_candles = self.data_fetcher.fetch_candles(symbol, "M5", 2000)
 
-                    if h4_candles and m30_candles and m5_candles:
+                    if h4_candles and m30_candles and m5_candles and d1_candles:
                         # Trailing SL is now handled by the real-time thread
                         # (no longer called here in the 30s strategy loop)
 
@@ -435,7 +436,7 @@ class TradingBot:
                             self.last_logged_session = session
                         signal, h4_trend = self.strategy.analyze(
                             symbol, h4_candles, m30_candles, m5_candles,
-                            mid_price, session=session,
+                            mid_price, d1_candles=d1_candles, session=session,
                         )
 
                         # h4_trend is now returned directly from analyze() — no extra EMA pass
@@ -529,9 +530,10 @@ class TradingBot:
         bt_candles = self.config.get("backtest", {}).get("candles", {"H4": 600, "M30": 4800, "M5": 9600})
         h4_candles = self.data_fetcher.fetch_candles(symbol, "H4", bt_candles.get("H4", 600))
         m30_candles = self.data_fetcher.fetch_candles(symbol, "M30", bt_candles.get("M30", 4800))
+        d1_candles = self.data_fetcher.fetch_candles(symbol, "D1", bt_candles.get("D1", 500))
         m5_candles = self.data_fetcher.fetch_candles(symbol, "M5", bt_candles.get("M5", 9600))
 
-        if not h4_candles or not m30_candles or not m5_candles:
+        if not h4_candles or not m30_candles or not m5_candles or not d1_candles:
             logger.error("Failed to fetch data for %s", symbol)
             self.connection.disconnect()
             return
@@ -540,7 +542,7 @@ class TradingBot:
         logger.info("MT5 connection closed — running backtest offline")
 
         engine = BacktestEngine(self.config, self.strategy)
-        results = engine.run(symbol, h4_candles, m30_candles, m5_candles, quiet=True)
+        results = engine.run(symbol, h4_candles, m30_candles, m5_candles, d1_candles, quiet=True)
 
         # Save results to CSV
         if results.get("trades"):
@@ -578,8 +580,9 @@ class TradingBot:
         h4_candles = self.data_fetcher.fetch_candles(symbol, "H4", bt_candles.get("H4", 600))
         m30_candles = self.data_fetcher.fetch_candles(symbol, "M30", bt_candles.get("M30", 4800))
         m5_candles = self.data_fetcher.fetch_candles(symbol, "M5", bt_candles.get("M5", 9600))
+        d1_candles = self.data_fetcher.fetch_candles(symbol, "D1", bt_candles.get("D1", 500))
 
-        if not h4_candles or not m30_candles or not m5_candles:
+        if not h4_candles or not m30_candles or not m5_candles or not d1_candles:
             logger.error("Failed to fetch data for %s", symbol)
             self.connection.disconnect()
             return
@@ -625,7 +628,7 @@ class TradingBot:
 
             tmp_strategy = StrategyEngine(tmp_config, self.analysis_logger)
             engine = BacktestEngine(tmp_config, tmp_strategy)
-            results = engine.run(symbol, h4_candles, m30_candles, m5_candles, quiet=True)
+            results = engine.run(symbol, h4_candles, m30_candles, m5_candles, d1_candles, quiet=True)
             if results and results.get("sharpe_ratio", 0) > best_sharpe:
                 best_sharpe = results["sharpe_ratio"]
                 best_params = {
