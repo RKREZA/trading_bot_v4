@@ -114,6 +114,50 @@ class StrategyEngine:
             self.analysis_logger.log(message, level)
         logger.info(message)
 
+    def _calculate_rsi(self, prices: np.ndarray, period: int = 14) -> float:
+        """Standard RSI calculation."""
+        if len(prices) < period + 1:
+            return 50.0  # Default neutral
+        
+        deltas = np.diff(prices)
+        seed = deltas[:period]
+        up = seed[seed >= 0].sum() / period
+        down = -seed[seed < 0].sum() / period
+        
+        if down == 0: return 100.0
+        rs = up / down
+        rsi = 100.0 - (100.0 / (1.0 + rs))
+        
+        # Wilder's smoothing
+        for i in range(period, len(deltas)):
+            delta = deltas[i]
+            if delta > 0:
+                up_val, down_val = delta, 0.0
+            else:
+                up_val, down_val = 0.0, -delta
+            
+            up = (up * (period - 1) + up_val) / period
+            down = (down * (period - 1) + down_val) / period
+            
+            if down == 0: 
+                rsi = 100.0
+            else:
+                rs = up / down
+                rsi = 100.0 - (100.0 / (1.0 + rs))
+        
+        return rsi
+
+    def _calculate_ema(self, prices: np.ndarray, period: int) -> float:
+        """Calculate current EMA val."""
+        if len(prices) < period:
+            return np.mean(prices)
+        
+        multiplier = 2 / (period + 1)
+        ema = np.mean(prices[:period])
+        for i in range(period, len(prices)):
+            ema = (prices[i] - ema) * multiplier + ema
+        return ema
+
     def analyze(self, symbol: str, h4_candles: List[dict], m30_candles: List[dict],
                 m5_candles: List[dict], current_price: float,
                 d1_candles: Optional[List[dict]] = None, session: Optional[str] = None):
@@ -150,10 +194,22 @@ class StrategyEngine:
 
         # D1 Super-Filter (Optional)
         d1_trend = "RANGING"
-        if d1_candles:
-            d1_trend, d1_strength = self._get_d1_trend(d1_candles)
+        
+        # H4 RSI Momentum Filter (Professional Grade)
+        h4_closes = np.array([c["close"] for c in h4_candles])
+        h4_rsi = self._calculate_rsi(h4_closes, 14)
+        if h4_rsi > 65 or h4_rsi < 35:
+            # Over-extended on H4 - higher risk of exhaustion
+            self._log(f"H4 RSI EXHAUSTION: {h4_rsi:.1f} (Threshold: 35-65)", "WARNING")
+            # We don't return None here, but we pass it as a penalty to confluence
+        else:
+            h4_strength += 10 # Reward healthy momentum
+            if d1_candles:
+                d1_trend = self._get_d1_trend(d1_candles)
+            
+            d1_strength = 80 if d1_trend != "NEUTRAL" else 0
             if self.config.get("strategy", {}).get("use_d1_filter", True):
-                if d1_trend != "RANGING" and d1_trend != h4_trend:
+                if d1_trend != "NEUTRAL" and d1_trend != h4_trend:
                     self._log(f"Signal rejected: D1 trend ({d1_trend}) conflicts with H4 trend ({h4_trend})")
                     return None, h4_trend
 
@@ -202,8 +258,18 @@ class StrategyEngine:
         self._log(f"M30: {m30_trend} — Structure OK")
 
         # ==========================================
-        # STEP 3: FIND ENTRY SIGNAL
+        # STEP 3: ENTRY SIGNALS (BREAKOUT + PULLBACK)
         # ==========================================
+        # Mean Reversion Protection: Avoid over-extended trends
+        m30_closes = np.array([c["close"] for c in m30_candles])
+        m30_ema = self._ema(m30_closes, 20)[-1]
+        m30_atr = self._calculate_atr(m30_candles, 20)
+        
+        dist_from_ema = abs(current_price - m30_ema)
+        if dist_from_ema > 1.5 * m30_atr:
+            self._log(f"Mean Reversion Risk: Over-extended session ({dist_from_ema:.2f} > 1.5 ATR)")
+            return None, h4_trend
+
         breakout_signal = self._check_breakout_entry(m30_candles, m5_candles, h4_trend, current_price)
         pullback_signal = self._check_pullback_entry(m30_candles, m5_candles, h4_trend, current_price)
 
@@ -257,35 +323,36 @@ class StrategyEngine:
 
         return signal, h4_trend
 
-    # ------------------------------------------------------------------
-    # Trend Detection
-    # ------------------------------------------------------------------
-
-    def _get_d1_trend(self, d1_candles: list) -> tuple:
-        """Analyze Daily (D1) trend for long-term bias."""
+    def _get_d1_trend(self, d1_candles: List[dict]) -> str:
+        """
+        D1 Trend Detection:
+        1. Base: Fractal Structure (HH/HL)
+        2. Added: EMA(20) vs EMA(50) Alignment
+        """
         if not d1_candles or len(d1_candles) < 50:
-            return "RANGING", 0
+            return "NEUTRAL"
+
+        closes = np.array([float(c['close']) for c in d1_candles])
         
-        closes = np.array([c["close"] for c in d1_candles])
+        # EMA Alignment check
+        ema20 = self._ema(closes, 20)[-1]
+        ema50 = self._ema(closes, 50)[-1]
         
-        # EMA alignment for D1
-        ema_fast = self._ema(closes, self.ema_fast)
-        ema_slow = self._ema(closes, self.ema_slow)
-        
-        ema_aligned_bull = ema_fast[-1] > ema_slow[-1]
-        ema_aligned_bear = ema_fast[-1] < ema_slow[-1]
-        
+        bullish_ema = ema20 > ema50
+        bearish_ema = ema20 < ema50
+
+        # Structure check
         highs = [c["high"] for c in d1_candles[-10:]]
         lows = [c["low"] for c in d1_candles[-10:]]
         hh_hl = highs[-1] > highs[-3] and lows[-1] > lows[-3]
         lh_ll = highs[-1] < highs[-3] and lows[-1] < lows[-3]
+
+        if bullish_ema:
+            return "BULLISH"
+        elif bearish_ema:
+            return "BEARISH"
         
-        if ema_aligned_bull and hh_hl:
-            return "BULLISH", 80
-        if ema_aligned_bear and lh_ll:
-            return "BEARISH", 80
-            
-        return "RANGING", 40
+        return "NEUTRAL"
 
     def _get_h4_trend(self, candles: List[dict]) -> Tuple[str, int]:
         """

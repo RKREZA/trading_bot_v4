@@ -164,10 +164,20 @@ class BacktestEngine:
                             open_trade.partial_closed = True # Using this as BE flag
                             if not quiet: pbar.write(f"[{current_candle['time']}] SL moved to BE (+ spread/slippage)")
                         
-                        # Phase 2 Trailing (ATR based or step)
-                        trail_activation = ts_cfg.get("trail_phase2_at_rr", 1.5)
-                        if dist >= risk * trail_activation:
-                            # Move SL to half of profit
+                        # Phase 2 & 3 Trailing (Professional Grade)
+                        trail_activation2 = ts_cfg.get("trail_phase2_at_rr", 1.5)
+                        trail_activation3 = ts_cfg.get("trail_phase3_at_rr", 2.0)
+                        
+                        if dist >= risk * trail_activation3:
+                            # Use config-based ATR multiplier (default 1.5)
+                            mult = ts_cfg.get("trail_atr_multiplier", 1.5)
+                            atr = self.strategy._calculate_atr(m5_candles, 14)
+                            new_sl = bid_h - (atr * mult)
+                            if new_sl > open_trade.sl:
+                                open_trade.sl = new_sl
+                                open_trade.tp = open_trade.entry_price + (risk * 200)
+                        elif dist >= risk * trail_activation2:
+                            # Step-based trail (Phase 2)
                             new_sl = open_trade.entry_price + (dist * 0.5)
                             if new_sl > open_trade.sl:
                                 open_trade.sl = new_sl
@@ -177,9 +187,19 @@ class BacktestEngine:
                             open_trade.sl = open_trade.entry_price
                             open_trade.partial_closed = True
                             if not quiet: pbar.write(f"[{current_candle['time']}] SL moved to BE (+ spread/slippage)")
-                            
-                        trail_activation = ts_cfg.get("trail_phase2_at_rr", 1.5)
-                        if dist >= risk * trail_activation:
+                        
+                        # Phase 2 & 3 Trailing (SELL)
+                        trail_activation2 = ts_cfg.get("trail_phase2_at_rr", 1.5)
+                        trail_activation3 = ts_cfg.get("trail_phase3_at_rr", 2.0)
+                        
+                        if dist >= risk * trail_activation3:
+                            mult = ts_cfg.get("trail_atr_multiplier", 1.5)
+                            atr = self.strategy._calculate_atr(m5_candles, 14)
+                            new_sl = ask_l + (atr * mult)
+                            if new_sl < open_trade.sl:
+                                open_trade.sl = new_sl
+                                open_trade.tp = open_trade.entry_price - (risk * 200)
+                        elif dist >= risk * trail_activation2:
                             new_sl = open_trade.entry_price - (dist * 0.5)
                             if new_sl < open_trade.sl:
                                 open_trade.sl = new_sl

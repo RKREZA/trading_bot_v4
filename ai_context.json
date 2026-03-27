@@ -2,17 +2,19 @@
   "session": {
     "risk_level": "MEDIUM",
     "overall_bias": "NEUTRAL",
-    "reasoning": "No top-tier economic data is scheduled for today, reducing headline volatility. However, underlying USD strength and bond yield movements could pressure gold in a tight range.",
-    "high_impact_times_utc": [],
+    "reasoning": "No major US data or Fed speakers today, but final Q4 GDP revision provides moderate event risk. Gold lacks a clear directional catalyst with a steady USD and balanced sentiment.",
+    "high_impact_times_utc": [
+      "12:30"
+    ],
     "recommended_lot_multiplier": 0.7,
-    "recommended_sl_buffer_add": 0.2,
+    "recommended_sl_buffer_add": 0.15,
     "key_levels_watch": [
-      "Prior session's high and low",
-      "Psychological $2200 level",
-      "50-period moving average on 4H chart"
+      "Resistance near 2200.00",
+      "Support at 2180.00",
+      "Weekly pivot point"
     ],
     "date": "2026-03-26",
-    "updated_at": "2026-03-26T17:10:55.939089+00:00"
+    "updated_at": "2026-03-26T17:28:32.335913+00:00"
   },
   "last_signal_review": null,
   "post_session": null
