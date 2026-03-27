@@ -1,29 +1,22 @@
 {
   "session": {
-    "risk_level": "MEDIUM",
+    "risk_level": "LOW",
     "overall_bias": "NEUTRAL",
-    "reasoning": "No major US data or Fed speakers today, but final Q4 GDP revision provides moderate event risk. Gold lacks a clear directional catalyst with a steady USD and balanced sentiment.",
+    "reasoning": "No major scheduled US economic releases or central bank speakers are expected on this date. Gold is likely consolidating after recent data, with weekend positioning adding typical noise but no clear directional catalyst.",
     "high_impact_times_utc": [
-      "12:30"
+      "12:30",
+      "13:30"
     ],
-    "recommended_lot_multiplier": 0.7,
+    "recommended_lot_multiplier": 0.6,
     "recommended_sl_buffer_add": 0.15,
     "key_levels_watch": [
-      "Resistance near 2200.00",
-      "Support at 2180.00",
-      "Weekly pivot point"
+      "Prior session's high",
+      "Psychological $2200",
+      "Recent swing low support"
     ],
-    "date": "2026-03-26",
-    "updated_at": "2026-03-26T17:28:32.335913+00:00"
+    "date": "2026-03-27",
+    "updated_at": "2026-03-27T18:01:35.603603+00:00"
   },
-  "last_signal_review": {
-    "verdict": "CAUTION",
-    "confidence_adjustment": -5,
-    "aligned_with_bias": false,
-    "reasoning": "Technicals show a strong bearish setup with good risk/reward, but the neutral macro bias and medium risk environment provide no tailwind for the sell signal.",
-    "direction": "SELL",
-    "entry": 4443.991,
-    "updated_at": "2026-03-27T13:00:45.140575+00:00"
-  },
+  "last_signal_review": null,
   "post_session": null
 }

@@ -34,8 +34,8 @@ class MarketRegime:
         if current_volume < avg_volume * 0.1: # Relaxed from 0.2
             return MarketRegime.LOW_LIQUIDITY
             
-        # Trending if price is far from SMA (Ultra-Aggressive: 0.01%)
-        if abs(current_price - sma20) / sma20 > 0.0001:
+        # Trending if price is far from SMA (Filtered for noise: 0.03%)
+        if abs(current_price - sma20) / sma20 > 0.0003:
             return MarketRegime.TRENDING
             
         return MarketRegime.RANGING

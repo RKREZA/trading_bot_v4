@@ -5,7 +5,7 @@ Refined for XAUUSDm M5 with MTF Alignment, Weighted Confluence (70%+), and High 
 
 import logging
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 
@@ -57,6 +57,15 @@ class StrategyEngine:
         self.vol_mult_high = self.vol_cfg.get("atr_multiplier_high", 4.0)
         self.vol_mult_low = self.vol_cfg.get("atr_multiplier_low", 0.2)
         self.vol_lookback = self.vol_cfg.get("lookback", 200)
+
+        # Choppy Mitigation
+        self.max_daily_losses = self.strategy_config.get("max_daily_losses", 3)
+        self.cooldown_candles = self.strategy_config.get("cooldown_candles", 20)
+        self.last_stop_time: Optional[datetime] = None
+        self.daily_losses = 0
+        self.last_loss_date = None
+        self.m5_trade_counter = 0 # To track cooldown in backtest candles
+        self.last_m5_stop_index = -999
 
         sessions_cfg = config.get("sessions", {})
         self.tradeable_sessions = {
@@ -128,17 +137,43 @@ class StrategyEngine:
         if session and session not in self.tradeable_sessions:
             return None, "RANGING"
 
+        # 0. Choppy Mitigation Guards
+        raw_ts = m5_candles[-1]['time']
+        if isinstance(raw_ts, (int, float)):
+            timestamp = datetime.fromtimestamp(raw_ts, tz=timezone.utc)
+        elif isinstance(raw_ts, str):
+            try:
+                timestamp = datetime.fromisoformat(raw_ts)
+            except ValueError:
+                timestamp = datetime.fromtimestamp(int(raw_ts), tz=timezone.utc)
+        else:
+            timestamp = raw_ts # Assume datetime object
+            
+        current_date = timestamp.date()
+        
+        if self.last_loss_date != current_date:
+            self.daily_losses = 0
+            self.last_loss_date = current_date
+            
+        if self.daily_losses >= self.max_daily_losses:
+            return None, "DAILY_LOSS_LIMIT"
+            
+        self.m5_trade_counter += 1
+        if self.m5_trade_counter - self.last_m5_stop_index < self.cooldown_candles:
+            return None, "COOLDOWN"
+
         # 1. MTF Trend & Momentum
         h4_trend, h4_strength = self._get_h4_trend(h4_candles)
         h1_closes = np.array([c["close"] for c in h1_candles])
+        h1_ema20 = self._calculate_ema(h1_closes, 14)
+        h1_trend = "BULLISH" if h1_closes[-1] > h1_ema20 else "BEARISH"
         h1_rsi = self._calculate_rsi(h1_closes, 14)
         
-        h4_closes = np.array([c["close"] for c in h4_candles])
-        h4_ema20 = self._calculate_ema_series(h4_closes, 10)
-        
-        # High Frequency Relaxation: Minimal strength trigger
-        if h4_trend == "RANGING" or h4_strength < 10: 
-            return None, h4_trend
+        # High Frequency Push: Allow H1 trend if H4 is Ranging
+        effective_trend = h4_trend
+        if h4_trend == "RANGING":
+            effective_trend = h1_trend
+            h4_strength = 20 # Minimum strength floor
 
         # 2. Volatility Check
         atr = self._calculate_atr(m30_candles)
@@ -158,16 +193,16 @@ class StrategyEngine:
 
         signal = None
         if regime == MarketRegime.TRENDING:
-            if h4_trend == "BULLISH":
-                if current_price > h4_ema20[-1] and 30 < h1_rsi < 95:
+            if effective_trend == "BULLISH":
+                if current_price > m30_ema_val and 30 < h1_rsi < 95:
                     signal = self._check_breakout_entry(m30_candles, m5_candles, "BULLISH", current_price)
-            elif h4_trend == "BEARISH":
-                if current_price < h4_ema20[-1] and 5 < h1_rsi < 70:
+            elif effective_trend == "BEARISH":
+                if current_price < m30_ema_val and 5 < h1_rsi < 70:
                     signal = self._check_breakout_entry(m30_candles, m5_candles, "BEARISH", current_price)
         else: # Pullback
-            if h4_trend == "BULLISH":
+            if effective_trend == "BULLISH":
                 signal = self._check_pullback_entry(m30_candles, m5_candles, "BULLISH", current_price)
-            elif h4_trend == "BEARISH":
+            elif effective_trend == "BEARISH":
                 signal = self._check_pullback_entry(m30_candles, m5_candles, "BEARISH", current_price)
 
         if signal:
@@ -208,15 +243,38 @@ class StrategyEngine:
         return "RANGING", 50
 
     def _check_breakout_entry(self, m30_candles: List[dict], m5_candles: List[dict], trend: str, current_price: float) -> Optional[TradeSignal]:
-        recent = m30_candles[-self.swing_lookback:]
+        # 1. Higher Timeframe (M30) Breakout
+        lookback = self.swing_lookback
+        recent_m30 = m30_candles[-lookback:]
         if trend == "BULLISH":
-            resistance = max(c["high"] for c in recent[:-1])
-            if current_price > resistance:
-                return TradeSignal("BUY", current_price, 0, 0, rejection_type="BREAKOUT")
+            res_m30 = max(c["high"] for c in recent_m30[:-1])
+            if current_price > res_m30:
+                return TradeSignal("BUY", current_price, 0, 0, reasons=["M30 Breakout"])
         else:
-            support = min(c["low"] for c in recent[:-1])
-            if current_price < support:
-                return TradeSignal("SELL", current_price, 0, 0, rejection_type="BREAKOUT")
+            sup_m30 = min(c["low"] for c in recent_m30[:-1])
+            if current_price < sup_m30:
+                return TradeSignal("SELL", current_price, 0, 0, reasons=["M30 Breakout"])
+                
+        # 2. Lower Timeframe (M5) Breakout (Hyper Frequency)
+        m5_lookback = 3 # Aggressive M5 breakout
+        recent_m5 = m5_candles[-m5_lookback:]
+        if trend == "BULLISH":
+            res_m5 = max(c["high"] for c in recent_m5[:-1])
+            if current_price > res_m5:
+                # Add re-entry logic: candle must be above M5 EMA
+                m5_closes = np.array([c["close"] for c in m5_candles])
+                m5_ema = self._calculate_ema(m5_closes, 10)
+                if current_price > m5_ema:
+                    return TradeSignal("BUY", current_price, 0, 0, reasons=["M5 Breakout"])
+        else:
+            sup_m5 = min(c["low"] for c in recent_m5[:-1])
+            if current_price < sup_m5:
+                # Add re-entry logic: candle must be below M5 EMA
+                m5_closes = np.array([c["close"] for c in m5_candles])
+                m5_ema = self._calculate_ema(m5_closes, 10)
+                if current_price < m5_ema:
+                    return TradeSignal("SELL", current_price, 0, 0, reasons=["M5 Breakout"])
+                
         return None
 
     def _check_pullback_entry(self, m30_candles: List[dict], m5_candles: List[dict], trend: str, current_price: float) -> Optional[TradeSignal]:
@@ -276,3 +334,10 @@ class StrategyEngine:
         conf_bonus = confluence * 5.0
         strength_bonus = (h4_strength / 100) * 10
         return min(95.0, base + conf_bonus + strength_bonus)
+
+    def report_trade_result(self, result: str, timestamp: datetime):
+        """Called by bot/backtester to report trade exit results."""
+        if result == "SL":
+            self.daily_losses += 1
+            self.last_m5_stop_index = self.m5_trade_counter
+            self.last_stop_time = timestamp

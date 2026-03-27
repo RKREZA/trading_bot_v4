@@ -580,11 +580,12 @@ class TradingBot:
         # Fetch data once
         bt_candles = self.config.get("backtest", {}).get("candles", {"H4": 600, "M30": 4800, "M5": 9600})
         h4_candles = self.data_fetcher.fetch_candles(symbol, "H4", bt_candles.get("H4", 600))
+        h1_candles = self.data_fetcher.fetch_candles(symbol, "H1", bt_candles.get("H1", 2400))
         m30_candles = self.data_fetcher.fetch_candles(symbol, "M30", bt_candles.get("M30", 4800))
         m5_candles = self.data_fetcher.fetch_candles(symbol, "M5", bt_candles.get("M5", 9600))
         d1_candles = self.data_fetcher.fetch_candles(symbol, "D1", bt_candles.get("D1", 500))
 
-        if not h4_candles or not m30_candles or not m5_candles or not d1_candles:
+        if not h4_candles or not h1_candles or not m30_candles or not m5_candles or not d1_candles:
             logger.error("Failed to fetch data for %s", symbol)
             self.connection.disconnect()
             return
@@ -630,7 +631,7 @@ class TradingBot:
 
             tmp_strategy = StrategyEngine(tmp_config, self.analysis_logger)
             engine = BacktestEngine(tmp_config, tmp_strategy)
-            results = engine.run(symbol, h4_candles, m30_candles, m5_candles, d1_candles, quiet=True)
+            results = engine.run(symbol, h4_candles, h1_candles, m30_candles, m5_candles, d1_candles, quiet=True)
             if results and results.get("sharpe_ratio", 0) > best_sharpe:
                 best_sharpe = results["sharpe_ratio"]
                 best_params = {
