@@ -422,11 +422,12 @@ class TradingBot:
 
                     # Fetch candles (cached per timeframe)
                     h4_candles = self.data_fetcher.fetch_candles(symbol, "H4", 250)
+                    h1_candles = self.data_fetcher.fetch_candles(symbol, "H1", 600) # Added H1 for MTF
                     m30_candles = self.data_fetcher.fetch_candles(symbol, "M30", 1540)
                     d1_candles = self.data_fetcher.fetch_candles(symbol, "D1", 100) # Added D1
                     m5_candles = self.data_fetcher.fetch_candles(symbol, "M5", 2000)
 
-                    if h4_candles and m30_candles and m5_candles and d1_candles:
+                    if h4_candles and h1_candles and m30_candles and m5_candles and d1_candles:
                         # Trailing SL is now handled by the real-time thread
                         # (no longer called here in the 30s strategy loop)
 
@@ -435,7 +436,7 @@ class TradingBot:
                             self.analysis_logger.log(f"Market Session: {session}", "INFO")
                             self.last_logged_session = session
                         signal, h4_trend = self.strategy.analyze(
-                            symbol, h4_candles, m30_candles, m5_candles,
+                            symbol, h4_candles, h1_candles, m30_candles, m5_candles,
                             mid_price, d1_candles=d1_candles, session=session,
                         )
 
@@ -529,11 +530,12 @@ class TradingBot:
 
         bt_candles = self.config.get("backtest", {}).get("candles", {"H4": 600, "M30": 4800, "M5": 9600})
         h4_candles = self.data_fetcher.fetch_candles(symbol, "H4", bt_candles.get("H4", 600))
+        h1_candles = self.data_fetcher.fetch_candles(symbol, "H1", bt_candles.get("H1", 2400))
         m30_candles = self.data_fetcher.fetch_candles(symbol, "M30", bt_candles.get("M30", 4800))
         d1_candles = self.data_fetcher.fetch_candles(symbol, "D1", bt_candles.get("D1", 500))
         m5_candles = self.data_fetcher.fetch_candles(symbol, "M5", bt_candles.get("M5", 9600))
 
-        if not h4_candles or not m30_candles or not m5_candles or not d1_candles:
+        if not h1_candles or not h4_candles or not m30_candles or not m5_candles or not d1_candles:
             logger.error("Failed to fetch data for %s", symbol)
             self.connection.disconnect()
             return
@@ -542,7 +544,7 @@ class TradingBot:
         logger.info("MT5 connection closed — running backtest offline")
 
         engine = BacktestEngine(self.config, self.strategy)
-        results = engine.run(symbol, h4_candles, m30_candles, m5_candles, d1_candles, quiet=True)
+        results = engine.run(symbol, h4_candles, h1_candles, m30_candles, m5_candles, d1_candles, quiet=True)
 
         # Save results to CSV
         if results.get("trades"):

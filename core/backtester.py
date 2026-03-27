@@ -60,7 +60,7 @@ class BacktestEngine:
 
     def __init__(self, config: dict, strategy: StrategyEngine):
         self.config = config
-        self.strategy = strategy
+        self.strategy = StrategyEngine(config, silent=False)
         self.ai_filter = AIFilter(threshold=config.get("ai_filter", {}).get("threshold", 0.75))
         self.initial_balance = config.get("backtest", {}).get("initial_balance", 10000)
         self.balance = self.initial_balance
@@ -98,7 +98,7 @@ class BacktestEngine:
         idx = bisect.bisect_right(times, time_threshold) - 1
         return idx
 
-    def run(self, symbol: str, h4_candles: List[dict], m30_candles: List[dict], m5_candles: List[dict], d1_candles: List[dict], quiet: bool = False):
+    def run(self, symbol: str, h4_candles: List[dict], h1_candles: List[dict], m30_candles: List[dict], m5_candles: List[dict], d1_candles: List[dict], quiet: bool = False):
         if quiet:
             self.strategy.silent = True
         
@@ -115,6 +115,7 @@ class BacktestEngine:
         m5_returns[1:] = np.diff(np.log(m5_closes))
         
         h4_times = [c['time'] for c in h4_candles]
+        h1_times = [c['time'] for c in h1_candles]
         m30_times = [c['time'] for c in m30_candles]
         
         pbar = tqdm(range(100, len(m5_candles)), desc=f"Backtesting {symbol}", unit=" candle")
@@ -235,10 +236,12 @@ class BacktestEngine:
             # 2. SIGNAL GENERATION (ANTI-LOOKAHEAD)
             if not open_trade:
                 h4_idx = self._find_slice_index(h4_times, candle_time)
+                h1_idx = self._find_slice_index(h1_times, candle_time)
                 m30_idx = self._find_slice_index(m30_times, candle_time)
                 
                 # Slices (inclusive of binary-searched indices)
                 h4_slice = h4_candles[:h4_idx + 1]
+                h1_slice = h1_candles[:h1_idx + 1]
                 m30_slice = m30_candles[:m30_idx + 1]
                 m5_slice = m5_candles[:i + 1]
                 
@@ -251,7 +254,7 @@ class BacktestEngine:
                 ask = bid + (spread_val * point)
                 
                 # Analyze strategy (only data safe slices)
-                signal, _ = self.strategy.analyze(symbol, h4_slice, m30_slice, m5_slice, bid, d1_candles=d1_candles)
+                signal, _ = self.strategy.analyze(symbol, h4_slice, h1_slice, m30_slice, m5_slice, bid, d1_candles=d1_candles)
                 
                 if signal:
                     # Pass minimal data to AI filter (prevent leakage)

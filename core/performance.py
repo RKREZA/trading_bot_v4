@@ -7,12 +7,15 @@ class PerformanceMetrics:
     def calculate_metrics(trades: List[Dict], initial_balance: float) -> Dict:
         if not trades:
             return {
+                "initial_balance": initial_balance,
+                "final_balance": initial_balance,
                 "net_profit": 0,
                 "profit_factor": 0,
                 "max_drawdown": 0,
                 "sharpe_ratio": 0,
                 "expectancy": 0,
-                "win_rate": 0
+                "win_rate": 0,
+                "total_trades": 0
             }
 
         df = pd.DataFrame(trades)

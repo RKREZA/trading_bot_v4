@@ -16,6 +16,14 @@
     "date": "2026-03-26",
     "updated_at": "2026-03-26T17:28:32.335913+00:00"
   },
-  "last_signal_review": null,
+  "last_signal_review": {
+    "verdict": "CAUTION",
+    "confidence_adjustment": -5,
+    "aligned_with_bias": false,
+    "reasoning": "Technicals show a strong bearish setup with good risk/reward, but the neutral macro bias and medium risk environment provide no tailwind for the sell signal.",
+    "direction": "SELL",
+    "entry": 4443.991,
+    "updated_at": "2026-03-27T13:00:45.140575+00:00"
+  },
   "post_session": null
 }
