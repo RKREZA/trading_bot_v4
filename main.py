@@ -497,15 +497,20 @@ class TradingBot:
                 start_time = time.time()
                 self._reset_daily_stats()
 
-                # Check daily limits
-                max_daily_trades = self.config.get("max_daily_trades", 5)
-                daily_goal = self.config.get("daily_goal", 200.0)
+                # 1. Trade and Profit Limit Check
+                risk_cfg = self.config.get("risk", {})
+                max_daily_trades = risk_cfg.get("max_daily_trades", 5)
+                daily_goal = risk_cfg.get("daily_goal", 200.0)
+                
                 if self.daily_trades >= max_daily_trades:
-                    self.analysis_logger.log("Daily trade limit reached, skipping.", "WARNING")
+                    self.dashboard.status = "DAILY_LIMIT"
+                    self.analysis_logger.log(f"Daily trade limit ({max_daily_trades}) reached. Stopping for today.", "WARNING")
                     time.sleep(60)
                     continue
+                
                 if self.daily_pnl >= daily_goal:
-                    self.analysis_logger.log("Daily profit goal reached, stopping trades.", "WARNING")
+                    self.dashboard.status = "GOAL_REACHED"
+                    self.analysis_logger.log(f"Daily profit goal (${daily_goal}) reached! Stopping for today.", "SUCCESS")
                     time.sleep(60)
                     continue
 
@@ -518,20 +523,6 @@ class TradingBot:
 
                     # Update account info from connection
                     self.dashboard.account_info = self.connection.account_info
-
-                    # Drawdown check
-                    equity = self.connection.account_info.get('equity', 0)
-                    if equity > self.peak_equity:
-                        self.peak_equity = equity
-                    drawdown = (self.peak_equity - equity) / self.peak_equity * 100 if self.peak_equity > 0 else 0
-                    self.max_drawdown_reached = max(self.max_drawdown_reached, drawdown)
-                    max_dd_allowed = self.config.get("risk", {}).get("max_drawdown_percent", 30)
-                    if drawdown > max_dd_allowed:
-                        self.analysis_logger.log(f"Max drawdown exceeded ({drawdown:.1f}% > {max_dd_allowed}%). Stopping trading.", "ERROR")
-                        self.running = False
-                        break
-
-                    # Daily loss limit
                     max_daily_loss_pct = self.config.get("risk", {}).get("max_daily_loss_percent", 10)
                     daily_loss_limit = self.connection.account_info.get('balance', 0) * (max_daily_loss_pct / 100)
                     if self.daily_pnl < -daily_loss_limit:

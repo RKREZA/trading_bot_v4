@@ -7,7 +7,7 @@ class RiskManager:
     def __init__(self, config: dict):
         self.full_config = config
         self.risk_config = config.get("risk", {})
-        self.base_risk_pct = self.risk_config.get("risk_per_trade_pct", 1.0)
+        self.base_risk_pct = self.risk_config.get("risk_per_trade", 1.0)
         self.max_drawdown_limit = self.risk_config.get("max_drawdown_halt_pct", 10.0)
         self.drawdown_scaling_enabled = self.risk_config.get("drawdown_scaling", True)
         self.silent = False
@@ -86,8 +86,8 @@ class RiskManager:
         self.trade_history.append(trade_record)
 
     def check_daily_stop(self, daily_pnl_pct: float) -> bool:
-        """Check if daily loss limit (e.g., -3%) is hit."""
-        limit = self.risk_config.get("daily_loss_limit_pct", 3.0)
+        """Check if daily loss limit (e.g., -5%) is hit."""
+        limit = self.risk_config.get("max_daily_loss_percent", 5.0)
         if daily_pnl_pct <= -limit:
             if not self.silent: logger.warning(f"Daily Loss Limit Hit: {daily_pnl_pct:.2f}%")
             return True

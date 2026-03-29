@@ -97,7 +97,7 @@ class BacktestEngine:
 
     def _calc_lot_size(self, balance: float, entry: float, sl: float, point: float, contract_size: float, risk_pct: Optional[float] = None) -> float:
         if risk_pct is None:
-            risk_pct = self.config.get("risk", {}).get("risk_per_trade_pct", 1.0)
+            risk_pct = self.config.get("risk", {}).get("risk_per_trade", 1.0)
         risk_amount = balance * (risk_pct / 100.0)
         risk_dist_price = abs(entry - sl)
         if risk_dist_price < point:
