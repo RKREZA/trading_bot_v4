@@ -243,7 +243,10 @@ class StrategyEngine:
             effective_trend = h1_trend
             h4_strength = 20 # Minimum strength floor
 
-        # 2. Volatility Check
+        # 2. Regime Integration (must be before volatility check which references it)
+        regime = MarketRegime.classify(m30_candles)
+
+        # 3. Volatility Check
         atr = self._calculate_atr(m30_candles)
         if self.vol_enabled:
             atr_lookback = m30_candles[-self.vol_lookback:] if len(m30_candles) > self.vol_lookback else m30_candles
@@ -251,9 +254,6 @@ class StrategyEngine:
             if atr > atr_avg * (self.vol_mult_high + 2.0) or atr < atr_avg * (self.vol_mult_low - 0.5):
                 return None, h4_trend, str(regime)
 
-        # 3. Regime Integration
-        regime = MarketRegime.classify(m30_candles)
-        
         # Pullback/Breakout logic: Allow both in Trending/Ranging to catch turns.
         # Only hard skip on Low Liquidity (High Vol is lot-scaled).
         if regime == MarketRegime.LOW_LIQUIDITY:

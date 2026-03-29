@@ -210,8 +210,6 @@ class TradingBot:
                 "is_latched": False
             }
             self.dashboard.signal = sig_data
-            
-            self.dashboard.signal = sig_data
         else:
             # Latch check: If a position is open, don't clear the signal
             if self.position_manager.count_open_positions(symbol) > 0:
@@ -299,7 +297,7 @@ class TradingBot:
                 if meta["risk"] > 0 and meta["partial_closed_count"] < 2:
                     profit = (cur - open_price) if pos.type == 0 else (open_price - cur)
                     
-                    pp_cfg = self.config.get("strategy", {}).get("partial_profit_config", {
+                    pp_cfg = self.config.get("strategy_defaults", {}).get("partial_profit_config", {
                         "level1_rr": 1.0, "level1_pct": 0.25,
                         "level2_rr": 2.0, "level2_pct": 0.25
                     })
@@ -653,12 +651,6 @@ class TradingBot:
                                 if self.connection.get_pending_orders(symbol):
                                     self.analysis_logger.log(f"Skipping {signal.direction} – pending order exists for {symbol}", "INFO")
                                     continue
-                            else:
-                                # This happens if we already took (or attempted) a trade on this 5m candle
-                                # We stay silent by default to avoid log spam, but for diagnosis we reveal it
-                                if time.time() % 30 < 2: # Log once every 30s while the signal persists on the same candle
-                                    self.analysis_logger.log(f"Skipping {signal.direction} – already traded/attempted on this candle ({current_candle_time})", "DIM")
-                                continue
 
                                 # Calculate lot size based on risk
                                 account_balance = self.connection.account_info.get("balance", 0)
@@ -719,6 +711,11 @@ class TradingBot:
                                     self.dashboard.signal_history.append(hist_entry)
                                 else:
                                     self.analysis_logger.log(f"Failed to execute trade for {symbol}", "ERROR")
+                            else:
+                                # Already traded/attempted on this candle — skip silently
+                                if time.time() % 30 < 2:
+                                    self.analysis_logger.log(f"Skipping {signal.direction} – already traded/attempted on this candle ({current_candle_time})", "DIM")
+                                continue
 
                 except Exception as e:
                     logger.exception("Error in trading cycle: %s", e)
@@ -845,6 +842,79 @@ class TradingBot:
         logger.info("-" * 50)
 
     # ------------------------------------------------------------------
+    # Full Validation (Backtest + Stress Tests)
+    # ------------------------------------------------------------------
+
+    def run_full_validation(self, symbol: str, from_date: Optional[str] = None, to_date: Optional[str] = None):
+        """Run backtest followed by the full validation suite (stress tests + Monte Carlo)."""
+        from core.validation import ValidationSuite
+
+        if not self.connection.connect():
+            return
+
+        logger.info("Fetching data for full validation of %s...", symbol)
+
+        d_to = datetime.now()
+        if to_date:
+            try:
+                d_to = datetime.strptime(to_date, "%Y-%m-%d")
+            except ValueError:
+                logger.error("Invalid --to date format. Use YYYY-MM-DD")
+                return
+
+        if from_date:
+            try:
+                d_from = datetime.strptime(from_date, "%Y-%m-%d")
+            except ValueError:
+                logger.error("Invalid --from date format. Use YYYY-MM-DD")
+                return
+            h4_candles = self.data_fetcher.fetch_candles_range(symbol, "H4", d_from - timedelta(days=20), d_to)
+            h1_candles = self.data_fetcher.fetch_candles_range(symbol, "H1", d_from - timedelta(days=5), d_to)
+            m30_candles = self.data_fetcher.fetch_candles_range(symbol, "M30", d_from - timedelta(days=2), d_to)
+            d1_candles = self.data_fetcher.fetch_candles_range(symbol, "D1", d_from - timedelta(days=100), d_to)
+            m5_candles = self.data_fetcher.fetch_candles_range(symbol, "M5", d_from, d_to)
+        else:
+            bt_candles = self.config.get("backtest", {}).get("candles", {"H4": 600, "M30": 4800, "M5": 9600})
+            h4_candles = self.data_fetcher.fetch_candles(symbol, "H4", bt_candles.get("H4", 600))
+            h1_candles = self.data_fetcher.fetch_candles(symbol, "H1", bt_candles.get("H1", 2400))
+            m30_candles = self.data_fetcher.fetch_candles(symbol, "M30", bt_candles.get("M30", 4800))
+            d1_candles = self.data_fetcher.fetch_candles(symbol, "D1", bt_candles.get("D1", 500))
+            m5_candles = self.data_fetcher.fetch_candles(symbol, "M5", bt_candles.get("M5", 9600))
+
+        if not h4_candles or not h1_candles or not m30_candles or not m5_candles or not d1_candles:
+            logger.error("Failed to fetch data for %s", symbol)
+            self.connection.disconnect()
+            return
+
+        self.connection.disconnect()
+        logger.info("MT5 connection closed — running full validation offline")
+
+        suite = ValidationSuite(self.config, self.strategy)
+        report = suite.run_all_tests(symbol, h4_candles, h1_candles, m30_candles, m5_candles, d1_candles)
+
+        logger.info("=" * 50)
+        logger.info("FULL VALIDATION REPORT")
+        logger.info("Status: %s", report.get('status', 'UNKNOWN'))
+        if report.get('warnings'):
+            for w in report['warnings']:
+                logger.warning("  ⚠ %s", w)
+        metrics = report.get('metrics', {})
+        base = metrics.get('base', {})
+        logger.info("Base Net Profit:   $%.2f", base.get('net_profit', 0))
+        logger.info("Base Win Rate:     %.1f%%", base.get('win_rate', 0))
+        logger.info("Base Sharpe:       %.2f", base.get('sharpe_ratio', 0))
+        spread_2x = metrics.get('spread_2x', {})
+        logger.info("2x Spread Profit:  $%.2f", spread_2x.get('net_profit', 0))
+        slippage = metrics.get('slippage_stress', {})
+        logger.info("5x Slippage Profit:$%.2f", slippage.get('net_profit', 0))
+        random_e = metrics.get('random_entry', {})
+        logger.info("Random Entry PnL:  $%.2f", random_e.get('net_profit', 0))
+        mc = metrics.get('monte_carlo', {})
+        if mc:
+            logger.info("MC 95th DD:        %.1f%%", mc.get('p95_max_drawdown', 0))
+        logger.info("=" * 50)
+
+    # ------------------------------------------------------------------
     # Optimization
     # ------------------------------------------------------------------
 
@@ -900,12 +970,12 @@ class TradingBot:
 
             # Create temporary config copy
             tmp_config = copy.deepcopy(self.config)
-            tmp_config["strategy"]["min_confluence_score"] = min_conf_scr
-            tmp_config["strategy"]["min_confidence"] = min_conf_pct
-            tmp_config["strategy"]["sl_atr_buffer"] = sl_buf
-            tmp_config["strategy"]["pullback_distance_pct"] = pullback
-            tmp_config["strategy"]["atr_period"] = atr
-            tmp_config["strategy"]["swing_lookback"] = swing
+            tmp_config["strategy_defaults"]["min_confluence_score"] = min_conf_scr
+            tmp_config["strategy_defaults"]["min_confidence"] = min_conf_pct
+            tmp_config["strategy_defaults"]["sl_atr_buffer"] = sl_buf
+            tmp_config["strategy_defaults"]["pullback_distance_pct"] = pullback
+            tmp_config["strategy_defaults"]["atr_period"] = atr
+            tmp_config["strategy_defaults"]["swing_lookback"] = swing
 
             tmp_strategy = StrategyEngine(tmp_config, self.analysis_logger)
             engine = BacktestEngine(tmp_config, tmp_strategy)
@@ -957,6 +1027,9 @@ def main():
         # Suppress verbose strategy logs during optimization
         logging.getLogger("trading_bot.strategy").setLevel(logging.WARNING)
         bot.run_optimization(args.symbol)
+    elif args.full:
+        logging.getLogger("trading_bot.strategy").setLevel(logging.WARNING)
+        bot.run_full_validation(args.symbol, from_date=args.at_from, to_date=args.at_to)
     elif args.backtest:
         # Suppress verbose strategy logs during backtest
         logging.getLogger("trading_bot.strategy").setLevel(logging.WARNING)

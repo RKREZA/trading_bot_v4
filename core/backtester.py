@@ -76,24 +76,29 @@ class BacktestEngine:
         self.risk_manager = RiskManager(config)
         self.notification_manager = NotificationManager(config)
 
-    def _get_spread(self, symbol: str, current_atr: float, point: float) -> float:
-        symbol_cfg = self.config.get("symbol_defaults", {}).get(symbol, {})
-        base_spread = symbol_cfg.get("base_spread", 25) # in points (e.g. 25 for XAUUSDm)
-        # If ATR is high, widen spread. 
-        # Example: if ATR > 100 points, spread = base + (ATR * 0.2)
-        atr_points = current_atr / point if point > 0 else 0
-        dynamic_spread = base_spread
-        if atr_points > 100:
-            dynamic_spread += (atr_points - 100) * 0.2
-        return max(base_spread, dynamic_spread)
+    def _get_spread(self, symbol: str, current_atr: float, avg_atr: float, point: float, session: str = "LONDON") -> float:
+        """Session-aware, volatility-correlated spread model (returns points)."""
+        base_spread = self.config.get("backtest", {}).get("spread_pips", {}).get(symbol, 25)
+        # 1. Session-aware widening (Tokyo/off-hours have wider spreads)
+        session_mult = {"LONDON": 1.0, "LONDON/NY": 1.2, "NEW_YORK": 1.1, "TOKYO": 1.6}.get(session, 1.3)
+        # 2. Volatility scaling: higher ATR -> wider spreads
+        vol_ratio = max(0.5, min(5.0, current_atr / avg_atr)) if avg_atr > 0 else 1.0
+        vol_mult = 1.0 + (vol_ratio - 1.0) * 1.5
+        vol_mult = max(0.8, min(vol_mult, 3.5))
+        # 3. Random jitter +/-15% (real spreads fluctuate tick-to-tick)
+        jitter = random.uniform(0.85, 1.15)
+        return base_spread * session_mult * vol_mult * jitter
 
-    def _get_commission(self, lot: float) -> float:
-        # $7 per lot round-turn for XAUUSDm
-        return lot * 7.0
+    def _get_commission(self, symbol: str, lot: float) -> float:
+        """Per-symbol commission from config (round-turn per lot)."""
+        comm_per_lot = self.config.get("backtest", {}).get("commission_usd", {}).get(symbol, 7.0)
+        return lot * comm_per_lot
 
-    def _get_slippage(self, symbol: str) -> float:
-        # Return random value in points (0.0 to 1.0)
-        return random.uniform(0.0, 1.0)
+    def _get_slippage(self, symbol: str, current_atr: float, avg_atr: float, point: float) -> float:
+        """Correlated slippage: scales with volatility ratio. Returns price units."""
+        base_slip = self.config.get("backtest", {}).get("slippage_points", {}).get(symbol, 1.0)
+        vol_ratio = max(0.5, min(5.0, current_atr / avg_atr)) if avg_atr > 0 else 1.0
+        return base_slip * vol_ratio * random.uniform(0.5, 1.5) * point
 
     def _calc_lot_size(self, balance: float, entry: float, sl: float, point: float, contract_size: float, risk_pct: Optional[float] = None) -> float:
         if risk_pct is None:
@@ -124,7 +129,10 @@ class BacktestEngine:
             self.risk_manager.silent = True
             self.ai_filter.silent = True
         
-        symbol_cfg = self.config.get("symbol_defaults", {}).get(symbol, {})
+        # Reset balance for each run (prevents cross-run contamination)
+        self.balance = self.initial_balance
+        
+        symbol_cfg = self.config.get("symbols_config", {}).get(symbol, {})
         point = symbol_cfg.get("point", 0.01)
         contract_size = symbol_cfg.get("contract_size", 100)
         
@@ -133,12 +141,11 @@ class BacktestEngine:
         utc_offset = self.config.get("strategy_defaults", {}).get("utc_offset_hours", 0)
         open_trade: Optional[_OpenTrade] = None
         
-        print(f"DEBUG: BacktestEngine.run started for {symbol}. M5 candles: {len(m5_candles)}")
+        logger.debug("BacktestEngine.run started for %s. M5 candles: %d", symbol, len(m5_candles))
         if not m5_candles:
             return {"net_profit": 0, "trades": [], "sharpe_ratio": 0, "profit_factor": 0}
 
         m5_closes = np.array([c['close'] for c in m5_candles])
-        # print(f"DEBUG: m5_closes shape: {m5_closes.shape}")
         
         m5_returns = np.zeros_like(m5_closes)
         if len(m5_closes) > 1:
@@ -164,27 +171,76 @@ class BacktestEngine:
         h1_times = [datetime.fromtimestamp(c['time'], tz=timezone.utc) for c in h1_candles]
         m30_times = [datetime.fromtimestamp(c['time'], tz=timezone.utc) for c in m30_candles]
         m5_times = [datetime.fromtimestamp(c['time'], tz=timezone.utc) for c in m5_candles]
-        print("DEBUG: All times extracted.")
+        logger.debug("All times extracted.")
+        
+        # Pre-compute rolling average ATR for realistic spread/slippage models
+        m5_avg_atr = pd.Series(m5_atr_series).rolling(window=20, min_periods=1).mean().values
         
         comm_entry = 0
         tick_idx = 0
         tick_count = len(ticks) if ticks else 0
+        pending_signal = None  # Next-candle entry: stores signal for delayed execution
         
         with tqdm(range(200, len(m5_candles)), desc=f"Backtesting {symbol}", unit=" candle") as pbar:
             for i in pbar:
                 current_candle = m5_candles[i]
                 candle_time = m5_times[i]
                 
+                # --- Gap Risk: Weekend/Holiday Detection ---
+                if open_trade and i > 200:
+                    time_gap = m5_candles[i]['time'] - m5_candles[i-1]['time']
+                    if time_gap > 7200:  # 2+ hour gap (weekend/holiday)
+                        gap_open = current_candle['open']
+                        gap_atr = m5_atr_series[i-1]
+                        gap_slippage = gap_atr * 0.3  # Worse fill across gaps
+                        if open_trade.signal.direction == "BUY":
+                            exit_price = gap_open - gap_slippage
+                        else:
+                            exit_price = gap_open + gap_slippage
+                        pnl = (exit_price - open_trade.entry_price) * (1 if open_trade.signal.direction == "BUY" else -1) * contract_size * open_trade.lot
+                        comm_exit = self._get_commission(symbol, open_trade.lot) * 0.5
+                        final_pnl = pnl - comm_exit
+                        self.strategy.report_trade_result("SL", candle_time, session=open_trade.session)
+                        entry_dt = open_trade.entry_time if isinstance(open_trade.entry_time, datetime) else datetime.fromtimestamp(open_trade.entry_time, tz=timezone.utc)
+                        exit_dt = candle_time if isinstance(candle_time, datetime) else datetime.fromtimestamp(candle_time, tz=timezone.utc)
+                        trade_record = {
+                            "time": entry_dt, "exit_time": exit_dt,
+                            "direction": open_trade.signal.direction,
+                            "entry": round(float(open_trade.entry_price), 5),
+                            "exit": round(float(exit_price), 5),
+                            "lot": open_trade.lot, "pnl": round(float(final_pnl), 2),
+                            "commission": round(float(comm_exit), 2), "result": "GAP",
+                            "regime": open_trade.regime,
+                            "ai_score": round(float(open_trade.ai_score), 4),
+                            "spread": 0, "slippage": round(float(gap_slippage / point), 2),
+                            "session": open_trade.session
+                        }
+                        trades.append(trade_record)
+                        s_name = open_trade.session
+                        if s_name not in session_stats:
+                            session_stats[s_name] = {"count": 0, "wins": 0, "pnl": 0.0}
+                        session_stats[s_name]["count"] += 1
+                        if final_pnl > 0: session_stats[s_name]["wins"] += 1
+                        session_stats[s_name]["pnl"] += final_pnl
+                        self.balance += final_pnl
+                        self.risk_manager.update_history(trade_record)
+                        if not quiet:
+                            pbar.write(f"[{exit_dt}] GAP CLOSE {open_trade.signal.direction} | P&L: ${final_pnl:>8.2f}")
+                        open_trade = None
+                        pending_signal = None
+                        continue
+                
                 if open_trade:
                     if not hasattr(open_trade, 'comm_entry_paid') or not open_trade.comm_entry_paid:
-                        comm_entry = self._get_commission(open_trade.lot) * 0.5
+                        comm_entry = self._get_commission(symbol, open_trade.lot) * 0.5
                         self.balance -= comm_entry
                         open_trade.comm_entry_paid = True
                         open_trade.comm_entry_amount = comm_entry
                     
                     # Fix Look-ahead Bias: use ATR from [i-1] for decisions at start of candle i
                     current_atr = m5_atr_series[i-1]
-                    spread_val = self._get_spread(symbol, current_atr, point) * point
+                    avg_atr_here = m5_avg_atr[i-1]
+                    spread_val = self._get_spread(symbol, current_atr, avg_atr_here, point, open_trade.session) * point
                     
                     bid_h, bid_l, bid_c = current_candle['high'], current_candle['low'], current_candle['close']
                     ask_h, ask_l, ask_c = bid_h + spread_val, bid_l + spread_val, bid_c + spread_val
@@ -243,7 +299,7 @@ class BacktestEngine:
                                 if open_trade.partial_closed_count == 0 and bid_h >= open_trade.tp_partial_1:
                                     close_lot = open_trade.lot * 0.25
                                     pnl = (open_trade.tp_partial_1 - open_trade.entry_price) * contract_size * close_lot
-                                    comm = self._get_commission(close_lot)
+                                    comm = self._get_commission(symbol, close_lot)
                                     self.balance += (pnl - comm)
                                     open_trade.lot -= close_lot
                                     
@@ -258,7 +314,7 @@ class BacktestEngine:
                                 elif open_trade.partial_closed_count == 1 and bid_h >= open_trade.tp_partial_2:
                                     close_lot = open_trade.lot * 0.33 # ~25% of original (1/3 of remaining 0.75)
                                     pnl = (open_trade.tp_partial_2 - open_trade.entry_price) * contract_size * close_lot
-                                    comm = self._get_commission(close_lot)
+                                    comm = self._get_commission(symbol, close_lot)
                                     self.balance += (pnl - comm)
                                     open_trade.lot -= close_lot
                                     open_trade.partial_closed_count = 2
@@ -270,7 +326,7 @@ class BacktestEngine:
                                     close_lot = open_trade.lot * 0.25
                                     pnl = (open_trade.entry_price - open_trade.tp_partial_1) * contract_size * close_lot
                                     # PPT exit commission (remaining 50% for the closed portion)
-                                    comm_ppt = self._get_commission(close_lot) * 0.5
+                                    comm_ppt = self._get_commission(symbol, close_lot) * 0.5
                                     self.balance += (pnl - comm_ppt)
                                     open_trade.lot -= close_lot
                                     
@@ -286,7 +342,7 @@ class BacktestEngine:
                                     close_lot = open_trade.lot * 0.33
                                     pnl = (open_trade.entry_price - open_trade.tp_partial_2) * contract_size * close_lot
                                     # PPT exit commission (remaining 50% for the closed portion)
-                                    comm_ppt = self._get_commission(close_lot) * 0.5
+                                    comm_ppt = self._get_commission(symbol, close_lot) * 0.5
                                     self.balance += (pnl - comm_ppt)
                                     open_trade.lot -= close_lot
                                     open_trade.partial_closed_count = 2
@@ -352,7 +408,7 @@ class BacktestEngine:
                                 ts_slippage = random.uniform(0.0, 0.3) * point
                                 exit_price = exit_price - ts_slippage if open_trade.signal.direction == "BUY" else exit_price + ts_slippage
                         
-                        exit_slippage = self._get_slippage(symbol) * point
+                        exit_slippage = self._get_slippage(symbol, current_atr, avg_atr_here, point)
                         final_exit = exit_price - exit_slippage if open_trade.signal.direction == "BUY" else exit_price + exit_slippage
                         
                         # Notify strategy with session context
@@ -360,12 +416,12 @@ class BacktestEngine:
                         
                         pnl = (final_exit - open_trade.entry_price) * (1 if open_trade.signal.direction == "BUY" else -1) * contract_size * open_trade.lot
                         # Exit commission (remaining 50% of round-turn for the current lot)
-                        comm_exit = self._get_commission(open_trade.lot) * 0.5
+                        comm_exit = self._get_commission(symbol, open_trade.lot) * 0.5
                         
                         final_pnl = pnl - comm_exit 
                         # Total for logging is 50% of original lot (entry) + 50% of exit lot + 50% of PPT lots
                         # Simpler: Total comm paid is trackable if we wanted, but for records we just need this trade's total.
-                        total_comm = comm_exit + (self._get_commission(open_trade.lot) * 0.5) # Approximate
+                        total_comm = comm_exit + (self._get_commission(symbol, open_trade.lot) * 0.5) # Approximate
                         
                         # Ensure datetime objects for pandas/metrics
                         entry_dt = open_trade.entry_time if isinstance(open_trade.entry_time, datetime) else datetime.fromtimestamp(open_trade.entry_time, tz=timezone.utc)
@@ -423,7 +479,46 @@ class BacktestEngine:
                         postfix["tp"] = f"{open_trade.tp:.2f}"
                     pbar.set_postfix(postfix, refresh=False)
     
-                if not open_trade:
+                # --- Execute Pending Signal at this candle's OPEN (next-candle entry) ---
+                if not open_trade and pending_signal is not None:
+                    ps = pending_signal
+                    pending_signal = None
+                    
+                    current_atr = m5_atr_series[i-1]
+                    avg_atr_here = m5_avg_atr[i-1]
+                    spread_val = self._get_spread(symbol, current_atr, avg_atr_here, point, ps["session"])
+                    slippage = self._get_slippage(symbol, current_atr, avg_atr_here, point)
+                    
+                    # Entry at this candle's OPEN (realistic: order fills after signal candle closes)
+                    entry_open = current_candle['open']
+                    ask = entry_open + (spread_val * point)
+                    bid = entry_open
+                    
+                    sig = ps["signal"]
+                    entry = ask + slippage if sig.direction == "BUY" else bid - slippage
+                    
+                    # Recalculate lot with actual entry price and current balance
+                    risk_pct = self.risk_manager.calculate_scaled_risk(self.balance, session=ps["session"])
+                    lot = self._calc_lot_size(self.balance, entry, sig.stop_loss, point, contract_size, risk_pct)
+                    
+                    if sig.rejection_type == "VOL_SCALING":
+                        lot *= 0.5
+                        lot = max(0.01, round(lot, 2))
+                        sig.reasons.append("Vol Scaling (50% Lot)")
+                    
+                    open_trade = _OpenTrade(
+                        sig, entry, lot, candle_time,
+                        ps["regime"], ps["ai_score"], spread_val, slippage,
+                        ps["session"]
+                    )
+                    
+                    self.notification_manager.notify_trade_open(symbol, sig.direction, entry, lot, sig.stop_loss, sig.take_profit)
+                    if not quiet:
+                        t_str = candle_time.strftime('%Y-%m-%d %H:%M') if isinstance(candle_time, datetime) else str(candle_time)
+                        pbar.write(f"[{t_str}] OPENED {sig.direction} @ {entry:.5f} | Lot: {lot} (next-candle entry)")
+
+                # --- Signal Generation (store as pending for next-candle entry) ---
+                if not open_trade and pending_signal is None:
                     h4_idx = self._find_slice_index(h4_times, candle_time)
                     h1_idx = self._find_slice_index(h1_times, candle_time)
                     m30_idx = self._find_slice_index(m30_times, candle_time)
@@ -433,14 +528,15 @@ class BacktestEngine:
                     m30_slice = m30_candles[:m30_idx + 1]
                     m5_slice = m5_candles[:i + 1]
                     
-                    # Fix Look-ahead Bias: use ATR from [i-1] for decisions at start of candle i
                     current_atr = m5_atr_series[i-1]
-                    spread_val = self._get_spread(symbol, current_atr, point)
+                    avg_atr_here = m5_avg_atr[i-1]
+                    spread_val = self._get_spread(symbol, current_atr, avg_atr_here, point,
+                                                  self.strategy.get_session_from_hour(
+                                                      candle_time.hour if hasattr(candle_time, 'hour') else 0, utc_offset))
                     
                     bid = current_candle['close']
                     ask = bid + (spread_val * point)
                     
-                    # Session context for overrides
                     current_hour = candle_time.hour if hasattr(candle_time, 'hour') else 0
                     current_session = self.strategy.get_session_from_hour(current_hour, utc_offset)
                     
@@ -457,38 +553,20 @@ class BacktestEngine:
                         ai_decision, ai_score, ai_sl_buffer = self.ai_filter.filter_signal(ai_features)
                         
                         if ai_decision:
-                            slippage = self._get_slippage(symbol) * point
-                            
-                            # Apply AI SL Buffer
+                            # Apply AI SL Buffer at signal time
                             if ai_sl_buffer > 0:
                                 if signal.direction == "BUY":
                                     signal.stop_loss -= (ai_sl_buffer * current_atr)
                                 else:
                                     signal.stop_loss += (ai_sl_buffer * current_atr)
-    
-                            entry = ask + slippage if signal.direction == "BUY" else bid - slippage
                             
-                            # Dynamic Risk Scaling
-                            risk_pct = self.risk_manager.calculate_scaled_risk(self.balance, session=current_session)
-                            lot = self._calc_lot_size(self.balance, entry, signal.stop_loss, point, contract_size, risk_pct)
-                            
-                            # Volatility Scaling: 50% lot reduction if flag set
-                            if signal.rejection_type == "VOL_SCALING":
-                                lot *= 0.5
-                                lot = max(0.01, round(lot, 2))
-                                signal.reasons.append("Vol Scaling (50% Lot)")
-                            
-                            open_trade = _OpenTrade(
-                                signal, entry, lot, candle_time, 
-                                ai_features['regime'], ai_score, spread_val, slippage,
-                                current_session
-                            )
-                            
-                            # Notify via Telegram
-                            self.notification_manager.notify_trade_open(symbol, signal.direction, entry, lot, signal.stop_loss, signal.take_profit)
-                            if not quiet:
-                                t_str = candle_time.strftime('%Y-%m-%d %H:%M') if isinstance(candle_time, datetime) else str(candle_time)
-                                pbar.write(f"[{t_str}] OPENED {signal.direction} @ {entry:.5f} | Lot: {lot}")
+                            # Store as pending — will execute at NEXT candle's open
+                            pending_signal = {
+                                "signal": signal,
+                                "ai_score": ai_score,
+                                "regime": ai_features["regime"],
+                                "session": current_session,
+                            }
 
         performance = PerformanceMetrics.calculate_metrics(trades, self.initial_balance)
         performance['trades'] = trades

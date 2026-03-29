@@ -1,8 +1,11 @@
 import random
 import copy
+import logging
 from typing import Dict, List
 from core.backtester import BacktestEngine
 from core.strategy_engine import StrategyEngine
+
+logger = logging.getLogger("trading_bot.validation")
 
 class ValidationSuite:
     def __init__(self, config: dict, strategy: StrategyEngine):
@@ -26,7 +29,7 @@ class ValidationSuite:
         results['random_entry'] = self._random_entry_test(symbol, h4, h1, m30, m5, d1)
         
         # 4. Data Shuffle Test
-        results['data_shuffle'] = self._data_shuffle_test(symbol, h4, h1, m30, m5, d1)
+        results['rolling_stability'] = self._rolling_window_stability_test(symbol, h4, h1, m30, m5, d1)
         
         # 5. Monte Carlo Simulation
         if results['base'].get('trades'):
@@ -36,36 +39,67 @@ class ValidationSuite:
 
     def _spread_sensitivity_test(self, symbol, h4, h1, m30, m5, d1):
         cfg = copy.deepcopy(self.config)
-        cfg["symbol_defaults"][symbol]["base_spread"] *= 2.0
+        cfg.setdefault("symbols_config", {}).setdefault(symbol, {})["base_spread"] = \
+            cfg.get("symbols_config", {}).get(symbol, {}).get("base_spread", 25) * 2.0
         tester = BacktestEngine(cfg, self.strategy)
         return tester.run(symbol, h4, h1, m30, m5, d1, quiet=True)
 
     def _slippage_stress_test(self, symbol, h4, h1, m30, m5, d1):
         cfg = copy.deepcopy(self.config)
-        cfg["symbol_defaults"][symbol]["max_slippage"] *= 5.0
+        cfg.setdefault("symbols_config", {}).setdefault(symbol, {})["max_slippage"] = \
+            cfg.get("symbols_config", {}).get(symbol, {}).get("max_slippage", 1.0) * 5.0
         tester = BacktestEngine(cfg, self.strategy)
         return tester.run(symbol, h4, h1, m30, m5, d1, quiet=True)
 
     def _random_entry_test(self, symbol, h4, h1, m30, m5, d1):
         class RandomStrategy(StrategyEngine):
-            def analyze(self, symbol, h4, h1, m30, m5, current_price, d1_candles=None):
+            def analyze(self, symbol, h4, h1, m30, m5, current_price, d1_candles=None, session=None):
                 if random.random() < 0.05: # 5% chance
                     from core.strategy_engine import TradeSignal
                     direction = "BUY" if random.random() > 0.5 else "SELL"
                     # Minimal dummy signal
                     sl = current_price - 10.0 if direction == "BUY" else current_price + 10.0
                     tp = current_price + 20.0 if direction == "BUY" else current_price - 20.0
-                    return TradeSignal(symbol, direction, current_price, sl, tp, confidence=50), {}
-                return None, {}
+                    return TradeSignal(direction, current_price, sl, tp, confidence=50), "RANGING", "NEUTRAL"
+                return None, "RANGING", "NEUTRAL"
         
         tester = BacktestEngine(self.config, RandomStrategy(self.config))
         return tester.run(symbol, h4, h1, m30, m5, d1, quiet=True)
 
-    def _data_shuffle_test(self, symbol, h4, h1, m30, m5, d1):
-        m5_shuffled = copy.deepcopy(m5)
-        random.shuffle(m5_shuffled) # Shuffle the M5 candles to break sequence
-        tester = BacktestEngine(self.config, self.strategy)
-        return tester.run(symbol, h4, h1, m30, m5_shuffled, d1, quiet=True)
+    def _rolling_window_stability_test(self, symbol, h4, h1, m30, m5, d1):
+        """Split data into 3 time windows and test each independently for consistency."""
+        n = len(m5)
+        third = n // 3
+        # Each window gets 200 extra candles of warmup from the previous period
+        windows = [
+            m5[:third + 200],
+            m5[max(0, third - 200):2 * third + 200],
+            m5[max(0, 2 * third - 200):]
+        ]
+        
+        window_results = []
+        for idx, w in enumerate(windows):
+            if len(w) < 400:
+                continue
+            tester = BacktestEngine(self.config, self.strategy)
+            perf = tester.run(symbol, h4, h1, m30, w, d1, quiet=True)
+            window_results.append(perf)
+        
+        if not window_results:
+            return {"window_results": [], "consistency_score": 0, "all_profitable": False}
+        
+        sharpes = [r.get("sharpe_ratio", 0) for r in window_results]
+        pfs = [r.get("profit_factor", 0) for r in window_results]
+        max_sharpe = max(abs(s) for s in sharpes) if sharpes else 1
+        consistency = min(sharpes) / max_sharpe if max_sharpe > 0 else 0
+        
+        return {
+            "window_results": window_results,
+            "consistency_score": round(float(consistency), 4),
+            "all_profitable": all(r.get("net_profit", 0) > 0 for r in window_results),
+            "sharpes": [round(s, 2) for s in sharpes],
+            "profit_factors": [round(p, 2) for p in pfs]
+        }
 
     def _generate_report(self, results: Dict) -> Dict:
         base_perf = results['base']
@@ -119,7 +153,7 @@ class ValidationSuite:
         import pandas as pd
         
         pnl_list = [t['pnl'] for t in trades]
-        initial_balance = 1000 # Dummy or from config if available
+        initial_balance = self.config.get("backtest", {}).get("initial_balance", 1000)
         max_drawdowns = []
 
         for _ in range(iterations):
@@ -142,7 +176,7 @@ class ValidationSuite:
         p95_dd = max_drawdowns[int(iterations * 0.95)]
         
         if p95_dd > 30:
-            print(f"\n[WARNING] Strategy too fragile for live trading! 95% MC Max Drawdown: {p95_dd:.1f}%")
+            logger.warning("Strategy too fragile for live trading! 95%% MC Max Drawdown: %.1f%%", p95_dd)
             
         return {
             "p95_max_drawdown": float(p95_dd),

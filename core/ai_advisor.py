@@ -247,7 +247,6 @@ class AIAdvisor:
                 if content:
                     parts.append(content)
             return "".join(parts).strip()
-            return "".join(parts).strip()
         except Exception as exc:
             if "429" in str(exc) or "Too Many Requests" in str(exc):
                 self._lockout_until = time.time() + 900  # 15 min

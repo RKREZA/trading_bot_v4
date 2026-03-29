@@ -68,11 +68,11 @@ class DataFetcher:
             # Explicitly select symbol to ensure it's in MarketWatch
             if not mt5.symbol_select(symbol, True):
                 error = mt5.last_error()
-                print(f"FATAL ERROR: symbol_select failed for {symbol}: {error}")
+                logger.error("symbol_select failed for %s: %s", symbol, error)
                 return []
             
             # Resilient fetching: if the full count fails, try to get as much as possible
-            print(f"DEBUG: MT5 Fetch: {symbol} {timeframe} ({count} candles)...")
+            logger.debug("MT5 Fetch: %s %s (%d candles)...", symbol, timeframe, count)
             rates = mt5.copy_rates_from_pos(symbol, TIMEFRAME_MAP[timeframe], 0, count)
             
             if rates is None or len(rates) == 0:
@@ -139,7 +139,7 @@ class DataFetcher:
             if not mt5.symbol_select(symbol, True):
                 return []
 
-            print(f"DEBUG: MT5 Range Fetch: {symbol} {timeframe} ({date_from} to {date_to})...")
+            logger.debug("MT5 Range Fetch: %s %s (%s to %s)...", symbol, timeframe, date_from, date_to)
             rates = mt5.copy_rates_range(symbol, TIMEFRAME_MAP[timeframe], date_from, date_to)
             
             if rates is None or len(rates) == 0:
@@ -169,7 +169,7 @@ class DataFetcher:
             if not mt5.symbol_select(symbol, True):
                 return []
 
-            print(f"DEBUG: MT5 Tick Fetch: {symbol} ({date_from} to {date_to})...")
+            logger.debug("MT5 Tick Fetch: %s (%s to %s)...", symbol, date_from, date_to)
             # Fetch all ticks (bid, ask, last)
             ticks = mt5.copy_ticks_range(symbol, date_from, date_to, mt5.COPY_TICKS_ALL)
             
