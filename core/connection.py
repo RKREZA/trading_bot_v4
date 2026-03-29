@@ -154,8 +154,13 @@ class MT5Connection:
         """Update cached account information."""
         # Use MT5 server time if available, fall back to local time
         try:
-            terminal = mt5.terminal_info()
-            server_time = datetime.fromtimestamp(terminal.data_center if terminal else 0).strftime("%H:%M:%S")
+            # We use the time of the last received tick as a proxy for server time
+            # Since TerminalInfo doesn't have it in Python, we fetch any liquid symbol
+            tick = mt5.symbol_info_tick(info.login_symbol if hasattr(info, 'login_symbol') else "BTCUSDm")
+            if tick:
+                server_time = datetime.fromtimestamp(tick.time, tz=timezone.utc).strftime("%H:%M:%S")
+            else:
+                server_time = datetime.now().strftime("%H:%M:%S")
         except Exception:
             server_time = datetime.now().strftime("%H:%M:%S")
 
@@ -172,6 +177,41 @@ class MT5Connection:
             "connected": True,
             "server_time": server_time,
         }
+
+    def get_market_status(self, symbol: str) -> bool:
+        """
+        Check if the market is currently open for a symbol.
+        Uses candle-freshness (M1) as a broker-agnostic heuristic.
+        """
+        if mt5 is None: return False
+        
+        # 1. Basic Trade Mode Check
+        symbol_info = mt5.symbol_info(symbol)
+        if symbol_info is None: return False
+        
+        # If explicitly disabled, it's definitely closed
+        if symbol_info.trade_mode == mt5.SYMBOL_TRADE_MODE_DISABLED:
+            return False
+            
+        # 2. Candle Freshness Check
+        # Many brokers (like Exness) keep trade_mode=4 (Full) on weekends,
+        # but stop producing candles. We check if the last M1 candle is 'fresh'.
+        try:
+            rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 0, 1)
+            if rates is None or len(rates) == 0:
+                return False
+                
+            last_candle_time = rates[0][0] # time field
+            
+            # Use current UTC time as reference (most brokers are UTC+2/3)
+            # 1 hour (3600s) threshold is safe for session/weekend detection
+            import time
+            if time.time() - last_candle_time > 36000: # 10 hours (Very safe margin for weekends)
+                return False
+        except Exception:
+            return False
+                
+        return True
 
     def get_filling_mode(self, symbol: str) -> int:
         """

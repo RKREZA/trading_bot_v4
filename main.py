@@ -179,6 +179,9 @@ class TradingBot:
         positions = self.position_manager.get_open_positions(symbol)
         self.dashboard.positions = positions if positions else []
 
+        # Market Status (Open/Closed)
+        self.dashboard.market_open = self.connection.get_market_status(symbol)
+
         # Get latest tick for price/spread
         tick = mt5.symbol_info_tick(symbol)
         if tick:
@@ -208,22 +211,7 @@ class TradingBot:
             }
             self.dashboard.signal = sig_data
             
-            # Update Signal History
-            # Only add to history if it's a "new" distinct signal event 
-            # (or if it's a rejected signal we want to log)
-            timestamp = datetime.now().strftime("%H:%M:%S")
-            hist_entry = {
-                "time": timestamp,
-                "symbol": symbol,
-                "direction": signal.direction,
-                "confidence": signal.confidence,
-                "verdict": "ENTRY" if not signal.rejection_type else "REJECT",
-                "reason": signal.rejection_type if signal.rejection_type else "VALID"
-            }
-            
-            # Simple deduplication: don't add if the last entry is the same signal on the same candle
-            if not self.dashboard.signal_history or (self.dashboard.signal_history[-1]['time'][:-2] != timestamp[:-2]):
-                self.dashboard.signal_history.append(hist_entry)
+            self.dashboard.signal = sig_data
         else:
             # Latch check: If a position is open, don't clear the signal
             if self.position_manager.count_open_positions(symbol) > 0:
@@ -726,6 +714,18 @@ class TradingBot:
                                     
                                     self._update_realized_pnl()  # refresh P/L from MT5 deal history
                                     self.analysis_logger.log(f"Trade executed: {result['ticket']}", "INFO")
+                                    
+                                    # Update Signal History (ONLY for placed orders)
+                                    timestamp = datetime.now().strftime("%H:%M:%S")
+                                    hist_entry = {
+                                        "time": timestamp,
+                                        "symbol": symbol,
+                                        "direction": signal.direction,
+                                        "confidence": signal.confidence,
+                                        "verdict": "ENTRY",
+                                        "reason": "VALID"
+                                    }
+                                    self.dashboard.signal_history.append(hist_entry)
                                 else:
                                     self.analysis_logger.log(f"Failed to execute trade for {symbol}", "ERROR")
 

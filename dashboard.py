@@ -51,6 +51,7 @@ class Dashboard:
         self.ai_context = {}  # Provided by TradingBot
         self.signal_history = deque(maxlen=8)
         self.positions = []
+        self.market_open = True # Flag for dashboard
 
     def start(self):
         self._live = Live(self._render(), console=self.console, refresh_per_second=4, screen=True)
@@ -86,10 +87,9 @@ class Dashboard:
         parts.append(self._equal_row(self._render_analysis(), self._render_setup()))
         # Row 6: Open Positions
         parts.append(self._render_positions())
-        # Row 7: Signal History
-        parts.append(self._render_signal_history())
-        # Row 8: Logs
-        parts.append(self._render_logs())
+        # Row 7: Signal History & Logs (Side-by-side)
+        parts.append(self._equal_row(self._render_signal_history(), self._render_logs()))
+        
         return Group(*parts)
 
     def _render_conn(self) -> Panel:
@@ -120,7 +120,9 @@ class Dashboard:
         t = Table(show_header=False, box=None, padding=(0, 1), expand=True)
         t.add_column(style=DIM, width=10)
         t.add_column(style=WHITE)
-        t.add_row("SYMBOL", Text(f"* {self.selected_symbol}", style=f"bold {YELLOW}"))
+        status_text = "[bold green][OPEN][/]" if self.market_open else "[bold red][CLOSED][/]"
+        symbol_line = Text.from_markup(f"[bold {YELLOW}]* {self.selected_symbol}[/] {status_text}")
+        t.add_row("SYMBOL", symbol_line)
         price = tick.get('price', 0)
         t.add_row("PRICE", Text(f"${price:,.2f}", style=f"bold {WHITE}"))
         t.add_row("SPREAD", f"{tick.get('spread', 0):.2f}")
@@ -296,7 +298,23 @@ class Dashboard:
             content.append(f"  {entry}\n", style=style)
         return Panel(content or Text("  No logs\n", style=DIM), title="[bold yellow]LOGS[/]", border_style="grey37", box=box.ROUNDED, expand=True, padding=(0, 1))
 
-    def _equal_row(self, left, right) -> Table:
+    def _equal_row(self, left: Panel, right: Panel) -> Table:
+        """
+        Renders two panels side-by-side with equal height.
+        Calculates the height of both and sets them to the max.
+        """
+        # Estimate heights based on content
+        def get_h(p):
+            if isinstance(p.renderable, Table):
+                return len(p.renderable.rows) + 2
+            if isinstance(p.renderable, Text):
+                return len(p.renderable.plain.split('\n')) + 2
+            return 8 # Default
+            
+        h = max(get_h(left), get_h(right))
+        left.height = h
+        right.height = h
+        
         grid = Table.grid(expand=True)
         grid.add_column(ratio=1)
         grid.add_column(ratio=1)
