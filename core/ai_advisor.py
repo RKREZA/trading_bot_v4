@@ -81,6 +81,7 @@ class AIAdvisor:
         self._client = None
         self._model = ""
         self._enabled = False
+        self._eval_event = threading.Event()
 
         self._load_context()
         self._init_client()
@@ -189,26 +190,29 @@ class AIAdvisor:
             r = self._context.get("last_signal_review")
         return r.get("verdict", "VALID") if r else "VALID"
 
-    def is_high_impact_now(self) -> bool:
+    @property
+    def sl_buffer_add(self) -> float:
+        with self._lock:
+            s = self._context.get("session") or {}
+            return float(s.get("recommended_sl_buffer_add", 0.0))
+
+    def is_high_impact_news(self) -> bool:
         """Returns True if the current UTC time is near a high-impact event."""
         with self._lock:
             s = self._context.get("session")
-        if not s:
+            if not s:
+                return False
+            now_str = datetime.now(timezone.utc).strftime("%H:%M")
+            for t in s.get("high_impact_times_utc", []):
+                try:
+                    h, m = map(int, t.split(":"))
+                    now_mins = int(now_str[:2]) * 60 + int(now_str[3:])
+                    event_mins = h * 60 + m
+                    if abs(now_mins - event_mins) <= 15:  # within 15 min of event
+                        return True
+                except Exception:
+                    pass
             return False
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        if s.get("date") != today:
-            return False
-        now_str = datetime.now(timezone.utc).strftime("%H:%M")
-        for t in s.get("high_impact_times_utc", []):
-            try:
-                h, m = map(int, t.split(":"))
-                now_mins = int(now_str[:2]) * 60 + int(now_str[3:])
-                event_mins = h * 60 + m
-                if abs(now_mins - event_mins) <= 15:  # within 15 min of event
-                    return True
-            except Exception:
-                pass
-        return False
 
     # ------------------------------------------------------------------
     # Internal API helper
@@ -342,6 +346,7 @@ Respond ONLY in this exact JSON (no extra text, no markdown):
         """
         if not self._enabled:
             return
+        self._eval_event.clear()
         threading.Thread(
             target=self._signal_eval_worker,
             args=(signal, h4_trend, symbol),
@@ -349,32 +354,36 @@ Respond ONLY in this exact JSON (no extra text, no markdown):
             daemon=True,
         ).start()
 
+    def wait_for_eval(self, timeout: int = 30) -> bool:
+        """Wait for the latest signal evaluation to complete."""
+        if not self._enabled:
+            return True
+        return self._eval_event.wait(timeout=timeout)
+
     def _signal_eval_worker(self, signal, h4_trend: str, symbol: str) -> None:
-        with self._lock:
-            session_ctx = self._context.get("session") or {}
+        try:
+            with self._lock:
+                session_ctx = self._context.get("session") or {}
 
-        risk = session_ctx.get("risk_level", "MEDIUM")
-        bias = session_ctx.get("overall_bias", "NEUTRAL")
-        levels = ", ".join(session_ctx.get("key_levels_watch", [])) or "none"
-        sym_name = "Gold" if "XAU" in symbol else symbol
+            risk = session_ctx.get("risk_level", "MEDIUM")
+            bias = session_ctx.get("overall_bias", "NEUTRAL")
+            levels = ", ".join(session_ctx.get("key_levels_watch", [])) or "none"
+            sym_name = "Gold" if "XAU" in symbol else symbol
 
-        sl_dist = abs(signal.entry_price - signal.stop_loss)
-        tp_dist = abs(signal.take_profit - signal.entry_price)
+            sl_dist = abs(signal.entry_price - signal.stop_loss)
+            tp_dist = abs(signal.take_profit - signal.entry_price)
 
-        prompt = f"""
+            prompt = f"""
 Symbol: {sym_name}
 Signal: {signal.direction} @ {signal.entry_price:.2f}
 SL: {signal.stop_loss:.2f} (−{sl_dist:.2f} pts) | TP: {signal.take_profit:.2f} (+{tp_dist:.2f} pts) | R:R {signal.rr_ratio:.1f}
 H4 Trend: {h4_trend} | Confidence: {signal.confidence}% | Confluence: {signal.confluence_score}
 Reasons: {", ".join(signal.reasons or [])}
 
-Today's macro context:
-- Bias: {bias} | Risk: {risk}
-- Key levels to watch: {levels}
+Macro Context: Risk {risk}, Bias {bias}. Key levels: {levels}.
 
-Does this trade setup make sense right now? Is it aligned with macro conditions?
-
-Respond ONLY in this exact JSON (no extra text):
+As a professional quantitative risk manager, provide a verdict.
+Response format:
 {{
   "verdict": "VALID" or "CAUTION" or "AVOID",
   "confidence_adjustment": integer -20 to +20,
@@ -382,32 +391,36 @@ Respond ONLY in this exact JSON (no extra text):
   "reasoning": "1–2 sentences"
 }}"""
 
-        response = self._call_api(
-            prompt,
-            system="You are a professional trading risk analyst. Be concise and decisive.",
-            max_tokens=256,
-        )
-        data = self._parse_json(response)
-
-        if data:
-            data["direction"] = signal.direction
-            data["entry"] = signal.entry_price
-            data["updated_at"] = datetime.now(timezone.utc).isoformat()
-            with self._lock:
-                self._context["last_signal_review"] = data
-            self._save_context()
-
-            verdict = data.get("verdict", "?")
-            adj = data.get("confidence_adjustment", 0)
-            aligned = "✓" if data.get("aligned_with_bias") else "✗"
-            reason = data.get("reasoning", "")
-
-            self._log(
-                f"[AI] Signal {signal.direction}: {verdict} (conf {adj:+d}) bias-aligned:{aligned} | {reason}",
-                "INFO",
+            response = self._call_api(
+                prompt,
+                system="You are a professional trading risk analyst. Be concise and decisive.",
+                max_tokens=256,
             )
-        else:
-            self._log("[AI] Signal eval: failed to parse response", "WARNING")
+            data = self._parse_json(response)
+
+            if data:
+                data["direction"] = signal.direction
+                data["entry"] = signal.entry_price
+                data["updated_at"] = datetime.now(timezone.utc).isoformat()
+                with self._lock:
+                    self._context["last_signal_review"] = data
+                self._save_context()
+
+                verdict = data.get("verdict", "?")
+                adj = data.get("confidence_adjustment", 0)
+                aligned = "✓" if data.get("aligned_with_bias") else "✗"
+                reason = data.get("reasoning", "")
+
+                self._log(
+                    f"[AI] Signal {signal.direction}: {verdict} (conf {adj:+d}) bias-aligned:{aligned} | {reason}",
+                    "INFO",
+                )
+            else:
+                self._log("[AI] Signal eval: failed to parse response", "WARNING")
+        except Exception as e:
+            logger.error(f"[AI] Error in signal eval worker: {e}")
+        finally:
+            self._eval_event.set()
 
     # ------------------------------------------------------------------
     # Feature 3: Post-session Trade Review (daily, at midnight reset)

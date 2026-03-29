@@ -188,10 +188,21 @@ class Dashboard:
         t = Table(show_header=False, box=None, padding=(0, 1), expand=True)
         t.add_column(style=DIM, width=14)
         t.add_column(style=WHITE)
-        min_conf = self.config.get('strategy', {}).get('min_confidence', 60)
-        min_score = self.config.get('strategy', {}).get('min_confluence_score', 4)
+        
+        # Base defaults
+        defaults = self.config.get('strategy_defaults', {})
+        
+        # Try to get session-specific values if available
+        session_cfg = self.config.get('session_config', {}).get(self.session, {})
+        session_strat = session_cfg.get('strategy', {})
+        
+        min_conf = session_strat.get('min_confidence', defaults.get('min_confidence', 60))
+        min_score = session_strat.get('min_confluence_score', defaults.get('min_confluence_score', 4))
+        risk_mult = session_cfg.get('risk_multiplier', 1.0)
+        
         t.add_row("MIN CONF", f"{min_conf}%")
         t.add_row("MIN SCORE", f"{min_score}")
+        t.add_row("RISK MULT", f"x{risk_mult:.2f}")
         return Panel(t, title="[bold yellow]SETUP[/]", border_style="yellow", box=box.ROUNDED, expand=True, padding=(0, 1))
 
     def _render_logs(self) -> Panel:

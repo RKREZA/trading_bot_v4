@@ -1,51 +1,131 @@
-from typing import List, Dict
+import itertools
+import copy
+import logging
+from typing import List, Dict, Tuple
 from core.backtester import BacktestEngine
 from core.strategy_engine import StrategyEngine
+from datetime import datetime, timezone
+import pandas as pd
+
+logger = logging.getLogger("trading_bot.walk_forward")
 
 class WalkForwardValidation:
     def __init__(self, config: dict, strategy: StrategyEngine):
         self.config = config
         self.strategy = strategy
+        self.last_train_perf = {}
 
-    def run_validation(self, symbol: str, h4: List[dict], m30: List[dict], m5: List[dict], train_months: int = 6, test_months: int = 1) -> List[Dict]:
+    def run_validation(self, symbol: str, h4: List[dict], h1: List[dict], m30: List[dict], m5: List[dict], d1: List[dict], 
+                       train_days: int = 30, test_days: int = 7) -> List[Dict]:
         """
         Implementation of rolling window walk-forward validation.
-        For simplicity, we'll assume the data is chronologically ordered and dense.
+        Support for days instead of months for granular research.
         """
         results = []
         
-        # Estimate number of candles based on timeframe (M30 = 48 candles per day)
-        candles_per_month = 48 * 22 # approx 22 trading days
-        train_window = train_months * candles_per_month
-        test_window = test_months * candles_per_month
+        # Convert all timestamps to datetime if they are ints (from MT5)
+        for cf in [h4, h1, m30, m5, d1]:
+            for c in cf:
+                if isinstance(c['time'], (int, float)):
+                    c['time'] = datetime.fromtimestamp(c['time'], tz=timezone.utc)
+
+        # Use M30 as the anchor for window slicing
+        m30_df = pd.DataFrame(m30)
+        start_date = m30[0]['time']
+        end_date = m30[-1]['time']
         
-        start_idx = 0
-        while start_idx + train_window + test_window < len(m30):
-            train_m30 = m30[start_idx : start_idx + train_window]
-            test_m30 = m30[start_idx + train_window : start_idx + train_window + test_window]
+        current_train_start = start_date
+        
+        while True:
+            current_train_end = current_train_start + pd.DateOffset(days=train_days)
+            current_test_end = current_train_end + pd.DateOffset(days=test_days)
             
-            # For H4 and M5, we need to find corresponding slices based on time
-            train_start_time = train_m30[0]['time']
-            train_end_time = train_m30[-1]['time']
-            test_end_time = test_m30[-1]['time']
+            if current_test_end > end_date:
+                break
+                
+            logger.info(f"WFV Window: Train {current_train_start.date()} -> {current_train_end.date()} | Test {current_train_end.date()} -> {current_test_end.date()}")
             
-            train_h4 = [c for c in h4 if train_start_time <= c['time'] <= train_end_time]
-            train_m5 = [c for c in m5 if train_start_time <= c['time'] <= train_end_time]
+            # Slice all timeframes
+            train_data = {
+                "h4": self._filter_by_time(h4, current_train_start, current_train_end),
+                "h1": self._filter_by_time(h1, current_train_start, current_train_end),
+                "m30": self._filter_by_time(m30, current_train_start, current_train_end),
+                "m5": self._filter_by_time(m5, current_train_start, current_train_end),
+                "d1": self._filter_by_time(d1, current_train_start, current_train_end)
+            }
             
-            test_h4 = [c for c in h4 if train_end_time < c['time'] <= test_end_time]
-            test_m5 = [c for c in m5 if train_end_time < c['time'] <= test_end_time]
+            test_data = {
+                "h4": self._filter_by_time(h4, current_train_end, current_test_end),
+                "h1": self._filter_by_time(h1, current_train_end, current_test_end),
+                "m30": self._filter_by_time(m30, current_train_end, current_test_end),
+                "m5": self._filter_by_time(m5, current_train_end, current_test_end),
+                "d1": self._filter_by_time(d1, current_train_end, current_test_end)
+            }
+
+            if not train_data["m30"] or not test_data["m30"]:
+                current_train_start += pd.DateOffset(days=test_days)
+                continue
+
+            # 1. OPTIMIZATION (IS) - Use Optuna or Grid
+            # For simplicity in this first update, we use a small grid
+            param_grid = {
+                "min_confluence_score": [4, 5],
+                "min_confidence": [65, 75],
+                "sl_atr_buffer": [0.4, 0.6],
+            }
             
-            # Run backtest on test window
-            tester = BacktestEngine(self.config, self.strategy)
-            test_perf = tester.run(symbol, test_h4, test_m30, test_m5, quiet=True)
+            best_params = self._optimize(symbol, train_data, param_grid)
             
+            # 2. VALIDATION (OOS)
+            test_config = copy.deepcopy(self.config)
+            test_config["strategy"].update(best_params)
+            
+            test_strategy = StrategyEngine(test_config)
+            tester = BacktestEngine(test_config, test_strategy)
+            
+            test_perf = tester.run(symbol, 
+                                   test_data["h4"], test_data["h1"], 
+                                   test_data["m30"], test_data["m5"], 
+                                   test_data["d1"], quiet=True)
+            
+            # 3. RECORD RESULTS
             results.append({
-                "window_start": train_m30[0].get('time'),
-                "test_start": test_m30[0].get('time'),
-                "performance": test_perf
+                "window": f"{current_train_end.date()} to {current_test_end.date()}",
+                "best_params": best_params,
+                "is_metrics": self.last_train_perf,
+                "oos_metrics": test_perf
             })
             
-            # Slide window by test_window
-            start_idx += test_window
+            current_train_start += pd.DateOffset(days=test_days) # Slide by test window
             
         return results
+
+    def _filter_by_time(self, candles: List[dict], start: datetime, end: datetime) -> List[dict]:
+        return [c for c in candles if start <= c['time'] < end]
+
+    def _optimize(self, symbol, data, grid) -> dict:
+        best_metric = -999999
+        best_params = {}
+        self.last_train_perf = {}
+        
+        keys, values = zip(*grid.items())
+        total_combinations = len(list(itertools.product(*values)))
+        logger.info(f"Optimizing window with {total_combinations} combinations...")
+        
+        for v in itertools.product(*values):
+            params = dict(zip(keys, v))
+            tmp_config = copy.deepcopy(self.config)
+            tmp_config["strategy"].update(params)
+            
+            strat = StrategyEngine(tmp_config)
+            tester = BacktestEngine(tmp_config, strat)
+            perf = tester.run(symbol, data["h4"], data["h1"], data["m30"], data["m5"], data["d1"], quiet=True)
+            
+            # Score: Sharpe * Profit Factor (basic but effective for IS)
+            score = (perf.get("sharpe_ratio", 0) * perf.get("profit_factor", 0))
+            if score > best_metric:
+                best_metric = score
+                best_params = params
+                self.last_train_perf = perf
+        
+        return best_params

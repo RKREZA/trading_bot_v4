@@ -205,7 +205,7 @@ class MT5Connection:
             price = tick.bid
 
         # Get deviation from config
-        deviation = self.config.get("symbols_config", {}).get(symbol, {}).get("deviation", 20)
+        deviation = self.config.get("symbol_defaults", {}).get(symbol, {}).get("deviation", 20)
         magic = self.config.get("magic_number", BOT_MAGIC_NUMBER)
 
         for attempt in range(max_retries):

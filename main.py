@@ -10,11 +10,12 @@ import os
 import sys
 import time
 import threading
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 from typing import Optional
 import itertools
 import copy
 import pandas as pd
+import MetaTrader5 as mt5
 
 from dotenv import load_dotenv
 
@@ -24,6 +25,8 @@ from core.data_fetcher import DataFetcher
 from core.backtester import BacktestEngine
 from core.strategy_engine import StrategyEngine
 from core.ai_advisor import AIAdvisor
+from core.risk_manager import RiskManager
+from core.notifications import NotificationManager
 from dashboard import Dashboard, AnalysisLogger
 
 # Load .env file if it exists
@@ -54,6 +57,8 @@ class TradingBot:
         self.connection.config = self.config
         self.position_manager = PositionManager(self.connection)
         self.data_fetcher = DataFetcher()
+        self.risk_manager = RiskManager(self.config)
+        self.notification_manager = NotificationManager(self.config)
 
         # Run AI pre-session context at startup (async)
         symbol = self.config.get("symbol", "BTCUSDm")
@@ -70,6 +75,8 @@ class TradingBot:
         self.peak_equity = 0.0
         self.max_drawdown_reached = 0.0
         self.last_logged_session: Optional[str] = None
+        self.position_meta = {} # {ticket: {"best_price": float, "partial_closed": bool, "risk": float}}
+        self.notified_deals = set() # Track closed deals to avoid duplicate alerts
 
     @staticmethod
     def _load_config(config_path: str) -> dict:
@@ -143,6 +150,14 @@ class TradingBot:
             self.daily_pnl = pnl
             self.win_count = wins
             self.loss_count = losses
+
+            # Notify for newly closed deals
+            if self.notification_manager.enabled:
+                for d in deals:
+                    if d.entry == mt5.DEAL_ENTRY_OUT and d.ticket not in self.notified_deals:
+                        res = "PROFIT" if d.profit > 0 else "LOSS"
+                        self.notification_manager.notify_trade_close(d.symbol, "OUT", d.price, d.profit, res)
+                        self.notified_deals.add(d.ticket)
         except Exception as e:
             logger.warning("Could not fetch realized P/L from MT5: %s", e)
 
@@ -213,63 +228,133 @@ class TradingBot:
                 if pos.magic != magic:
                     continue
 
-                # Skip if SL wasn't set (shouldn't happen, but guard)
-                if pos.sl == 0:
-                    continue
-
-                risk = abs(pos.price_open - pos.sl)
-                if risk <= 0:
-                    continue
-
-                cur  = pos.price_current
+                ticket = pos.ticket
+                if ticket not in self.position_meta:
+                    # Initialize metadata if missing (e.g. after restart)
+                    risk = abs(pos.price_open - pos.sl) if pos.sl > 0 else 0
+                    self.position_meta[ticket] = {
+                        "best_price": pos.price_current,
+                        "partial_closed_count": 0,
+                        "risk": risk,
+                        "ai_score": self.ai_advisor.context.get("last_signal_review", {}).get("score", 0.5)
+                    }
+                
+                meta = self.position_meta[ticket]
+                if "partial_closed_count" not in meta: meta["partial_closed_count"] = 0
+                cur = pos.price_current
                 open_price = pos.price_open
+
+                # 1. Update MFE (Best Price)
+                if pos.type == 0: # BUY
+                    if cur > meta["best_price"]: meta["best_price"] = cur
+                else: # SELL
+                    if cur < meta["best_price"]: meta["best_price"] = cur
+
+                # 2. Partial Profit Taking (1:1 and 2:1 RR)
+                if meta["risk"] > 0 and meta["partial_closed_count"] < 2:
+                    profit = (cur - open_price) if pos.type == 0 else (open_price - cur)
+                    
+                    pp_cfg = self.config.get("strategy", {}).get("partial_profit_config", {
+                        "level1_rr": 1.0, "level1_pct": 0.25,
+                        "level2_rr": 2.0, "level2_pct": 0.25
+                    })
+                    
+                    # Step 1: 1:1 RR
+                    if meta["partial_closed_count"] == 0 and profit >= meta["risk"] * pp_cfg["level1_rr"]:
+                        # AI Adaptation: Take more if AI is cautious
+                        l1_pct = pp_cfg["level1_pct"]
+                        if meta.get("ai_score", 0.5) < 0.4: l1_pct += 0.15
+                        
+                        close_vol = round(pos.volume * l1_pct, 2)
+                        if close_vol >= 0.01:
+                            self._execute_partial_close(ticket, symbol, pos.type, close_vol, magic, "PPT Level 1 (1:1)")
+                            meta["partial_closed_count"] = 1
+                            # Move SL to BE
+                            self._modify_sl_tp(ticket, symbol, open_price, pos.tp)
+                            continue
+
+                    # Step 2: 2:1 RR
+                    elif meta["partial_closed_count"] == 1 and profit >= meta["risk"] * pp_cfg["level2_rr"]:
+                        close_vol = round(pos.volume * pp_cfg["level2_pct"], 2) # Use current volume left
+                        if close_vol >= 0.01:
+                            self._execute_partial_close(ticket, symbol, pos.type, close_vol, magic, "PPT Level 2 (2:1)")
+                            meta["partial_closed_count"] = 2
+                            continue
+
+                # 3. Optimized MFE Trailing
+                # 1. Base Trail: 50% give-back
+                give_back_pct = ts_cfg.get("mfe_trail_base", 0.5)
+                
+                # 2. Profit-Dependent (Tighten as profit increases)
+                risk = meta.get("risk", 0)
+                excursion = (meta["best_price"] - open_price) if pos.type == 0 else (open_price - meta["best_price"])
+                
+                if risk > 0:
+                    rr_reached = excursion / risk
+                    if rr_reached > 3.0: give_back_pct = 0.3
+                    elif rr_reached > 1.5: give_back_pct = 0.4
+                
+                # 3. Time-Based (Tighten after many candles - not easily available here, using timestamp as proxy)
+                # (Optional: fetch duration if needed)
+
+                give_back_pct = max(0.1, min(give_back_pct, 0.9))
+                
                 new_sl = pos.sl
-
-                if pos.type == 0:  # BUY  — SL can only move up
-                    profit = cur - open_price
-                    if profit >= risk * p3_rr:
-                        new_sl = max(new_sl, cur - atr * p3_mult)
-                    elif profit >= risk * p2_rr:
-                        new_sl = max(new_sl, cur - atr * p2_mult)
-                    elif profit >= risk * be_rr:
-                        new_sl = max(new_sl, open_price)  # breakeven
-                    # Clamp: SL must stay below current price
-                    if new_sl >= cur:
-                        new_sl = pos.sl  # revert if invalid
-
-                else:  # SELL — SL can only move down
-                    profit = open_price - cur
-                    if profit >= risk * p3_rr:
-                        new_sl = min(new_sl, cur + atr * p3_mult)
-                    elif profit >= risk * p2_rr:
-                        new_sl = min(new_sl, cur + atr * p2_mult)
-                    elif profit >= risk * be_rr:
-                        new_sl = min(new_sl, open_price)  # breakeven
-                    if new_sl <= cur:
-                        new_sl = pos.sl
+                if pos.type == 0: # BUY
+                    if excursion > 0:
+                        mfe_sl = meta["best_price"] - (excursion * give_back_pct)
+                        if mfe_sl > new_sl: new_sl = mfe_sl
+                else: # SELL
+                    if excursion > 0:
+                        mfe_sl = meta["best_price"] + (excursion * give_back_pct)
+                        if mfe_sl < new_sl or new_sl == 0: new_sl = mfe_sl
 
                 # Only send modification if SL actually improved
-                moved = (pos.type == 0 and new_sl > pos.sl) or (pos.type == 1 and new_sl < pos.sl)
+                moved = (pos.type == 0 and new_sl > pos.sl) or (pos.type == 1 and (new_sl < pos.sl or pos.sl == 0))
                 if moved:
                     req = {
                         "action":   mt5.TRADE_ACTION_SLTP,
                         "symbol":   symbol,
                         "position": pos.ticket,
-                        "sl":       round(new_sl, 2),
+                        "sl":       round(float(new_sl), 2),
                         "tp":       pos.tp,
                     }
                     result = mt5.order_send(req)
                     if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-                        phase = "BE" if new_sl == open_price else "TRAIL"
-                        self.analysis_logger.log(
-                            f"[{phase}] Ticket {pos.ticket} SL {pos.sl:.2f} → {new_sl:.2f}", "INFO"
-                        )
-                    else:
-                        code = result.retcode if result else "N/A"
-                        logger.warning("Trailing SL modify failed: ticket=%s retcode=%s", pos.ticket, code)
+                        self.analysis_logger.log(f"[MFE Trail] Ticket {pos.ticket} SL → {new_sl:.2f}", "INFO")
 
         except Exception as e:
             logger.warning("_manage_trailing_stops error: %s", e)
+
+    def _execute_partial_close(self, ticket, symbol, pos_type, volume, magic, comment):
+        req = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": symbol,
+            "volume": volume,
+            "type": mt5.ORDER_TYPE_SELL if pos_type == 0 else mt5.ORDER_TYPE_BUY,
+            "position": ticket,
+            "price": mt5.symbol_info_tick(symbol).bid if pos_type == 0 else mt5.symbol_info_tick(symbol).ask,
+            "deviation": 20,
+            "magic": magic,
+            "comment": comment,
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_IOC,
+        }
+        res = mt5.order_send(req)
+        if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+            self.analysis_logger.log(f"Partial Close executed: {comment} | Vol: {volume}", "INFO")
+        else:
+            logger.warning("Partial close failed for ticket %s: %s", ticket, res.comment if res else "N/A")
+
+    def _modify_sl_tp(self, ticket, symbol, sl, tp):
+        mod_req = {
+            "action": mt5.TRADE_ACTION_SLTP,
+            "symbol": symbol,
+            "position": ticket,
+            "sl": round(float(sl), 2),
+            "tp": round(float(tp), 2),
+        }
+        mt5.order_send(mod_req)
 
     # ------------------------------------------------------------------
     # Real-Time Trailing Stop (background thread, tick-driven)
@@ -440,17 +525,53 @@ class TradingBot:
                             mid_price, d1_candles=d1_candles, session=session,
                         )
 
-                        # h4_trend is now returned directly from analyze() — no extra EMA pass
-                        analysis_state = {
-                            "h4_trend": h4_trend,
-                            "m30_structure": (
-                                "BULLISH" if h4_trend == "BULLISH"
-                                else ("BEARISH" if h4_trend == "BEARISH" else "NEUTRAL")
-                            ),
-                        }
-                        self._update_dashboard_state(signal, analysis_state)
+                        # --- AI Signal Integration ---
+                        if signal:
+                            # 0. News Avoidance
+                            if self.ai_advisor.is_high_impact_news():
+                                self.analysis_logger.log(f"News Avoidance: High-impact event near. Skipping {signal.direction} signal.", "WARNING")
+                                signal = None
 
-                        # --- Order Placement Logic ---
+                        if signal:
+                            # 1. Trigger AI Evaluation
+                            self.ai_advisor.evaluate_signal_async(signal, h4_trend, symbol)
+                            
+                            # 2. Wait for Verdict (Synchronous)
+                            if not self.ai_advisor.wait_for_eval(timeout=30):
+                                self.analysis_logger.log("AI Verdict timed out - Proceeding with CAUTION.", "WARNING")
+                            
+                            # 3. Check AI Verdict
+                            ai_review = self.ai_advisor.context.get("last_signal_review", {})
+                            ai_verdict = ai_review.get("verdict", "VALID")
+                            
+                            if ai_verdict == "AVOID":
+                                self.analysis_logger.log(f"AI Verdict: AVOID signal for {symbol} - Skipping.", "WARNING")
+                                signal = None
+                            elif ai_verdict == "CAUTION":
+                                signal.confidence *= 0.8
+                                self.analysis_logger.log(f"AI Verdict: CAUTION - Confidence reduced to {signal.confidence:.1f}%", "INFO")
+                            
+                            if signal and ai_review:
+                                # 4. Apply Confidence Adjustment
+                                adj = ai_review.get("confidence_adjustment", 0)
+                                signal.confidence += adj
+                                
+                                # 5. Apply AI SL Buffer
+                                buffer_add = self.ai_advisor.sl_buffer_add
+                                if buffer_add > 0:
+                                    if signal.direction == "BUY":
+                                        signal.stop_loss -= buffer_add
+                                    else:
+                                        signal.stop_loss += buffer_add
+                                    self.analysis_logger.log(f"AI SL Buffer Adjustment: {buffer_add:+.2f}", "INFO")
+                                
+                                self.analysis_logger.log(f"AI Reasoning: {ai_review.get('reasoning', '')}", "INFO")
+                                
+                                # 6. Re-check min confidence
+                                if signal.confidence < self.strategy.min_confidence:
+                                    self.analysis_logger.log(f"Signal confidence {signal.confidence:.1f}% below min {self.strategy.min_confidence}% after AI review.", "INFO")
+                                    signal = None
+
                         if signal:
                             current_candle_time = m5_candles[-1]["time"]
                             last_trade = self.last_trade_time.get(symbol, 0)
@@ -466,8 +587,8 @@ class TradingBot:
                                     continue
 
                                 # Calculate lot size based on risk
-                                risk_percent = self.config.get("risk_per_trade", 2.0)
                                 account_balance = self.connection.account_info.get("balance", 0)
+                                risk_percent = self.risk_manager.calculate_scaled_risk(account_balance)
                                 base_lot = self.position_manager.calculate_lot_size(symbol, signal, risk_percent, account_balance)
 
                                 # Apply AI session risk multiplier
@@ -482,8 +603,7 @@ class TradingBot:
                                 if lot_size < symbol_info.get("lot", 0.01):
                                     lot_size = symbol_info.get("lot", 0.01)
 
-                                # Async per-signal check (does NOT block execution, just logs/verifies context)
-                                self.ai_advisor.evaluate_signal_async(signal, h4_trend, symbol)
+                                # (AI evaluation moved up to be synchronous)
 
                                 if lot_size <= 0:
                                     self.analysis_logger.log(f"Invalid lot size {lot_size}, skipping trade", "ERROR")
@@ -496,6 +616,10 @@ class TradingBot:
                                     self.last_trade_time[symbol] = current_candle_time
                                     self.daily_trades += 1
                                     self.dashboard.daily_trades = self.daily_trades
+                                    
+                                    # Notify via Telegram
+                                    self.notification_manager.notify_trade_open(symbol, signal.direction, signal.entry_price, lot_size, signal.stop_loss, signal.take_profit)
+                                    
                                     self._update_realized_pnl()  # refresh P/L from MT5 deal history
                                     self.analysis_logger.log(f"Trade executed: {result['ticket']}", "INFO")
                                 else:
@@ -521,19 +645,54 @@ class TradingBot:
     # Backtesting
     # ------------------------------------------------------------------
 
-    def run_backtest(self, symbol: str):
+    def run_backtest(self, symbol: str, from_date: Optional[str] = None, to_date: Optional[str] = None, use_ticks: bool = False):
         """Fetch data from MT5 and run the backtest engine."""
         if not self.connection.connect():
             return
 
         logger.info("Fetching data for %s...", symbol)
+        
+        # Determine range
+        d_to = datetime.now()
+        if to_date:
+            try:
+                d_to = datetime.strptime(to_date, "%Y-%m-%d")
+            except ValueError:
+                logger.error("Invalid --to date format. Use YYYY-MM-DD")
+                return
 
-        bt_candles = self.config.get("backtest", {}).get("candles", {"H4": 600, "M30": 4800, "M5": 9600})
-        h4_candles = self.data_fetcher.fetch_candles(symbol, "H4", bt_candles.get("H4", 600))
-        h1_candles = self.data_fetcher.fetch_candles(symbol, "H1", bt_candles.get("H1", 2400))
-        m30_candles = self.data_fetcher.fetch_candles(symbol, "M30", bt_candles.get("M30", 4800))
-        d1_candles = self.data_fetcher.fetch_candles(symbol, "D1", bt_candles.get("D1", 500))
-        m5_candles = self.data_fetcher.fetch_candles(symbol, "M5", bt_candles.get("M5", 9600))
+        if from_date:
+            try:
+                d_from = datetime.strptime(from_date, "%Y-%m-%d")
+            except ValueError:
+                logger.error("Invalid --from date format. Use YYYY-MM-DD")
+                return
+            
+            # Use range fetch
+            h4_candles = self.data_fetcher.fetch_candles_range(symbol, "H4", d_from - timedelta(days=20), d_to)
+            h1_candles = self.data_fetcher.fetch_candles_range(symbol, "H1", d_from - timedelta(days=5), d_to)
+            m30_candles = self.data_fetcher.fetch_candles_range(symbol, "M30", d_from - timedelta(days=2), d_to)
+            d1_candles = self.data_fetcher.fetch_candles_range(symbol, "D1", d_from - timedelta(days=100), d_to)
+            m5_candles = self.data_fetcher.fetch_candles_range(symbol, "M5", d_from, d_to)
+        else:
+            # Traditional N-candle fetch
+            bt_candles = self.config.get("backtest", {}).get("candles", {"H4": 600, "M30": 4800, "M5": 9600})
+            h4_candles = self.data_fetcher.fetch_candles(symbol, "H4", bt_candles.get("H4", 600))
+            h1_candles = self.data_fetcher.fetch_candles(symbol, "H1", bt_candles.get("H1", 2400))
+            m30_candles = self.data_fetcher.fetch_candles(symbol, "M30", bt_candles.get("M30", 4800))
+            d1_candles = self.data_fetcher.fetch_candles(symbol, "D1", bt_candles.get("D1", 500))
+            m5_candles = self.data_fetcher.fetch_candles(symbol, "M5", bt_candles.get("M5", 9600))
+
+        ticks = []
+        if use_ticks:
+            # Only fetch ticks for the M5 range to save memory/time
+            t_from = m5_candles[0]['time'] if m5_candles else d_from if from_date else 0
+            t_to = m5_candles[-1]['time'] if m5_candles else d_to if from_date else 0
+            
+            if isinstance(t_from, int): t_from = datetime.fromtimestamp(t_from)
+            if isinstance(t_to, int): t_to = datetime.fromtimestamp(t_to)
+            
+            ticks = self.data_fetcher.fetch_ticks_range(symbol, t_from, t_to)
 
         if not h1_candles or not h4_candles or not m30_candles or not m5_candles or not d1_candles:
             logger.error("Failed to fetch data for %s", symbol)
@@ -544,7 +703,7 @@ class TradingBot:
         logger.info("MT5 connection closed — running backtest offline")
 
         engine = BacktestEngine(self.config, self.strategy)
-        results = engine.run(symbol, h4_candles, h1_candles, m30_candles, m5_candles, d1_candles, quiet=True)
+        results = engine.run(symbol, h4_candles, h1_candles, m30_candles, m5_candles, d1_candles, ticks=ticks, quiet=True)
 
         # Save results to CSV
         if results.get("trades"):
@@ -555,12 +714,36 @@ class TradingBot:
             df.to_csv(filename, index=False)
             logger.info(f"Detailed trade history saved to: {filename}")
 
+        # Print Detailed Results
+        trades = results.get("trades", [])
+        tp_count = len([t for t in trades if t.get("result") == "TP"])
+        sl_count = len([t for t in trades if t.get("result") == "SL"])
+        prof_sl = len([t for t in trades if t.get("result") == "SL" and t.get("pnl", 0) > 0])
+        loss_sl = sl_count - prof_sl
+
+        # Determine actual period processed
+        start_date = datetime.fromtimestamp(m5_candles[0]['time']).strftime('%Y-%m-%d')
+        end_date = datetime.fromtimestamp(m5_candles[-1]['time']).strftime('%Y-%m-%d')
+
         logger.info("-" * 50)
         logger.info(f"BACKTEST COMPLETE FOR {symbol}")
+        logger.info(f"Period:          {start_date} to {end_date}")
         logger.info(f"Initial Balance: {results.get('initial_balance', 0):.2f}")
         logger.info(f"Final Balance:   {results.get('final_balance', 0):.2f}")
         logger.info(f"Net Profit:      {results.get('net_profit', 0):.2f} ({((results.get('final_balance', 0)-results.get('initial_balance', 0))/results.get('initial_balance', 1)*100):.1f}%)")
         logger.info(f"Win Rate:        {results.get('win_rate', 0):.1f}%")
+        
+        # Session Breakdown
+        session_stats = results.get("session_stats", {})
+        if session_stats:
+            logger.info("Session Breakdown:")
+            for s_name, stats in session_stats.items():
+                count = stats["count"]
+                wr = (stats["wins"] / count * 100) if count > 0 else 0
+                logger.info(f"  - {s_name:<10}: {count:>3} trades | {wr:>5.1f}% WR | PnL: {stats['pnl']:>8.2f}")
+        
+        logger.info(f"TP Hits:         {tp_count}")
+        logger.info(f"SL Hits:         {sl_count} (Profitable SL: {prof_sl}, Losing SL: {loss_sl})")
         logger.info(f"Profit Factor:   {results.get('profit_factor', 0):.2f}")
         logger.info(f"Sharpe Ratio:    {results.get('sharpe_ratio', 0):.2f}")
         logger.info(f"Max Drawdown:    {results.get('max_drawdown', 0):.1f}%")
@@ -662,6 +845,9 @@ def main():
     parser.add_argument("--full", action="store_true", help="Run full validation suite (backtest + stress tests)")
     parser.add_argument("--symbol", type=str, help="Symbol to trade/backtest")
     parser.add_argument("--config", type=str, default="config.json", help="Config file path")
+    parser.add_argument("--from", dest="at_from", type=str, help="Backtest start date (YYYY-MM-DD)")
+    parser.add_argument("--to", dest="at_to", type=str, help="Backtest end date (YYYY-MM-DD)")
+    parser.add_argument("--ticks", action="store_true", help="Use tick-level data for backtest accuracy")
     args = parser.parse_args()
 
     # Initialize logging (console enabled for CLI modes)
@@ -679,7 +865,7 @@ def main():
     elif args.backtest:
         # Suppress verbose strategy logs during backtest
         logging.getLogger("trading_bot.strategy").setLevel(logging.WARNING)
-        bot.run_backtest(args.symbol)
+        bot.run_backtest(args.symbol, from_date=args.at_from, to_date=args.at_to, use_ticks=args.ticks)
     else:
         bot.run_live()
 
