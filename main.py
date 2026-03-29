@@ -77,6 +77,7 @@ class TradingBot:
         self.last_logged_session: Optional[str] = None
         self.position_meta = {} # {ticket: {"best_price": float, "partial_closed": bool, "risk": float}}
         self.notified_deals = set() # Track closed deals to avoid duplicate alerts
+        self.last_ai_eval_time = None
 
     @staticmethod
     def _load_config(config_path: str) -> dict:
@@ -161,10 +162,40 @@ class TradingBot:
         except Exception as e:
             logger.warning("Could not fetch realized P/L from MT5: %s", e)
 
-    def _update_dashboard_state(self, signal=None, analysis=None):
-        """Push latest state to the dashboard."""
+    def _update_dashboard_live_data(self, symbol):
+        """High-frequency dashboard data: Account, Positions, and Ticks."""
+        info = mt5.account_info()
+        if info:
+            self.dashboard.account_info = {
+                "login": info.login,
+                "server": info.server,
+                "balance": info.balance,
+                "equity": info.equity,
+                "profit": info.profit,
+                "connected": True
+            }
+        
+        # Get individual position P/L
+        positions = self.position_manager.get_open_positions(symbol)
+        self.dashboard.positions = positions if positions else []
+
+        # Get latest tick for price/spread
+        tick = mt5.symbol_info_tick(symbol)
+        if tick:
+            self.dashboard.tick = {
+                "bid": tick.bid,
+                "ask": tick.ask,
+                "price": (tick.bid + tick.ask) / 2,
+                "spread": (tick.ask - tick.bid) / (mt5.symbol_info(symbol).point if mt5.symbol_info(symbol) else 0.0001)
+            }
+
+    def _update_dashboard_state(self, symbol, signal=None, h4_trend="RANGING", m30_structure="NEUTRAL"):
+        """Low-frequency dashboard data: Signal and History."""
+        
+        # 1. Handle Signal & History
         if signal:
-            self.dashboard.signal = {
+            # Prepare signal data for dashboard
+            sig_data = {
                 "direction": signal.direction,
                 "entry_price": signal.entry_price,
                 "stop_loss": signal.stop_loss,
@@ -173,16 +204,42 @@ class TradingBot:
                 "confluence_score": signal.confluence_score,
                 "reasons": signal.reasons,
                 "rejection_type": signal.rejection_type,
+                "is_latched": False
             }
+            self.dashboard.signal = sig_data
+            
+            # Update Signal History
+            # Only add to history if it's a "new" distinct signal event 
+            # (or if it's a rejected signal we want to log)
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            hist_entry = {
+                "time": timestamp,
+                "symbol": symbol,
+                "direction": signal.direction,
+                "confidence": signal.confidence,
+                "verdict": "ENTRY" if not signal.rejection_type else "REJECT",
+                "reason": signal.rejection_type if signal.rejection_type else "VALID"
+            }
+            
+            # Simple deduplication: don't add if the last entry is the same signal on the same candle
+            if not self.dashboard.signal_history or (self.dashboard.signal_history[-1]['time'][:-2] != timestamp[:-2]):
+                self.dashboard.signal_history.append(hist_entry)
         else:
-            self.dashboard.signal = None
-        if analysis:
-            self.dashboard.h4_trend = analysis.get("h4_trend", "RANGING")
-            self.dashboard.m30_structure = analysis.get("m30_structure", "NEUTRAL")
+            # Latch check: If a position is open, don't clear the signal
+            if self.position_manager.count_open_positions(symbol) > 0:
+                if self.dashboard.signal:
+                    self.dashboard.signal['is_latched'] = True
+            else:
+                self.dashboard.signal = None
+
+        # 2. Update Analysis & Trend
+        self.dashboard.h4_trend = h4_trend
+        self.dashboard.m30_structure = m30_structure
         
-        # Pass AI context to dashboard
+        # 3. Pass AI context
         self.dashboard.ai_context = self.ai_advisor.context
         
+        # 4. Global Stats
         self.dashboard.session = self._get_session()
         self.dashboard.daily_pnl = self.daily_pnl
         self.dashboard.daily_trades = self.daily_trades
@@ -411,6 +468,9 @@ class TradingBot:
                 if cached_m30:
                     self._manage_trailing_stops(symbol, cached_m30)
 
+                # High-frequency dashboard update: P/L, Price, Account
+                self._update_dashboard_live_data(symbol)
+
             except Exception as e:
                 logger.warning("[TrailThread] Error: %s", e)
                 time.sleep(1)  # back-off on error
@@ -491,6 +551,12 @@ class TradingBot:
                         self.running = False
                         break
 
+                    # Initialize state variables
+                    signal = None
+                    h4_trend = "RANGING"
+                    m30_structure = "NEUTRAL"
+                    positions = []
+
                     symbol_info = self.data_fetcher.get_symbol_info(symbol)
                     if not symbol_info:
                         time.sleep(1)
@@ -520,7 +586,7 @@ class TradingBot:
                         if session != self.last_logged_session:
                             self.analysis_logger.log(f"Market Session: {session}", "INFO")
                             self.last_logged_session = session
-                        signal, h4_trend = self.strategy.analyze(
+                        signal, h4_trend, m30_structure = self.strategy.analyze(
                             symbol, h4_candles, h1_candles, m30_candles, m5_candles,
                             mid_price, d1_candles=d1_candles, session=session,
                         )
@@ -534,8 +600,11 @@ class TradingBot:
 
                         if signal:
                             # 1. Trigger AI Evaluation (Async)
-                            # This will fire a background thread.
-                            self.ai_advisor.evaluate_signal_async(signal, h4_trend, symbol)
+                            # Rate limited inside AIAdvisor, and here by candle time
+                            current_candle_time = m5_candles[-1]["time"]
+                            if current_candle_time != self.last_ai_eval_time:
+                                if self.ai_advisor.evaluate_signal_async(signal, h4_trend, symbol):
+                                    self.last_ai_eval_time = current_candle_time
                             
                             # 2. Check for latest Verdict from AI (Non-blocking)
                             ai_review = self.ai_advisor.context.get("last_signal_review", {})
@@ -584,7 +653,13 @@ class TradingBot:
                             if signal:
                                 if signal.confidence < self.strategy.min_confidence:
                                     self.analysis_logger.log(f"Signal confidence {signal.confidence:.1f}% below min {self.strategy.min_confidence}% after AI review.", "INFO")
+                                    signal.rejection_type = "LOW_CONF"
+                                    # Push state even if rejected to show the rejected signal
+                                    self._update_dashboard_state(symbol, signal, h4_trend=h4_trend, m30_structure=m30_structure)
                                     signal = None
+                        
+                        # Push state every cycle to update dashboard signals/trends
+                        self._update_dashboard_state(symbol, signal, h4_trend=h4_trend, m30_structure=m30_structure)
 
                         if signal:
                             current_candle_time = m5_candles[-1]["time"]

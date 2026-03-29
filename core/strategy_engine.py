@@ -152,10 +152,10 @@ class StrategyEngine:
 
     def analyze(self, symbol: str, h4_candles: List[dict], h1_candles: List[dict], m30_candles: List[dict],
                 m5_candles: List[dict], current_price: float,
-                d1_candles: Optional[List[dict]] = None, session: Optional[str] = None):
+                d1_candles: Optional[List[dict]] = None, session: Optional[str] = None) -> Tuple[Optional[TradeSignal], str, str]:
         
         if not h4_candles or not h1_candles or not m30_candles or not m5_candles:
-            return None, "RANGING"
+            return None, "RANGING", "NEUTRAL"
         
         # Performance: Truncate slices to reasonable lookback for indicator stability
         # O(N^2) Mitigation: 200 candles is enough for EMA50/RSI14 to stabilize.
@@ -165,10 +165,10 @@ class StrategyEngine:
         m5_candles = m5_candles[-400:] # M5 needs a bit more for breakout lookbacks
         
         if len(h4_candles) < 20 or len(h1_candles) < 20 or len(m30_candles) < 20 or len(m5_candles) < 20:
-            return None, "RANGING"
+            return None, "RANGING", "NEUTRAL"
 
         if session and session not in self.tradeable_sessions:
-            return None, "RANGING"
+            return None, "RANGING", "NEUTRAL"
 
         # Reset to base parameters before applying session-specific settings
         for param, value in self.strategy_config.items():
@@ -205,15 +205,15 @@ class StrategyEngine:
                 self.session_cooldown_active[s] = False
             
         if self.daily_losses >= self.max_daily_losses:
-            return None, "DAILY_LOSS_LIMIT"
+            return None, "DAILY_LOSS_LIMIT", "NEUTRAL"
             
         # Session Cooldown Check
         if session and self.session_cooldown_active.get(session, False):
-            return None, "SESSION_COOLDOWN"
+            return None, "SESSION_COOLDOWN", "NEUTRAL"
 
         self.m5_trade_counter += 1
         if self.m5_trade_counter - self.last_m5_stop_index < self.cooldown_candles:
-            return None, "COOLDOWN"
+            return None, "COOLDOWN", "NEUTRAL"
 
         # 1. Volatility Filter (ATR Ratio)
         m30_closes = np.array([c['close'] for c in m30_candles])
@@ -249,7 +249,7 @@ class StrategyEngine:
             atr_lookback = m30_candles[-self.vol_lookback:] if len(m30_candles) > self.vol_lookback else m30_candles
             atr_avg = self._calculate_atr(atr_lookback)
             if atr > atr_avg * (self.vol_mult_high + 2.0) or atr < atr_avg * (self.vol_mult_low - 0.5):
-                return None, h4_trend
+                return None, h4_trend, str(regime)
 
         # 3. Regime Integration
         regime = MarketRegime.classify(m30_candles)
@@ -257,7 +257,7 @@ class StrategyEngine:
         # Pullback/Breakout logic: Allow both in Trending/Ranging to catch turns.
         # Only hard skip on Low Liquidity (High Vol is lot-scaled).
         if regime == MarketRegime.LOW_LIQUIDITY:
-            return None, "LOW_LIQUIDITY"
+            return None, "LOW_LIQUIDITY", str(regime)
             
         m30_closes = np.array([c['close'] for c in m30_candles])
         m30_ema_val = self._calculate_ema(m30_closes, 10) 
@@ -288,15 +288,15 @@ class StrategyEngine:
             sl_dist = abs(signal.entry_price - signal.stop_loss)
             max_sl = 8.0 if "XAUUSD" in symbol else 0
             if max_sl > 0 and sl_dist > max_sl:
-                return None, h4_trend
+                return None, h4_trend, str(regime)
                 
             if signal.confluence_score < self.min_confluence_score:
-                return None, h4_trend
+                return None, h4_trend, str(regime)
 
             signal.confidence = self._calculate_confidence(confluence, h4_strength, signal)
             
             if signal.confidence < self.min_confidence:
-                return None, h4_trend
+                return None, h4_trend, str(regime)
             
             # Attach Vol Scaling Flag
             if vol_scaling_flag:
@@ -304,7 +304,7 @@ class StrategyEngine:
             
             self._log(f"PHASE 7 SIGNAL: {signal.direction} | Conf: {signal.confidence:.0f}% | PF Goal: 2.0+")
             
-        return signal, h4_trend
+        return signal, h4_trend, str(regime)
 
     def _get_h4_trend(self, h4_candles: List[dict]) -> Tuple[str, int]:
         if not h4_candles or len(h4_candles) < 5: return "RANGING", 50

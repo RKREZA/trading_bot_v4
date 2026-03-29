@@ -49,6 +49,8 @@ class Dashboard:
         self.h4_trend = "RANGING"
         self.m30_structure = "NEUTRAL"
         self.ai_context = {}  # Provided by TradingBot
+        self.signal_history = deque(maxlen=8)
+        self.positions = []
 
     def start(self):
         self._live = Live(self._render(), console=self.console, refresh_per_second=4, screen=True)
@@ -82,7 +84,11 @@ class Dashboard:
         parts.append(self._render_ai())
         # Row 5: Analysis + Setup
         parts.append(self._equal_row(self._render_analysis(), self._render_setup()))
-        # Row 6: Logs
+        # Row 6: Open Positions
+        parts.append(self._render_positions())
+        # Row 7: Signal History
+        parts.append(self._render_signal_history())
+        # Row 8: Logs
         parts.append(self._render_logs())
         return Group(*parts)
 
@@ -134,8 +140,14 @@ class Dashboard:
         if self.signal:
             s = self.signal
             icon = "+" if s['direction'] == 'BUY' else "-"
+            # Signal state: LATCHED (if position open) or PENDING
+            is_latched = s.get('is_latched', False)
             style = "bold white on green" if s['direction'] == 'BUY' else "bold white on red"
+            
             content.append(f" {icon} {s['direction']}", style=style)
+            if is_latched:
+                content.append(" [ACTIVE TRADE]", style="bold yellow")
+            
             content.append(f" | Entry: ${s['entry_price']:,.2f}", style=WHITE)
             content.append(f" | SL: ${s['stop_loss']:,.2f}", style=RED)
             content.append(f" | TP: ${s['take_profit']:,.2f}", style=GREEN)
@@ -143,6 +155,77 @@ class Dashboard:
         else:
             content.append(" Scanning for opportunities...", style=DIM)
         return Panel(content, title="[bold cyan]SIGNAL[/]", border_style="cyan", box=box.HEAVY, expand=True, padding=(0, 1))
+
+    def _render_signal_history(self) -> Panel:
+        if not self.signal_history:
+            return Panel(Text("  No recent signals", style=DIM), title="[bold magenta]SIGNAL HISTORY[/]", border_style="magenta", box=box.ROUNDED, expand=True, padding=(0, 1))
+        
+        t = Table(show_header=True, box=None, padding=(0, 1), expand=True, header_style=DIM)
+        t.add_column("TIME", width=10)
+        t.add_column("SYMBOL", width=12)
+        t.add_column("DIR", width=6)
+        t.add_column("CONF", justify="right", width=6)
+        t.add_column("VERDICT")
+        
+        for s in reversed(list(self.signal_history)):
+            timestamp = s.get('time', '--:--:--')
+            symbol = s.get('symbol', '-')
+            dir_style = GREEN if s['direction'] == 'BUY' else RED
+            v_style = GREEN if s.get('verdict') == 'ENTRY' else (RED if s.get('verdict') == 'REJECT' else YELLOW)
+            
+            t.add_row(
+                timestamp,
+                Text(symbol, style=YELLOW),
+                Text(s['direction'], style=dir_style),
+                f"{s['confidence']:.0f}%",
+                Text(s.get('reason', 'VALID'), style=v_style)
+            )
+        
+        return Panel(t, title="[bold magenta]SIGNAL HISTORY[/]", border_style="magenta", box=box.ROUNDED, expand=True, padding=(0, 1))
+
+    def _render_positions(self) -> Panel:
+        if not self.positions:
+            return Panel(Text("  No open positions", style=DIM), title="[bold green]OPEN POSITIONS[/]", border_style="green", box=box.ROUNDED, expand=True, padding=(0, 1))
+
+        t = Table(show_header=True, box=None, padding=(0, 1), expand=True, header_style=DIM)
+        t.add_column("TICKET", width=10)
+        t.add_column("SYMBOL", width=12)
+        t.add_column("DIR", width=6)
+        t.add_column("LOT", justify="right")
+        t.add_column("ENTRY", justify="right")
+        t.add_column("CURRENT", justify="right")
+        t.add_column("P/L", justify="right")
+
+        for p in self.positions:
+            try:
+                # MT5 position objects are namedtuples or similar
+                ticket = str(getattr(p, 'ticket', '-'))
+                symbol = str(getattr(p, 'symbol', '-'))
+                pos_type = getattr(p, 'type', 0)
+                dir_str = "BUY" if pos_type == 0 else "SELL"
+                dir_style = GREEN if pos_type == 0 else RED
+                volume = f"{getattr(p, 'volume', 0):.2f}"
+                price_open = f"{getattr(p, 'price_open', 0):,.2f}"
+                price_current = f"{getattr(p, 'price_current', 0):,.2f}"
+                profit = getattr(p, 'profit', 0)
+                pnl_style = GREEN if profit >= 0 else RED
+                pnl_str = f"{'+' if profit >= 0 else ''}${profit:,.2f}"
+
+                t.add_row(
+                    ticket, 
+                    Text(symbol, style=YELLOW), 
+                    Text(dir_str, style=dir_style), 
+                    volume, 
+                    price_open, 
+                    price_current, 
+                    Text(pnl_str, style=f"bold {pnl_style}")
+                )
+            except Exception as e:
+                # If we received a dict instead of a positional object (unlikely but safe)
+                if isinstance(p, dict):
+                    t.add_row(str(p.get('ticket')), p.get('symbol'), p.get('type'), str(p.get('volume')), str(p.get('price_open')), str(p.get('price_current')), str(p.get('profit')))
+        
+        return Panel(t, title="[bold green]OPEN POSITIONS[/]", border_style="green", box=box.ROUNDED, expand=True, padding=(0, 1))
 
     def _render_ai(self) -> Panel:
         sess = self.ai_context.get("session")

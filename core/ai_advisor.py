@@ -82,6 +82,8 @@ class AIAdvisor:
         self._model = ""
         self._enabled = False
         self._eval_event = threading.Event()
+        self._lockout_until = 0.0
+        self._last_eval_time = 0.0
 
         self._load_context()
         self._init_client()
@@ -245,7 +247,11 @@ class AIAdvisor:
                 if content:
                     parts.append(content)
             return "".join(parts).strip()
+            return "".join(parts).strip()
         except Exception as exc:
+            if "429" in str(exc) or "Too Many Requests" in str(exc):
+                self._lockout_until = time.time() + 900  # 15 min
+                logger.warning("[AI] Rate limit (429) hit. AI features paused for 15 minutes.")
             logger.error("[AI] API error: %s", exc)
             return ""
 
@@ -338,14 +344,25 @@ Respond ONLY in this exact JSON (no extra text, no markdown):
     # Feature 2: Signal Reasoning Check (per signal, fire-and-forget)
     # ------------------------------------------------------------------
 
-    def evaluate_signal_async(self, signal, h4_trend: str, symbol: str) -> None:
+    def evaluate_signal_async(self, signal, h4_trend: str, symbol: str) -> bool:
         """
-        Non-blocking signal evaluation. Result lands in self._context
-        ['last_signal_review'] and is logged. The trading loop does NOT
-        wait — it reads the result from the previous call if needed.
+        Non-blocking signal evaluation. Returns True if a request was sent,
+        or False if throttled/locked out.
         """
         if not self._enabled:
-            return
+            return False
+        
+        now = time.time()
+        if now < self._lockout_until:
+            wait_min = int((self._lockout_until - now) / 60) + 1
+            logger.debug("[AI] Throttled: AI lockout active for %d more mins.", wait_min)
+            return False
+
+        # Throttle: Only evaluate once every 5 minutes (300s) to avoid spamming the same signal
+        if now - self._last_eval_time < 300:
+            return False
+
+        self._last_eval_time = now
         self._eval_event.clear()
         threading.Thread(
             target=self._signal_eval_worker,
@@ -353,6 +370,7 @@ Respond ONLY in this exact JSON (no extra text, no markdown):
             name="AI-SignalEval",
             daemon=True,
         ).start()
+        return True
 
     def wait_for_eval(self, timeout: int = 30) -> bool:
         """Wait for the latest signal evaluation to complete."""
