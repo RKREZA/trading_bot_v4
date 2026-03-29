@@ -348,6 +348,9 @@ class BacktestEngine:
                                     open_trade.partial_closed_count = 2
                                     if not quiet: pbar.write(f"[{candle_time}] Sell PPT2 @ {open_trade.tp_partial_2:.2f} | PnL: ${pnl:.2f} | Comm_Exit: ${comm_ppt:.2f}")
     
+                        # Save SL before MFE/trail updates for intra-candle bias check
+                        sl_before_trail = open_trade.sl
+                        
                         # MFE Tracking
                         if open_trade.signal.direction == "BUY":
                             if bid_h > open_trade.best_price:
@@ -399,6 +402,32 @@ class BacktestEngine:
                                 new_sl = open_trade.best_price + (excursion * give_back_pct)
                                 if new_sl < open_trade.sl:
                                     open_trade.sl = new_sl
+                            
+                            # 6. CRITICAL: Intra-candle look-ahead bias protection
+                            # The candle's HIGH updated MFE and moved SL tighter, but the LOW
+                            # might have come FIRST. If the candle's adverse extremum violated
+                            # the ORIGINAL SL (before trail), we must assume worst case: SL hit first.
+                            if not closed:
+                                if open_trade.signal.direction == "BUY" and bid_l <= sl_before_trail and open_trade.sl != sl_before_trail:
+                                    # Candle low hit original SL AND trail moved SL — ambiguous, assume SL hit
+                                    exit_price = sl_before_trail
+                                    result_type = "SL"
+                                    closed = True
+                                    open_trade.sl = sl_before_trail  # Restore for accurate record
+                                elif open_trade.signal.direction == "SELL" and ask_h >= sl_before_trail and open_trade.sl != sl_before_trail:
+                                    exit_price = sl_before_trail
+                                    result_type = "SL"
+                                    closed = True
+                                    open_trade.sl = sl_before_trail
+                                # Also check if candle violated the NEW tighter SL
+                                elif open_trade.signal.direction == "BUY" and bid_l <= open_trade.sl:
+                                    exit_price = open_trade.sl
+                                    result_type = "SL"
+                                    closed = True
+                                elif open_trade.signal.direction == "SELL" and ask_h >= open_trade.sl:
+                                    exit_price = open_trade.sl
+                                    result_type = "SL"
+                                    closed = True
                     
                     if closed:
                         # Add trailing stop slippage penalty if not using ticks
