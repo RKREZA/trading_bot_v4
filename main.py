@@ -647,7 +647,7 @@ class TradingBot:
                                     self.analysis_logger.log(f"AI Reasoning: {ai_review.get('reasoning', '')}", "INFO")
                             else:
                                 # Not fresh or not available - proceed with default (VALID)
-                                self.analysis_logger.log("AI Verdict not ready - Proceeding with default VALID.", "INFO")
+                                self.analysis_logger.log(f"AI Verdict not ready for {signal.direction} - Proceeding with default.", "INFO")
                             
                             # 3. Final Signal Check after AI (or default)
                             if signal:
@@ -669,11 +669,17 @@ class TradingBot:
                             if current_candle_time > last_trade:
                                 # Check open positions and pending orders
                                 if self.position_manager.count_open_positions(symbol) > 0:
-                                    self.analysis_logger.log(f"Skipping {signal.direction} – position already open for {symbol}")
+                                    self.analysis_logger.log(f"Skipping {signal.direction} – position already open for {symbol}", "INFO")
                                     continue
                                 if self.connection.get_pending_orders(symbol):
-                                    self.analysis_logger.log(f"Skipping {signal.direction} – pending order exists for {symbol}")
+                                    self.analysis_logger.log(f"Skipping {signal.direction} – pending order exists for {symbol}", "INFO")
                                     continue
+                            else:
+                                # This happens if we already took (or attempted) a trade on this 5m candle
+                                # We stay silent by default to avoid log spam, but for diagnosis we reveal it
+                                if time.time() % 30 < 2: # Log once every 30s while the signal persists on the same candle
+                                    self.analysis_logger.log(f"Skipping {signal.direction} – already traded/attempted on this candle ({current_candle_time})", "DIM")
+                                continue
 
                                 # Calculate lot size based on risk
                                 account_balance = self.connection.account_info.get("balance", 0)
@@ -701,11 +707,11 @@ class TradingBot:
                                 # 4. Final safety check for precision (floating point artifacts)
                                 lot_size = round(lot_size, 3) 
 
-                                # (AI evaluation moved up to be synchronous)
-
                                 if lot_size <= 0:
-                                    self.analysis_logger.log(f"Invalid lot size {lot_size}, skipping trade", "ERROR")
+                                    self.analysis_logger.log(f"Invalid lot size {lot_size} (rounded to 0?), skipping trade", "ERROR")
                                     continue
+                                
+                                self.analysis_logger.log(f"Final Lot Calculation: {lot_size:.3f} (Risk={risk_percent:.1f}%, AI×{ai_multi:.1f})", "INFO")
 
                                 self.analysis_logger.log(f"Attempting to place {signal.direction} order for {symbol} with lot {lot_size:.3f}", "INFO")
 

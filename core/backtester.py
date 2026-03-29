@@ -444,7 +444,7 @@ class BacktestEngine:
                     current_hour = candle_time.hour if hasattr(candle_time, 'hour') else 0
                     current_session = self.strategy.get_session_from_hour(current_hour, utc_offset)
                     
-                    signal, rejection_reason = self.strategy.analyze(symbol, h4_slice, h1_slice, m30_slice, m5_slice, bid, d1_candles=d1_candles, session=current_session)
+                    signal, h4_trend, m30_structure = self.strategy.analyze(symbol, h4_slice, h1_slice, m30_slice, m5_slice, bid, d1_candles=d1_candles, session=current_session)
                     
                     if signal:
                         ai_features = {
