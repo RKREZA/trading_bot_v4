@@ -230,6 +230,44 @@ class BacktestEngine:
                         pending_signal = None
                         continue
                 
+                # --- Execute Pending Signal at this candle's OPEN (next-candle entry) ---
+                if not open_trade and pending_signal is not None:
+                    ps = pending_signal
+                    pending_signal = None
+                    
+                    current_atr = m5_atr_series[i-1]
+                    avg_atr_here = m5_avg_atr[i-1]
+                    spread_val = self._get_spread(symbol, current_atr, avg_atr_here, point, ps["session"])
+                    slippage = self._get_slippage(symbol, current_atr, avg_atr_here, point)
+                    
+                    # Entry at this candle's OPEN (realistic: order fills after signal candle closes)
+                    entry_open = current_candle['open']
+                    ask = entry_open + (spread_val * point)
+                    bid = entry_open
+                    
+                    sig = ps["signal"]
+                    entry = ask + slippage if sig.direction == "BUY" else bid - slippage
+                    
+                    # Recalculate lot with actual entry price and current balance
+                    risk_pct = self.risk_manager.calculate_scaled_risk(self.balance, session=ps["session"])
+                    lot = self._calc_lot_size(self.balance, entry, sig.stop_loss, point, contract_size, risk_pct)
+                    
+                    if sig.rejection_type == "VOL_SCALING":
+                        lot *= 0.5
+                        lot = max(0.01, round(lot, 2))
+                        sig.reasons.append("Vol Scaling (50% Lot)")
+                    
+                    open_trade = _OpenTrade(
+                        sig, entry, lot, candle_time,
+                        ps["regime"], ps["ai_score"], spread_val, slippage,
+                        ps["session"]
+                    )
+                    
+                    self.notification_manager.notify_trade_open(symbol, sig.direction, entry, lot, sig.stop_loss, sig.take_profit)
+                    if not quiet:
+                        t_str = candle_time.strftime('%Y-%m-%d %H:%M') if isinstance(candle_time, datetime) else str(candle_time)
+                        pbar.write(f"[{t_str}] OPENED {sig.direction} @ {entry:.5f} | Lot: {lot} (next-candle entry)")
+
                 if open_trade:
                     if not hasattr(open_trade, 'comm_entry_paid') or not open_trade.comm_entry_paid:
                         comm_entry = self._get_commission(symbol, open_trade.lot) * 0.5
@@ -292,8 +330,8 @@ class BacktestEngine:
                                 exit_price, result_type, closed = open_trade.tp, "TP", True
                     
                         # --- Advanced Partial Profit Taking (PPT) ---
-                        # Only run if enabled in strategy_defaults
-                        if self.config.get("strategy_defaults", {}).get("partial_profit_enabled", True):
+                        # Only run if enabled in strategy_defaults and trade is not closed
+                        if not closed and self.config.get("strategy_defaults", {}).get("partial_profit_enabled", True):
                             if open_trade.signal.direction == "BUY":
                                 # Level 1
                                 if open_trade.partial_closed_count == 0 and bid_h >= open_trade.tp_partial_1:
@@ -348,86 +386,87 @@ class BacktestEngine:
                                     open_trade.partial_closed_count = 2
                                     if not quiet: pbar.write(f"[{candle_time}] Sell PPT2 @ {open_trade.tp_partial_2:.2f} | PnL: ${pnl:.2f} | Comm_Exit: ${comm_ppt:.2f}")
     
-                        # Save SL before MFE/trail updates for intra-candle bias check
-                        sl_before_trail = open_trade.sl
+                        if not closed:
+                            # Save SL before MFE/trail updates for intra-candle bias check
+                            sl_before_trail = open_trade.sl
                         
-                        # MFE Tracking
-                        if open_trade.signal.direction == "BUY":
-                            if bid_h > open_trade.best_price:
-                                open_trade.best_price = bid_h
-                        else:
-                            if ask_l < open_trade.best_price:
-                                open_trade.best_price = ask_l
-    
-                        # --- Optimized MFE Trailing ---
-                        ts_cfg = self.config.get("trailing_stop", {})
-                        if ts_cfg.get("enabled", True):
-                            # 1. Base Trail: 50% give-back
-                            give_back_pct = ts_cfg.get("mfe_trail_base", 0.5)
-                            
-                            # 2. Volatility Adjustment
-                            # If current ATR is much higher than average, widen trail (give more back)
-                            if i > 20:
-                                prev_atr_slice = m5_atr_series[i-21:i-1]
-                                if len(prev_atr_slice) > 0:
-                                    avg_atr = np.mean(prev_atr_slice)
-                                    if avg_atr > 0:
-                                        atr_ratio = m5_atr_series[i-1] / avg_atr
-                                        if atr_ratio > 1.3: give_back_pct += 0.2
-                                        elif atr_ratio < 0.7: give_back_pct -= 0.1
-                            
-                            # 3. Profit-Dependent (Tighten as profit increases)
-                            excursion = (open_trade.best_price - open_trade.entry_price) if open_trade.signal.direction == "BUY" else (open_trade.entry_price - open_trade.best_price)
-                            risk = abs(open_trade.entry_price - open_trade.signal.stop_loss)
-                            if risk > 0:
-                                rr_reached = excursion / risk
-                                if rr_reached >= 3.0:
-                                    give_back_pct = 0.3 # Tighten to 30% give-back
-                                elif rr_reached >= 2.0:
-                                    give_back_pct = 0.4
-                            
-                            # 4. Time-Based (Tighten after many candles)
-                            candles_in_trade = i - bisect.bisect_left(m5_times, open_trade.entry_time)
-                            if candles_in_trade > 100: # ~8 hours on M5
-                                give_back_pct = min(give_back_pct, 0.4)
-        
-                            give_back_pct = max(0.1, min(give_back_pct, 0.9))
-                            
-                            # 5. Apply Trail
+                            # MFE Tracking
                             if open_trade.signal.direction == "BUY":
-                                new_sl = open_trade.best_price - (excursion * give_back_pct)
-                                if new_sl > open_trade.sl:
-                                    open_trade.sl = new_sl
+                                if bid_h > open_trade.best_price:
+                                    open_trade.best_price = bid_h
                             else:
-                                new_sl = open_trade.best_price + (excursion * give_back_pct)
-                                if new_sl < open_trade.sl:
-                                    open_trade.sl = new_sl
+                                if ask_l < open_trade.best_price:
+                                    open_trade.best_price = ask_l
+    
+                            # --- Optimized MFE Trailing ---
+                            ts_cfg = self.config.get("trailing_stop", {})
+                            if ts_cfg.get("enabled", True):
+                                # 1. Base Trail: 50% give-back
+                                give_back_pct = ts_cfg.get("mfe_trail_base", 0.5)
                             
-                            # 6. CRITICAL: Intra-candle look-ahead bias protection
-                            # The candle's HIGH updated MFE and moved SL tighter, but the LOW
-                            # might have come FIRST. If the candle's adverse extremum violated
-                            # the ORIGINAL SL (before trail), we must assume worst case: SL hit first.
-                            if not closed:
-                                if open_trade.signal.direction == "BUY" and bid_l <= sl_before_trail and open_trade.sl != sl_before_trail:
-                                    # Candle low hit original SL AND trail moved SL — ambiguous, assume SL hit
-                                    exit_price = sl_before_trail
-                                    result_type = "SL"
-                                    closed = True
-                                    open_trade.sl = sl_before_trail  # Restore for accurate record
-                                elif open_trade.signal.direction == "SELL" and ask_h >= sl_before_trail and open_trade.sl != sl_before_trail:
-                                    exit_price = sl_before_trail
-                                    result_type = "SL"
-                                    closed = True
-                                    open_trade.sl = sl_before_trail
-                                # Also check if candle violated the NEW tighter SL
-                                elif open_trade.signal.direction == "BUY" and bid_l <= open_trade.sl:
-                                    exit_price = open_trade.sl
-                                    result_type = "SL"
-                                    closed = True
-                                elif open_trade.signal.direction == "SELL" and ask_h >= open_trade.sl:
-                                    exit_price = open_trade.sl
-                                    result_type = "SL"
-                                    closed = True
+                                # 2. Volatility Adjustment
+                                # If current ATR is much higher than average, widen trail (give more back)
+                                if i > 20:
+                                    prev_atr_slice = m5_atr_series[i-21:i-1]
+                                    if len(prev_atr_slice) > 0:
+                                        avg_atr = np.mean(prev_atr_slice)
+                                        if avg_atr > 0:
+                                            atr_ratio = m5_atr_series[i-1] / avg_atr
+                                            if atr_ratio > 1.3: give_back_pct += 0.2
+                                            elif atr_ratio < 0.7: give_back_pct -= 0.1
+                            
+                                # 3. Profit-Dependent (Tighten as profit increases)
+                                excursion = (open_trade.best_price - open_trade.entry_price) if open_trade.signal.direction == "BUY" else (open_trade.entry_price - open_trade.best_price)
+                                risk = abs(open_trade.entry_price - open_trade.signal.stop_loss)
+                                if risk > 0:
+                                    rr_reached = excursion / risk
+                                    if rr_reached >= 3.0:
+                                        give_back_pct = 0.3 # Tighten to 30% give-back
+                                    elif rr_reached >= 2.0:
+                                        give_back_pct = 0.4
+                            
+                                # 4. Time-Based (Tighten after many candles)
+                                candles_in_trade = i - bisect.bisect_left(m5_times, open_trade.entry_time)
+                                if candles_in_trade > 100: # ~8 hours on M5
+                                    give_back_pct = min(give_back_pct, 0.4)
+        
+                                give_back_pct = max(0.1, min(give_back_pct, 0.9))
+                            
+                                # 5. Apply Trail
+                                if open_trade.signal.direction == "BUY":
+                                    new_sl = open_trade.best_price - (excursion * give_back_pct)
+                                    if new_sl > open_trade.sl:
+                                        open_trade.sl = new_sl
+                                else:
+                                    new_sl = open_trade.best_price + (excursion * give_back_pct)
+                                    if new_sl < open_trade.sl:
+                                        open_trade.sl = new_sl
+                            
+                                # 6. CRITICAL: Intra-candle look-ahead bias protection
+                                # The candle's HIGH updated MFE and moved SL tighter, but the LOW
+                                # might have come FIRST. If the candle's adverse extremum violated
+                                # the ORIGINAL SL (before trail), we must assume worst case: SL hit first.
+                                if not closed:
+                                    if open_trade.signal.direction == "BUY" and bid_l <= sl_before_trail and open_trade.sl != sl_before_trail:
+                                        # Candle low hit original SL AND trail moved SL — ambiguous, assume SL hit
+                                        exit_price = sl_before_trail
+                                        result_type = "SL"
+                                        closed = True
+                                        open_trade.sl = sl_before_trail  # Restore for accurate record
+                                    elif open_trade.signal.direction == "SELL" and ask_h >= sl_before_trail and open_trade.sl != sl_before_trail:
+                                        exit_price = sl_before_trail
+                                        result_type = "SL"
+                                        closed = True
+                                        open_trade.sl = sl_before_trail
+                                    # Also check if candle violated the NEW tighter SL
+                                    elif open_trade.signal.direction == "BUY" and bid_l <= open_trade.sl:
+                                        exit_price = open_trade.sl
+                                        result_type = "SL"
+                                        closed = True
+                                    elif open_trade.signal.direction == "SELL" and ask_h >= open_trade.sl:
+                                        exit_price = open_trade.sl
+                                        result_type = "SL"
+                                        closed = True
                     
                     if closed:
                         # Add trailing stop slippage penalty if not using ticks
@@ -508,44 +547,6 @@ class BacktestEngine:
                         postfix["tp"] = f"{open_trade.tp:.2f}"
                     pbar.set_postfix(postfix, refresh=False)
     
-                # --- Execute Pending Signal at this candle's OPEN (next-candle entry) ---
-                if not open_trade and pending_signal is not None:
-                    ps = pending_signal
-                    pending_signal = None
-                    
-                    current_atr = m5_atr_series[i-1]
-                    avg_atr_here = m5_avg_atr[i-1]
-                    spread_val = self._get_spread(symbol, current_atr, avg_atr_here, point, ps["session"])
-                    slippage = self._get_slippage(symbol, current_atr, avg_atr_here, point)
-                    
-                    # Entry at this candle's OPEN (realistic: order fills after signal candle closes)
-                    entry_open = current_candle['open']
-                    ask = entry_open + (spread_val * point)
-                    bid = entry_open
-                    
-                    sig = ps["signal"]
-                    entry = ask + slippage if sig.direction == "BUY" else bid - slippage
-                    
-                    # Recalculate lot with actual entry price and current balance
-                    risk_pct = self.risk_manager.calculate_scaled_risk(self.balance, session=ps["session"])
-                    lot = self._calc_lot_size(self.balance, entry, sig.stop_loss, point, contract_size, risk_pct)
-                    
-                    if sig.rejection_type == "VOL_SCALING":
-                        lot *= 0.5
-                        lot = max(0.01, round(lot, 2))
-                        sig.reasons.append("Vol Scaling (50% Lot)")
-                    
-                    open_trade = _OpenTrade(
-                        sig, entry, lot, candle_time,
-                        ps["regime"], ps["ai_score"], spread_val, slippage,
-                        ps["session"]
-                    )
-                    
-                    self.notification_manager.notify_trade_open(symbol, sig.direction, entry, lot, sig.stop_loss, sig.take_profit)
-                    if not quiet:
-                        t_str = candle_time.strftime('%Y-%m-%d %H:%M') if isinstance(candle_time, datetime) else str(candle_time)
-                        pbar.write(f"[{t_str}] OPENED {sig.direction} @ {entry:.5f} | Lot: {lot} (next-candle entry)")
-
                 # --- Signal Generation (store as pending for next-candle entry) ---
                 if not open_trade and pending_signal is None:
                     h4_idx = self._find_slice_index(h4_times, candle_time)
