@@ -28,6 +28,10 @@ class ValidationSuite:
         # 4. Data Shuffle Test
         results['data_shuffle'] = self._data_shuffle_test(symbol, h4, h1, m30, m5, d1)
         
+        # 5. Monte Carlo Simulation
+        if results['base'].get('trades'):
+            results['monte_carlo'] = self.monte_carlo_equity(results['base']['trades'])
+        
         return self._generate_report(results)
 
     def _spread_sensitivity_test(self, symbol, h4, h1, m30, m5, d1):
@@ -105,3 +109,43 @@ class ValidationSuite:
             checks['reasons'].append("High Max Drawdown (>30%) detected in base backtest")
             
         return checks
+
+    def monte_carlo_equity(self, trades: List[Dict], iterations: int = 1000) -> Dict:
+        """
+        Perform Monte Carlo simulation on trade sequence.
+        Randomly shuffle trade order 1000 times, recompute equity curve and max drawdown.
+        """
+        import numpy as np
+        import pandas as pd
+        
+        pnl_list = [t['pnl'] for t in trades]
+        initial_balance = 1000 # Dummy or from config if available
+        max_drawdowns = []
+
+        for _ in range(iterations):
+            shuffled = pnl_list[:]
+            random.shuffle(shuffled)
+            
+            balance = initial_balance
+            equity_curve = [balance]
+            for pnl in shuffled:
+                balance += pnl
+                equity_curve.append(balance)
+            
+            equity_series = pd.Series(equity_curve)
+            rolling_max = equity_series.cummax()
+            drawdown = (rolling_max - equity_series) / rolling_max * 100
+            max_drawdowns.append(drawdown.max())
+            
+        max_drawdowns.sort()
+        # 95th percentile
+        p95_dd = max_drawdowns[int(iterations * 0.95)]
+        
+        if p95_dd > 30:
+            print(f"\n[WARNING] Strategy too fragile for live trading! 95% MC Max Drawdown: {p95_dd:.1f}%")
+            
+        return {
+            "p95_max_drawdown": float(p95_dd),
+            "mean_max_drawdown": float(np.mean(max_drawdowns)),
+            "worst_case_drawdown": float(max_drawdowns[-1])
+        }

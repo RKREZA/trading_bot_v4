@@ -71,12 +71,15 @@ class StrategyEngine:
         self.m5_trade_counter = 0 # To track cooldown in backtest candles
         self.last_m5_stop_index = -999
 
-        # Sessions
+        # Sessions & Cooldown
         self.session_cfg = config.get("session_config", {})
         self.tradeable_sessions = {
             _SESSION_KEY_MAP[k] for k, v in self.session_cfg.items()
             if v.get("enabled", False) and k in _SESSION_KEY_MAP
         } if self.session_cfg else _DEFAULT_SESSIONS
+        
+        self.consecutive_losses = {s: 0 for s in _DEFAULT_SESSIONS}
+        self.session_cooldown_active = {s: False for s in _DEFAULT_SESSIONS}
 
     @staticmethod
     def get_session_from_hour(hour: int, utc_offset: int = 0) -> str:
@@ -196,15 +199,38 @@ class StrategyEngine:
         if self.last_loss_date != current_date:
             self.daily_losses = 0
             self.last_loss_date = current_date
+            # Reset Session Cooldowns at start of day
+            for s in self.consecutive_losses:
+                self.consecutive_losses[s] = 0
+                self.session_cooldown_active[s] = False
             
         if self.daily_losses >= self.max_daily_losses:
             return None, "DAILY_LOSS_LIMIT"
             
+        # Session Cooldown Check
+        if session and self.session_cooldown_active.get(session, False):
+            return None, "SESSION_COOLDOWN"
+
         self.m5_trade_counter += 1
         if self.m5_trade_counter - self.last_m5_stop_index < self.cooldown_candles:
             return None, "COOLDOWN"
 
-        # 1. MTF Trend & Momentum
+        # 1. Volatility Filter (ATR Ratio)
+        m30_closes = np.array([c['close'] for c in m30_candles])
+        atr = self._calculate_atr(m30_candles)
+        
+        # Calculate SMA of ATR(20)
+        atr_history = []
+        for j in range(len(m30_candles) - 20, len(m30_candles)):
+            if j < 1: continue
+            atr_history.append(self._calculate_atr(m30_candles[:j+1]))
+        
+        sma_atr_20 = np.mean(atr_history) if atr_history else atr
+        atr_ratio = atr / sma_atr_20 if sma_atr_20 > 0 else 1.0
+        
+        vol_scaling_flag = False
+        if atr_ratio < 0.6 or atr_ratio > 2.5:
+            vol_scaling_flag = True # Reduce lot size by 50% for extreme or dead volatility
         h4_trend, h4_strength = self._get_h4_trend(h4_candles)
         h1_closes = np.array([c["close"] for c in h1_candles])
         h1_ema20 = self._calculate_ema(h1_closes, 14)
@@ -225,26 +251,28 @@ class StrategyEngine:
             if atr > atr_avg * (self.vol_mult_high + 2.0) or atr < atr_avg * (self.vol_mult_low - 0.5):
                 return None, h4_trend
 
-        # 3. Regime Branching
+        # 3. Regime Integration
         regime = MarketRegime.classify(m30_candles)
+        
+        # Pullback/Breakout logic: Allow both in Trending/Ranging to catch turns.
+        # Only hard skip on Low Liquidity (High Vol is lot-scaled).
+        if regime == MarketRegime.LOW_LIQUIDITY:
+            return None, "LOW_LIQUIDITY"
+            
         m30_closes = np.array([c['close'] for c in m30_candles])
         m30_ema_val = self._calculate_ema(m30_closes, 10) 
-        
-        if abs(current_price - m30_ema_val) > atr * 5.0: # Extreme gap
-            return None, h4_trend
 
         signal = None
-        if regime == MarketRegime.TRENDING:
-            if effective_trend == "BULLISH":
-                if current_price > m30_ema_val and 30 < h1_rsi < 95:
-                    signal = self._check_breakout_entry(m30_candles, m5_candles, "BULLISH", current_price)
-            elif effective_trend == "BEARISH":
-                if current_price < m30_ema_val and 5 < h1_rsi < 70:
-                    signal = self._check_breakout_entry(m30_candles, m5_candles, "BEARISH", current_price)
-        else: # Pullback
-            if effective_trend == "BULLISH":
+        # Try Breakout first (High priority)
+        if effective_trend == "BULLISH":
+            if current_price > m30_ema_val and 25 < h1_rsi < 95:
+                signal = self._check_breakout_entry(m30_candles, m5_candles, "BULLISH", current_price)
+            if not signal: # Fallback to Pullback
                 signal = self._check_pullback_entry(m30_candles, m5_candles, "BULLISH", current_price)
-            elif effective_trend == "BEARISH":
+        elif effective_trend == "BEARISH":
+            if current_price < m30_ema_val and 5 < h1_rsi < 75:
+                signal = self._check_breakout_entry(m30_candles, m5_candles, "BEARISH", current_price)
+            if not signal: # Fallback to Pullback
                 signal = self._check_pullback_entry(m30_candles, m5_candles, "BEARISH", current_price)
 
         if signal:
@@ -269,6 +297,10 @@ class StrategyEngine:
             
             if signal.confidence < self.min_confidence:
                 return None, h4_trend
+            
+            # Attach Vol Scaling Flag
+            if vol_scaling_flag:
+                signal.rejection_type = "VOL_SCALING" # Use this to trigger lot reduction in risk manager
             
             self._log(f"PHASE 7 SIGNAL: {signal.direction} | Conf: {signal.confidence:.0f}% | PF Goal: 2.0+")
             
@@ -309,7 +341,7 @@ class StrategyEngine:
                 return TradeSignal("SELL", current_price, 0, 0, reasons=["M30 Breakout"])
                 
         # 2. Lower Timeframe (M5) Breakout (Hyper Frequency)
-        m5_lookback = max(3, self.swing_lookback // 2)
+        m5_lookback = 3 # More aggressive than swing_lookback
         recent_m5 = m5_candles[-m5_lookback:]
         if trend == "BULLISH":
             res_m5 = max(c["high"] for c in recent_m5[:-1])
@@ -419,6 +451,14 @@ class StrategyEngine:
         if atr > self._calculate_atr(m30_candles) * 0.1:
             score += 1; reasons.append("Volatility Exp")
             
+        m5_closes = np.array([c["close"] for c in m5_candles])
+        m5_ema20 = self._calculate_ema_series(m5_closes, 20)
+        if len(m5_ema20) > 2:
+            if signal.direction == "BUY" and m5_ema20[-1] > m5_ema20[-2]:
+                score += 1; reasons.append("M5 EMA Slope")
+            elif signal.direction == "SELL" and m5_ema20[-1] < m5_ema20[-2]:
+                score += 1; reasons.append("M5 EMA Slope")
+            
         return score, reasons
 
     def _calculate_confidence(self, confluence: int, h4_strength: int, signal: TradeSignal) -> float:
@@ -427,9 +467,18 @@ class StrategyEngine:
         strength_bonus = (h4_strength / 100) * 10
         return min(95.0, base + conf_bonus + strength_bonus)
 
-    def report_trade_result(self, result: str, timestamp: datetime):
+    def report_trade_result(self, result: str, timestamp: datetime, session: Optional[str] = None):
         """Called by bot/backtester to report trade exit results."""
         if result == "SL":
             self.daily_losses += 1
             self.last_m5_stop_index = self.m5_trade_counter
             self.last_stop_time = timestamp
+            
+            if session:
+                self.consecutive_losses[session] = self.consecutive_losses.get(session, 0) + 1
+                if self.consecutive_losses[session] >= 2:
+                    self.session_cooldown_active[session] = True
+        elif result == "TP":
+            if session:
+                self.consecutive_losses[session] = 0
+                self.session_cooldown_active[session] = False

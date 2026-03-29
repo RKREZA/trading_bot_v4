@@ -38,11 +38,20 @@ class PerformanceMetrics:
         drawdown = (rolling_max - equity_series) / rolling_max * 100
         max_drawdown = drawdown.max()
         
-        # Sharpe Ratio (Daily)
+        # Sharpe Ratio (Daily Percentage Returns)
         df['date'] = pd.to_datetime(df['time']).dt.date
         daily_pnl = df.groupby('date')['pnl'].sum()
-        if len(daily_pnl) > 1:
-            sharpe = (daily_pnl.mean() / daily_pnl.std()) * np.sqrt(252) if daily_pnl.std() > 0 else 0
+        
+        # Reconstruct daily balance
+        daily_balances = [initial_balance]
+        for pnl in daily_pnl:
+            daily_balances.append(daily_balances[-1] + pnl)
+        
+        daily_bal_series = pd.Series(daily_balances)
+        daily_ret = daily_bal_series.pct_change().dropna()
+        
+        if len(daily_ret) > 1:
+            sharpe = (daily_ret.mean() / daily_ret.std()) * np.sqrt(252) if daily_ret.std() > 0 else 0
         else:
             sharpe = 0
             

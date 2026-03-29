@@ -16,23 +16,15 @@ class WalkForwardValidation:
         self.last_train_perf = {}
 
     def run_validation(self, symbol: str, h4: List[dict], h1: List[dict], m30: List[dict], m5: List[dict], d1: List[dict], 
-                       train_days: int = 30, test_days: int = 7) -> List[Dict]:
+                       train_days: int = 90, test_days: int = 30) -> List[Dict]:
         """
-        Implementation of rolling window walk-forward validation.
-        Support for days instead of months for granular research.
+        Implementation of rolling window walk-forward validation (3m IS / 1m OOS).
         """
         results = []
         
-        # Convert all timestamps to datetime if they are ints (from MT5)
-        for cf in [h4, h1, m30, m5, d1]:
-            for c in cf:
-                if isinstance(c['time'], (int, float)):
-                    c['time'] = datetime.fromtimestamp(c['time'], tz=timezone.utc)
-
         # Use M30 as the anchor for window slicing
-        m30_df = pd.DataFrame(m30)
-        start_date = m30[0]['time']
-        end_date = m30[-1]['time']
+        start_date = datetime.fromtimestamp(m30[0]['time'], tz=timezone.utc)
+        end_date = datetime.fromtimestamp(m30[-1]['time'], tz=timezone.utc)
         
         current_train_start = start_date
         
@@ -78,7 +70,7 @@ class WalkForwardValidation:
             
             # 2. VALIDATION (OOS)
             test_config = copy.deepcopy(self.config)
-            test_config["strategy"].update(best_params)
+            test_config["strategy_defaults"].update(best_params)
             
             test_strategy = StrategyEngine(test_config)
             tester = BacktestEngine(test_config, test_strategy)
@@ -88,20 +80,41 @@ class WalkForwardValidation:
                                    test_data["m30"], test_data["m5"], 
                                    test_data["d1"], quiet=True)
             
+            # Check for Overfitting (Decay Ratio)
+            is_sharpe = self.last_train_perf.get("sharpe_ratio", 0)
+            oos_sharpe = test_perf.get("sharpe_ratio", 0)
+            decay_ratio = oos_sharpe / is_sharpe if is_sharpe > 0 else 0
+            
+            if decay_ratio < 0.5:
+                logger.warning(f"HIGH OVERFIT RISK: Window {current_train_end.date()} OOS decay ratio: {decay_ratio:.2f}")
+
             # 3. RECORD RESULTS
-            results.append({
+            record = {
                 "window": f"{current_train_end.date()} to {current_test_end.date()}",
                 "best_params": best_params,
                 "is_metrics": self.last_train_perf,
-                "oos_metrics": test_perf
-            })
+                "oos_metrics": test_perf,
+                "decay_ratio": round(float(decay_ratio), 4)
+            }
+            results.append(record)
             
             current_train_start += pd.DateOffset(days=test_days) # Slide by test window
+            
+        # Save to file
+        import json
+        def datetime_handler(x):
+            if isinstance(x, datetime):
+                return x.isoformat()
+            raise TypeError("Unknown type")
+
+        with open("wf_robustness.json", "w") as f:
+            json.dump(results, f, indent=4, default=datetime_handler)
+        logger.info(f"Walk-forward results saved to wf_robustness.json")
             
         return results
 
     def _filter_by_time(self, candles: List[dict], start: datetime, end: datetime) -> List[dict]:
-        return [c for c in candles if start <= c['time'] < end]
+        return [c for c in candles if start <= datetime.fromtimestamp(c['time'], tz=timezone.utc) < end]
 
     def _optimize(self, symbol, data, grid) -> dict:
         best_metric = -999999
@@ -115,7 +128,7 @@ class WalkForwardValidation:
         for v in itertools.product(*values):
             params = dict(zip(keys, v))
             tmp_config = copy.deepcopy(self.config)
-            tmp_config["strategy"].update(params)
+            tmp_config["strategy_defaults"].update(params)
             
             strat = StrategyEngine(tmp_config)
             tester = BacktestEngine(tmp_config, strat)

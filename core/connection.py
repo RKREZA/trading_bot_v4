@@ -173,6 +173,32 @@ class MT5Connection:
             "server_time": server_time,
         }
 
+    def get_filling_mode(self, symbol: str) -> int:
+        """
+        Dynamically determine the supported filling mode for a symbol.
+        Common modes: FOK (Fill or Kill), IOC (Immediate or Cancel), RETURN.
+        """
+        if mt5 is None:
+            return 0
+
+        symbol_info = mt5.symbol_info(symbol)
+        if symbol_info is None:
+            return mt5.ORDER_FILLING_RETURN
+
+        # filling_mode is a bitmask of supported modes:
+        # SYMBOL_FILLING_FOK = 1
+        # SYMBOL_FILLING_IOC = 2
+        # SYMBOL_FILLING_RETURN = 0 (sometimes implied or required for certain accounts)
+        
+        filling = symbol_info.filling_mode
+        
+        if filling & 1: # mt5.SYMBOL_FILLING_FOK
+            return mt5.ORDER_FILLING_FOK
+        elif filling & 2: # mt5.SYMBOL_FILLING_IOC
+            return mt5.ORDER_FILLING_IOC
+        else:
+            return mt5.ORDER_FILLING_RETURN
+
     def place_order(self, symbol: str, signal, lot_size: float, max_retries: int = 3, delay: float = 1.0) -> Optional[dict]:
         """
         Place an order in MT5 based on the provided signal, with retry logic.
@@ -221,7 +247,7 @@ class MT5Connection:
                 "magic": magic,
                 "comment": "Bot V3",
                 "type_time": mt5.ORDER_TIME_GTC,
-                "type_filling": mt5.ORDER_FILLING_RETURN,
+                "type_filling": self.get_filling_mode(symbol),
             }
 
             result = mt5.order_send(request)

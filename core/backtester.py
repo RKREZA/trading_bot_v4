@@ -78,9 +78,9 @@ class BacktestEngine:
 
     def _get_spread(self, symbol: str, current_atr: float, point: float) -> float:
         symbol_cfg = self.config.get("symbol_defaults", {}).get(symbol, {})
-        base_spread = symbol_cfg.get("base_spread", 30) # in points
+        base_spread = symbol_cfg.get("base_spread", 25) # in points (e.g. 25 for XAUUSDm)
         # If ATR is high, widen spread. 
-        # Example: if ATR > 100 points, spread = base + (ATR * 0.1)
+        # Example: if ATR > 100 points, spread = base + (ATR * 0.2)
         atr_points = current_atr / point if point > 0 else 0
         dynamic_spread = base_spread
         if atr_points > 100:
@@ -92,8 +92,8 @@ class BacktestEngine:
         return lot * 7.0
 
     def _get_slippage(self, symbol: str) -> float:
-        max_slip = self.config.get("symbol_defaults", {}).get(symbol, {}).get("max_slippage", 0.2)
-        return random.uniform(0, max_slip)
+        # Return random value in points (0.0 to 1.0)
+        return random.uniform(0.0, 1.0)
 
     def _calc_lot_size(self, balance: float, entry: float, sl: float, point: float, contract_size: float, risk_pct: Optional[float] = None) -> float:
         if risk_pct is None:
@@ -103,7 +103,11 @@ class BacktestEngine:
         if risk_dist_price < point:
             risk_dist_price = point * 10 
 
-        lot = risk_amount / (risk_dist_price * contract_size)
+        # Correct Lot Size Calculation for Gold
+        point_value = contract_size * point   # dollars per point (e.g. 100 * 0.01 = $1)
+        risk_points = risk_dist_price / point
+        lot = risk_amount / (risk_points * point_value)
+        
         lot = round(float(max(0.01, lot)), 2)
         max_lot = self.config.get("risk", {}).get("max_lot_size", 5.0)
         return min(lot, max_lot)
@@ -172,12 +176,14 @@ class BacktestEngine:
                 candle_time = m5_times[i]
                 
                 if open_trade:
-                    if not hasattr(open_trade, 'comm_entry_paid'):
+                    if not hasattr(open_trade, 'comm_entry_paid') or not open_trade.comm_entry_paid:
                         comm_entry = self._get_commission(open_trade.lot) * 0.5
                         self.balance -= comm_entry
                         open_trade.comm_entry_paid = True
+                        open_trade.comm_entry_amount = comm_entry
                     
-                    current_atr = m5_atr_series[i]
+                    # Fix Look-ahead Bias: use ATR from [i-1] for decisions at start of candle i
+                    current_atr = m5_atr_series[i-1]
                     spread_val = self._get_spread(symbol, current_atr, point) * point
                     
                     bid_h, bid_l, bid_c = current_candle['high'], current_candle['low'], current_candle['close']
@@ -230,54 +236,61 @@ class BacktestEngine:
                                 exit_price, result_type, closed = open_trade.tp, "TP", True
                     
                         # --- Advanced Partial Profit Taking (PPT) ---
-                        # Level 1: @ tp1_price - 25% Lot & Move SL to BE
-                        # Level 2: @ tp2_price - 25% Lot
-                        
-                        if open_trade.signal.direction == "BUY":
-                            # Level 1
-                            if open_trade.partial_closed_count == 0 and bid_h >= open_trade.tp_partial_1:
-                                close_lot = open_trade.lot * 0.25
-                                pnl = (open_trade.tp_partial_1 - open_trade.entry_price) * contract_size * close_lot
-                                comm = self._get_commission(close_lot)
-                                self.balance += (pnl - comm)
-                                open_trade.lot -= close_lot
-                                open_trade.sl = open_trade.entry_price # BE
-                                open_trade.partial_closed_count = 1
-                                if not quiet: pbar.write(f"[{candle_time}] Buy PPT1 @ {open_trade.tp_partial_1:.2f} | PnL: ${pnl:.2f} | Comm: ${comm:.2f}")
-    
-                            # Level 2
-                            elif open_trade.partial_closed_count == 1 and bid_h >= open_trade.tp_partial_2:
-                                close_lot = open_trade.lot * 0.33 # ~25% of original (1/3 of remaining 0.75)
-                                pnl = (open_trade.tp_partial_2 - open_trade.entry_price) * contract_size * close_lot
-                                comm = self._get_commission(close_lot)
-                                self.balance += (pnl - comm)
-                                open_trade.lot -= close_lot
-                                open_trade.partial_closed_count = 2
-                                if not quiet: pbar.write(f"[{candle_time}] Buy PPT2 @ {open_trade.tp_partial_2:.2f} | PnL: ${pnl:.2f} | Comm: ${comm:.2f}")
-    
-                        else: # SELL
-                            # Level 1
-                            if open_trade.partial_closed_count == 0 and ask_l <= open_trade.tp_partial_1:
-                                close_lot = open_trade.lot * 0.25
-                                pnl = (open_trade.entry_price - open_trade.tp_partial_1) * contract_size * close_lot
-                                # PPT exit commission (remaining 50% for the closed portion)
-                                comm_ppt = self._get_commission(close_lot) * 0.5
-                                self.balance += (pnl - comm_ppt)
-                                open_trade.lot -= close_lot
-                                open_trade.sl = open_trade.entry_price # BE
-                                open_trade.partial_closed_count = 1
-                                if not quiet: pbar.write(f"[{candle_time}] Sell PPT1 @ {open_trade.tp_partial_1:.2f} | PnL: ${pnl:.2f} | Comm_Exit: ${comm_ppt:.2f}")
-    
-                            # Level 2
-                            elif open_trade.partial_closed_count == 1 and ask_l <= open_trade.tp_partial_2:
-                                close_lot = open_trade.lot * 0.33
-                                pnl = (open_trade.entry_price - open_trade.tp_partial_2) * contract_size * close_lot
-                                # PPT exit commission (remaining 50% for the closed portion)
-                                comm_ppt = self._get_commission(close_lot) * 0.5
-                                self.balance += (pnl - comm_ppt)
-                                open_trade.lot -= close_lot
-                                open_trade.partial_closed_count = 2
-                                if not quiet: pbar.write(f"[{candle_time}] Sell PPT2 @ {open_trade.tp_partial_2:.2f} | PnL: ${pnl:.2f} | Comm_Exit: ${comm_ppt:.2f}")
+                        # Only run if enabled in strategy_defaults
+                        if self.config.get("strategy_defaults", {}).get("partial_profit_enabled", True):
+                            if open_trade.signal.direction == "BUY":
+                                # Level 1
+                                if open_trade.partial_closed_count == 0 and bid_h >= open_trade.tp_partial_1:
+                                    close_lot = open_trade.lot * 0.25
+                                    pnl = (open_trade.tp_partial_1 - open_trade.entry_price) * contract_size * close_lot
+                                    comm = self._get_commission(close_lot)
+                                    self.balance += (pnl - comm)
+                                    open_trade.lot -= close_lot
+                                    
+                                    # Move SL to BE only if trailing_stop is enabled
+                                    if self.config.get("trailing_stop", {}).get("enabled", True):
+                                        open_trade.sl = open_trade.entry_price # BE
+                                        
+                                    open_trade.partial_closed_count = 1
+                                    if not quiet: pbar.write(f"[{candle_time}] Buy PPT1 @ {open_trade.tp_partial_1:.2f} | PnL: ${pnl:.2f} | Comm: ${comm:.2f}")
+        
+                                # Level 2
+                                elif open_trade.partial_closed_count == 1 and bid_h >= open_trade.tp_partial_2:
+                                    close_lot = open_trade.lot * 0.33 # ~25% of original (1/3 of remaining 0.75)
+                                    pnl = (open_trade.tp_partial_2 - open_trade.entry_price) * contract_size * close_lot
+                                    comm = self._get_commission(close_lot)
+                                    self.balance += (pnl - comm)
+                                    open_trade.lot -= close_lot
+                                    open_trade.partial_closed_count = 2
+                                    if not quiet: pbar.write(f"[{candle_time}] Buy PPT2 @ {open_trade.tp_partial_2:.2f} | PnL: ${pnl:.2f} | Comm: ${comm:.2f}")
+        
+                            else: # SELL
+                                # Level 1
+                                if open_trade.partial_closed_count == 0 and ask_l <= open_trade.tp_partial_1:
+                                    close_lot = open_trade.lot * 0.25
+                                    pnl = (open_trade.entry_price - open_trade.tp_partial_1) * contract_size * close_lot
+                                    # PPT exit commission (remaining 50% for the closed portion)
+                                    comm_ppt = self._get_commission(close_lot) * 0.5
+                                    self.balance += (pnl - comm_ppt)
+                                    open_trade.lot -= close_lot
+                                    
+                                    # Move SL to BE only if trailing_stop is enabled
+                                    if self.config.get("trailing_stop", {}).get("enabled", True):
+                                        open_trade.sl = open_trade.entry_price # BE
+                                        
+                                    open_trade.partial_closed_count = 1
+                                    if not quiet: pbar.write(f"[{candle_time}] Sell PPT1 @ {open_trade.tp_partial_1:.2f} | PnL: ${pnl:.2f} | Comm_Exit: ${comm_ppt:.2f}")
+        
+                                # Level 2
+                                elif open_trade.partial_closed_count == 1 and ask_l <= open_trade.tp_partial_2:
+                                    close_lot = open_trade.lot * 0.33
+                                    pnl = (open_trade.entry_price - open_trade.tp_partial_2) * contract_size * close_lot
+                                    # PPT exit commission (remaining 50% for the closed portion)
+                                    comm_ppt = self._get_commission(close_lot) * 0.5
+                                    self.balance += (pnl - comm_ppt)
+                                    open_trade.lot -= close_lot
+                                    open_trade.partial_closed_count = 2
+                                    if not quiet: pbar.write(f"[{candle_time}] Sell PPT2 @ {open_trade.tp_partial_2:.2f} | PnL: ${pnl:.2f} | Comm_Exit: ${comm_ppt:.2f}")
     
                         # MFE Tracking
                         if open_trade.signal.direction == "BUY":
@@ -288,53 +301,62 @@ class BacktestEngine:
                                 open_trade.best_price = ask_l
     
                         # --- Optimized MFE Trailing ---
-                        # 1. Base Trail: 50% give-back
-                        give_back_pct = self.config.get("strategy", {}).get("mfe_trail_base", 0.5)
-                        
-                        # 2. Volatility Adjustment
-                        # If current ATR is much higher than average, widen trail (give more back)
-                        if i > 20:
-                            prev_atr_slice = m5_atr_series[i-20:i]
-                            if len(prev_atr_slice) > 0:
-                                avg_atr = np.mean(prev_atr_slice)
-                                if avg_atr > 0:
-                                    atr_ratio = m5_atr_series[i] / avg_atr
-                                    if atr_ratio > 1.3: give_back_pct += 0.2
-                                    elif atr_ratio < 0.7: give_back_pct -= 0.1
-                        
-                        # 3. Profit-Dependent (Tighten as profit increases)
-                        excursion = (open_trade.best_price - open_trade.entry_price) if open_trade.signal.direction == "BUY" else (open_trade.entry_price - open_trade.best_price)
-                        risk = abs(open_trade.entry_price - open_trade.signal.stop_loss)
-                        if risk > 0:
-                            rr_reached = excursion / risk
-                            if rr_reached >= 3.0:
-                                give_back_pct = 0.3 # Tighten to 30% give-back
-                            elif rr_reached >= 2.0:
-                                give_back_pct = 0.4
-                        
-                        # 4. Time-Based (Tighten after many candles)
-                        candles_in_trade = i - bisect.bisect_left(m5_times, open_trade.entry_time)
-                        if candles_in_trade > 100: # ~8 hours on M5
-                            give_back_pct = min(give_back_pct, 0.4)
-    
-                        give_back_pct = max(0.1, min(give_back_pct, 0.9))
-                        
-                        # 5. Apply Trail
-                        if open_trade.signal.direction == "BUY":
-                            new_sl = open_trade.best_price - (excursion * give_back_pct)
-                            if new_sl > open_trade.sl:
-                                open_trade.sl = new_sl
-                        else:
-                            new_sl = open_trade.best_price + (excursion * give_back_pct)
-                            if new_sl < open_trade.sl:
-                                open_trade.sl = new_sl
+                        ts_cfg = self.config.get("trailing_stop", {})
+                        if ts_cfg.get("enabled", True):
+                            # 1. Base Trail: 50% give-back
+                            give_back_pct = ts_cfg.get("mfe_trail_base", 0.5)
+                            
+                            # 2. Volatility Adjustment
+                            # If current ATR is much higher than average, widen trail (give more back)
+                            if i > 20:
+                                prev_atr_slice = m5_atr_series[i-21:i-1]
+                                if len(prev_atr_slice) > 0:
+                                    avg_atr = np.mean(prev_atr_slice)
+                                    if avg_atr > 0:
+                                        atr_ratio = m5_atr_series[i-1] / avg_atr
+                                        if atr_ratio > 1.3: give_back_pct += 0.2
+                                        elif atr_ratio < 0.7: give_back_pct -= 0.1
+                            
+                            # 3. Profit-Dependent (Tighten as profit increases)
+                            excursion = (open_trade.best_price - open_trade.entry_price) if open_trade.signal.direction == "BUY" else (open_trade.entry_price - open_trade.best_price)
+                            risk = abs(open_trade.entry_price - open_trade.signal.stop_loss)
+                            if risk > 0:
+                                rr_reached = excursion / risk
+                                if rr_reached >= 3.0:
+                                    give_back_pct = 0.3 # Tighten to 30% give-back
+                                elif rr_reached >= 2.0:
+                                    give_back_pct = 0.4
+                            
+                            # 4. Time-Based (Tighten after many candles)
+                            candles_in_trade = i - bisect.bisect_left(m5_times, open_trade.entry_time)
+                            if candles_in_trade > 100: # ~8 hours on M5
+                                give_back_pct = min(give_back_pct, 0.4)
+        
+                            give_back_pct = max(0.1, min(give_back_pct, 0.9))
+                            
+                            # 5. Apply Trail
+                            if open_trade.signal.direction == "BUY":
+                                new_sl = open_trade.best_price - (excursion * give_back_pct)
+                                if new_sl > open_trade.sl:
+                                    open_trade.sl = new_sl
+                            else:
+                                new_sl = open_trade.best_price + (excursion * give_back_pct)
+                                if new_sl < open_trade.sl:
+                                    open_trade.sl = new_sl
                     
                     if closed:
+                        # Add trailing stop slippage penalty if not using ticks
+                        if result_type == "SL" and not candle_ticks:
+                            # if SL was moved (trailing), add extra slippage
+                            if open_trade.sl != open_trade.signal.stop_loss:
+                                ts_slippage = random.uniform(0.0, 0.3) * point
+                                exit_price = exit_price - ts_slippage if open_trade.signal.direction == "BUY" else exit_price + ts_slippage
+                        
                         exit_slippage = self._get_slippage(symbol) * point
                         final_exit = exit_price - exit_slippage if open_trade.signal.direction == "BUY" else exit_price + exit_slippage
                         
-                        # Notify strategy
-                        self.strategy.report_trade_result(result_type, candle_time)
+                        # Notify strategy with session context
+                        self.strategy.report_trade_result(result_type, candle_time, session=open_trade.session)
                         
                         pnl = (final_exit - open_trade.entry_price) * (1 if open_trade.signal.direction == "BUY" else -1) * contract_size * open_trade.lot
                         # Exit commission (remaining 50% of round-turn for the current lot)
@@ -378,6 +400,9 @@ class BacktestEngine:
 
                         self.balance += final_pnl
                         
+                        # Update Risk Manager History for Kelly
+                        self.risk_manager.update_history(trade_record)
+                        
                         # Notify via Telegram
                         self.notification_manager.notify_trade_close(symbol, trade_record['direction'], trade_record['exit'], final_pnl, result_type)
                         
@@ -408,7 +433,8 @@ class BacktestEngine:
                     m30_slice = m30_candles[:m30_idx + 1]
                     m5_slice = m5_candles[:i + 1]
                     
-                    current_atr = m5_atr_series[i]
+                    # Fix Look-ahead Bias: use ATR from [i-1] for decisions at start of candle i
+                    current_atr = m5_atr_series[i-1]
                     spread_val = self._get_spread(symbol, current_atr, point)
                     
                     bid = current_candle['close']
@@ -418,7 +444,7 @@ class BacktestEngine:
                     current_hour = candle_time.hour if hasattr(candle_time, 'hour') else 0
                     current_session = self.strategy.get_session_from_hour(current_hour, utc_offset)
                     
-                    signal, _ = self.strategy.analyze(symbol, h4_slice, h1_slice, m30_slice, m5_slice, bid, d1_candles=d1_candles, session=current_session)
+                    signal, rejection_reason = self.strategy.analyze(symbol, h4_slice, h1_slice, m30_slice, m5_slice, bid, d1_candles=d1_candles, session=current_session)
                     
                     if signal:
                         ai_features = {
@@ -446,6 +472,12 @@ class BacktestEngine:
                             risk_pct = self.risk_manager.calculate_scaled_risk(self.balance, session=current_session)
                             lot = self._calc_lot_size(self.balance, entry, signal.stop_loss, point, contract_size, risk_pct)
                             
+                            # Volatility Scaling: 50% lot reduction if flag set
+                            if signal.rejection_type == "VOL_SCALING":
+                                lot *= 0.5
+                                lot = max(0.01, round(lot, 2))
+                                signal.reasons.append("Vol Scaling (50% Lot)")
+                            
                             open_trade = _OpenTrade(
                                 signal, entry, lot, candle_time, 
                                 ai_features['regime'], ai_score, spread_val, slippage,
@@ -461,4 +493,64 @@ class BacktestEngine:
         performance = PerformanceMetrics.calculate_metrics(trades, self.initial_balance)
         performance['trades'] = trades
         performance['session_stats'] = session_stats
+
+        # --- Post-Backtest Sanity Checks ---
+        if trades:
+            mc_drawdown = self._run_monte_carlo_drawdown(trades)
+            performance['mc_max_drawdown'] = mc_drawdown
+            if mc_drawdown > 30:
+                logger.warning(f"CAUTION: Monte Carlo Max Drawdown ({mc_drawdown:.1f}%) exceeds 30%!")
+
+            # OOS Consistency (if data is split)
+            oos_score = self._check_oos_consistency(trades)
+            if oos_score is not None:
+                performance['oos_consistency_score'] = oos_score
+                if oos_score < 0.5:
+                    logger.warning(f"CAUTION: Out-of-Sample consistency score low ({oos_score:.2f}). Possible over-fitting.")
+
         return performance
+
+    def _run_monte_carlo_drawdown(self, trades: List[Dict], iterations: int = 100) -> float:
+        """Randomly shuffle trade order 100 times and find the worst-case max drawdown."""
+        pnl_list = [t['pnl'] for t in trades]
+        max_drawdowns = []
+
+        for _ in range(iterations):
+            shuffled = pnl_list[:]
+            random.shuffle(shuffled)
+            
+            balance = self.initial_balance
+            equity_curve = [balance]
+            for pnl in shuffled:
+                balance += pnl
+                equity_curve.append(balance)
+            
+            equity_series = pd.Series(equity_curve)
+            rolling_max = equity_series.cummax()
+            drawdown = (rolling_max - equity_series) / rolling_max * 100
+            max_drawdowns.append(drawdown.max())
+            
+        return float(np.mean(max_drawdowns))
+
+    def _check_oos_consistency(self, trades: List[Dict]) -> Optional[float]:
+        """
+        Compare Sharpe Ratio of first 70% (In-Sample) vs last 30% (Out-of-Sample).
+        Returns the ratio of OOS Sharpe / IS Sharpe.
+        """
+        if len(trades) < 20:
+            return None
+        
+        split_idx = int(len(trades) * 0.7)
+        is_trades = trades[:split_idx]
+        oos_trades = trades[split_idx:]
+        
+        is_perf = PerformanceMetrics.calculate_metrics(is_trades, self.initial_balance)
+        # For OOS, use the ending balance of IS as initial
+        oos_perf = PerformanceMetrics.calculate_metrics(oos_trades, is_perf['final_balance'])
+        
+        is_sharpe = is_perf.get('sharpe_ratio', 0)
+        oos_sharpe = oos_perf.get('sharpe_ratio', 0)
+        
+        if is_sharpe > 0:
+            return float(oos_sharpe / is_sharpe)
+        return 0.0

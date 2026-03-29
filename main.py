@@ -338,7 +338,7 @@ class TradingBot:
             "magic": magic,
             "comment": comment,
             "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_filling": self.connection.get_filling_mode(symbol),
         }
         res = mt5.order_send(req)
         if res and res.retcode == mt5.TRADE_RETCODE_DONE:
@@ -533,41 +533,55 @@ class TradingBot:
                                 signal = None
 
                         if signal:
-                            # 1. Trigger AI Evaluation
+                            # 1. Trigger AI Evaluation (Async)
+                            # This will fire a background thread.
                             self.ai_advisor.evaluate_signal_async(signal, h4_trend, symbol)
                             
-                            # 2. Wait for Verdict (Synchronous)
-                            if not self.ai_advisor.wait_for_eval(timeout=30):
-                                self.analysis_logger.log("AI Verdict timed out - Proceeding with CAUTION.", "WARNING")
-                            
-                            # 3. Check AI Verdict
+                            # 2. Check for latest Verdict from AI (Non-blocking)
                             ai_review = self.ai_advisor.context.get("last_signal_review", {})
-                            ai_verdict = ai_review.get("verdict", "VALID")
+                            ai_verdict = "VALID"
                             
-                            if ai_verdict == "AVOID":
-                                self.analysis_logger.log(f"AI Verdict: AVOID signal for {symbol} - Skipping.", "WARNING")
-                                signal = None
-                            elif ai_verdict == "CAUTION":
-                                signal.confidence *= 0.8
-                                self.analysis_logger.log(f"AI Verdict: CAUTION - Confidence reduced to {signal.confidence:.1f}%", "INFO")
+                            # Check if verdict is fresh (within 60s) and matches signal direction
+                            is_fresh = False
+                            if ai_review:
+                                try:
+                                    updated_at = datetime.fromisoformat(ai_review.get("updated_at"))
+                                    age = (datetime.now(timezone.utc) - updated_at).total_seconds()
+                                    if age < 60 and ai_review.get("direction") == signal.direction:
+                                        is_fresh = True
+                                except Exception:
+                                    pass
                             
-                            if signal and ai_review:
-                                # 4. Apply Confidence Adjustment
-                                adj = ai_review.get("confidence_adjustment", 0)
-                                signal.confidence += adj
+                            if is_fresh:
+                                ai_verdict = ai_review.get("verdict", "VALID")
+                                if ai_verdict == "AVOID":
+                                    self.analysis_logger.log(f"AI Verdict: AVOID signal for {symbol} - Skipping.", "WARNING")
+                                    signal = None
+                                elif ai_verdict == "CAUTION":
+                                    signal.confidence *= 0.8
+                                    self.analysis_logger.log(f"AI Verdict: CAUTION - Confidence reduced to {signal.confidence:.1f}%", "INFO")
                                 
-                                # 5. Apply AI SL Buffer
-                                buffer_add = self.ai_advisor.sl_buffer_add
-                                if buffer_add > 0:
-                                    if signal.direction == "BUY":
-                                        signal.stop_loss -= buffer_add
-                                    else:
-                                        signal.stop_loss += buffer_add
-                                    self.analysis_logger.log(f"AI SL Buffer Adjustment: {buffer_add:+.2f}", "INFO")
-                                
-                                self.analysis_logger.log(f"AI Reasoning: {ai_review.get('reasoning', '')}", "INFO")
-                                
-                                # 6. Re-check min confidence
+                                if signal:
+                                    # Apply Confidence Adjustment
+                                    adj = ai_review.get("confidence_adjustment", 0)
+                                    signal.confidence += adj
+                                    
+                                    # Apply AI SL Buffer
+                                    buffer_add = self.ai_advisor.sl_buffer_add
+                                    if buffer_add > 0:
+                                        if signal.direction == "BUY":
+                                            signal.stop_loss -= buffer_add
+                                        else:
+                                            signal.stop_loss += buffer_add
+                                        self.analysis_logger.log(f"AI SL Buffer Adjustment: {buffer_add:+.2f}", "INFO")
+                                    
+                                    self.analysis_logger.log(f"AI Reasoning: {ai_review.get('reasoning', '')}", "INFO")
+                            else:
+                                # Not fresh or not available - proceed with default (VALID)
+                                self.analysis_logger.log("AI Verdict not ready - Proceeding with default VALID.", "INFO")
+                            
+                            # 3. Final Signal Check after AI (or default)
+                            if signal:
                                 if signal.confidence < self.strategy.min_confidence:
                                     self.analysis_logger.log(f"Signal confidence {signal.confidence:.1f}% below min {self.strategy.min_confidence}% after AI review.", "INFO")
                                     signal = None
@@ -595,13 +609,22 @@ class TradingBot:
                                 ai_multi = self.ai_advisor.lot_multiplier
                                 lot_size = base_lot * ai_multi
 
-                                # Safety cap: never exceed max_lot_size from config
-                                max_lot = self.config.get("max_lot_size", 5.0)
-                                lot_size = min(lot_size, max_lot)
+                                # 1. Get detailed symbol limits
+                                min_lot = symbol_info.get("min_lot", 0.01)
+                                max_lot_broker = symbol_info.get("max_lot", 100.0)
+                                lot_step = symbol_info.get("lot_step", 0.01)
 
-                                # Ensure lot size meets broker minimums
-                                if lot_size < symbol_info.get("lot", 0.01):
-                                    lot_size = symbol_info.get("lot", 0.01)
+                                # 2. Round to broker's volume step
+                                if lot_step > 0:
+                                    lot_size = round(lot_size / lot_step) * lot_step
+
+                                # 3. Clamp to broker and config limits
+                                max_lot_config = self.config.get("max_lot_size", 5.0)
+                                max_lot = min(max_lot_broker, max_lot_config)
+                                lot_size = max(min_lot, min(max_lot, lot_size))
+
+                                # 4. Final safety check for precision (floating point artifacts)
+                                lot_size = round(lot_size, 3) 
 
                                 # (AI evaluation moved up to be synchronous)
 

@@ -204,6 +204,7 @@ class DataFetcher:
                 "contract_size": info.trade_contract_size,
                 "min_lot": info.volume_min,
                 "max_lot": info.volume_max,
+                "lot_step": info.volume_step,
                 "spread": info.spread,
                 "bid": info.bid,
                 "ask": info.ask,

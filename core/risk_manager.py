@@ -15,26 +15,50 @@ class RiskManager:
         self.initial_balance = None
         self.current_max_balance = 0.0
         self.session_cfg = config.get("session_config", {})
+        self.trade_history = []
+
+    def _calculate_kelly_fraction(self) -> float:
+        """Calculate Kelly Fraction based on trade history."""
+        if len(self.trade_history) < 10:
+            return self.base_risk_pct / 100.0 # Default to base risk if not enough data
+            
+        wins = [t['pnl'] for t in self.trade_history if t['pnl'] > 0]
+        losses = [abs(t['pnl']) for t in self.trade_history if t['pnl'] <= 0]
+        
+        if not wins or not losses:
+            return self.base_risk_pct / 100.0
+            
+        win_rate = len(wins) / len(self.trade_history)
+        avg_win = sum(wins) / len(wins)
+        avg_loss = sum(losses) / len(losses)
+        
+        if avg_win == 0: return 0.0
+        
+        kelly = (win_rate * avg_win - (1 - win_rate) * avg_loss) / avg_win
+        return max(0.0, kelly)
 
     def calculate_scaled_risk(self, current_balance: float, session: Optional[str] = None) -> float:
         """
-        Scale risk percentage based on current drawdown and trading session.
-        Example: If drawdown is 5%, reduce risk. If session is LONDON, apply multiplier.
+        Scale risk percentage based on Kelly Fraction, current drawdown and trading session.
         """
         if self.initial_balance is None:
             self.initial_balance = current_balance
             self.current_max_balance = current_balance
         
-        # Base Scaling
-        risk_pct = self.base_risk_pct
+        # 1. Dynamic Kelly Risk
+        kelly = self._calculate_kelly_fraction()
+        risk_pct = (kelly * 0.25) * 100.0 # Quarter-Kelly
         
-        # Apply Session Multiplier from session_config
+        # Clamp between 0.5% and 2.0%
+        risk_pct = max(0.5, min(risk_pct, 2.0))
+        
+        # 2. Apply Session Multiplier
         if session:
             session_data = self.session_cfg.get(session, {})
-            # Look for risk_multiplier in session data, fallback to 1.0
             multiplier = session_data.get("risk_multiplier", 1.0)
             risk_pct *= multiplier
-
+            
+        # 3. Handle Drawdown Tracking
         if current_balance > self.current_max_balance:
             self.current_max_balance = current_balance
             return risk_pct
@@ -48,15 +72,18 @@ class RiskManager:
         if not self.drawdown_scaling_enabled:
             return risk_pct
 
-        # Scaling logic: Reduce risk linearly after 2% drawdown
+        # 4. Drawdown Scaling (Reduce risk linearly after 2% drawdown)
         if drawdown_pct > 2.0:
-            # Scale factor: 1.0 at 2% DD, 0.2 at max_drawdown_limit
             scale = max(0.2, 1.0 - (drawdown_pct - 2.0) / (self.max_drawdown_limit - 2.0))
             scaled_risk = risk_pct * scale
             if not self.silent: logger.info(f"Risk Scaled: {risk_pct:.2f}% -> {scaled_risk:.2f}% (DD: {drawdown_pct:.2f}%)")
             return scaled_risk
 
         return risk_pct
+
+    def update_history(self, trade_record: Dict):
+        """Update internal trade history for Kelly calculation."""
+        self.trade_history.append(trade_record)
 
     def check_daily_stop(self, daily_pnl_pct: float) -> bool:
         """Check if daily loss limit (e.g., -3%) is hit."""
