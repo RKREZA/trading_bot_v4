@@ -52,6 +52,9 @@ class Dashboard:
         self.signal_history = deque(maxlen=8)
         self.positions = []
         self.market_open = True # Flag for dashboard
+        self.fetch_status = ""
+        self.fetch_ms = 0
+
 
     def start(self):
         self._live = Live(self._render(), console=self.console, refresh_per_second=4, screen=True)
@@ -126,6 +129,10 @@ class Dashboard:
         price = tick.get('price', 0)
         t.add_row("PRICE", Text(f"${price:,.2f}", style=f"bold {WHITE}"))
         t.add_row("SPREAD", f"{tick.get('spread', 0):.2f}")
+        if self.fetch_status:
+            t.add_row("DATA TICK", Text.from_markup(self.fetch_status))
+        else:
+            t.add_row("DATA LAT.", f"{self.fetch_ms}ms" if self.fetch_ms > 0 else "-")
         return Panel(t, title="[bold yellow]MARKET[/]", border_style="yellow", box=box.ROUNDED, expand=True, padding=(0, 1))
 
     def _render_perf(self) -> Panel:

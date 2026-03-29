@@ -78,6 +78,40 @@ class TradingBot:
         self.position_meta = {} # {ticket: {"best_price": float, "partial_closed": bool, "risk": float}}
         self.notified_deals = set() # Track closed deals to avoid duplicate alerts
         self.last_ai_eval_time = None
+        self.state_file = "bot_state.json"
+        self._load_state()
+
+
+    def _save_state(self):
+        state = {
+            "position_meta": self.position_meta,
+            "notified_deals": list(self.notified_deals),
+            "equity": {
+                "peak_equity": self.peak_equity,
+                "max_drawdown_reached": self.max_drawdown_reached
+            }
+        }
+        try:
+            with open(self.state_file, "w") as f:
+                json.dump(state, f)
+        except Exception as e:
+            logger.error("Failed to save state: %s", e)
+
+    def _load_state(self):
+        import os
+        if not os.path.exists(self.state_file):
+            return
+        try:
+            with open(self.state_file, "r") as f:
+                state = json.load(f)
+                self.position_meta = {int(k): v for k, v in state.get("position_meta", {}).items()}
+                self.notified_deals = set(state.get("notified_deals", []))
+                eq = state.get("equity", {})
+                self.peak_equity = eq.get("peak_equity", 0.0)
+                self.max_drawdown_reached = eq.get("max_drawdown_reached", 0.0)
+                logger.debug("Bot state restored from %s", self.state_file)
+        except Exception as e:
+            logger.error("Failed to load state from %s: %s", self.state_file, e)
 
     @staticmethod
     def _load_config(config_path: str) -> dict:
@@ -148,17 +182,25 @@ class TradingBot:
             pnl = sum(d.profit for d in deals if d.entry == mt5.DEAL_ENTRY_OUT)
             wins = sum(1 for d in deals if d.entry == mt5.DEAL_ENTRY_OUT and d.profit > 0)
             losses = sum(1 for d in deals if d.entry == mt5.DEAL_ENTRY_OUT and d.profit <= 0)
+            trades_in = sum(1 for d in deals if d.entry == mt5.DEAL_ENTRY_IN)
             self.daily_pnl = pnl
             self.win_count = wins
             self.loss_count = losses
+            self.daily_trades = trades_in
+            self.dashboard.daily_trades = trades_in
 
             # Notify for newly closed deals
-            if self.notification_manager.enabled:
-                for d in deals:
-                    if d.entry == mt5.DEAL_ENTRY_OUT and d.ticket not in self.notified_deals:
+            save_needed = False
+            for d in deals:
+                if d.entry == mt5.DEAL_ENTRY_OUT and d.ticket not in self.notified_deals:
+                    if self.notification_manager.enabled:
                         res = "PROFIT" if d.profit > 0 else "LOSS"
                         self.notification_manager.notify_trade_close(d.symbol, "OUT", d.price, d.profit, res)
-                        self.notified_deals.add(d.ticket)
+                    self.notified_deals.add(d.ticket)
+                    save_needed = True
+            
+            if save_needed:
+                self._save_state()
         except Exception as e:
             logger.warning("Could not fetch realized P/L from MT5: %s", e)
 
@@ -258,8 +300,7 @@ class TradingBot:
                 return
 
             ts_cfg = self.config.get("trailing_stop", {})
-            if not ts_cfg.get("enabled", True):
-                return
+
 
             be_rr    = ts_cfg.get("breakeven_at_rr",   1.0)
             p2_rr    = ts_cfg.get("trail_phase2_at_rr", 1.5)
@@ -267,6 +308,7 @@ class TradingBot:
             p2_mult  = ts_cfg.get("trail_atr_multiplier",      1.5)
             p3_mult  = ts_cfg.get("trail_tight_atr_multiplier", 1.0)
 
+            state_changed = False
             for pos in positions:
                 if pos.magic != magic:
                     continue
@@ -276,11 +318,13 @@ class TradingBot:
                     # Initialize metadata if missing (e.g. after restart)
                     risk = abs(pos.price_open - pos.sl) if pos.sl > 0 else 0
                     self.position_meta[ticket] = {
+                        "ticket": ticket,
                         "best_price": pos.price_current,
                         "partial_closed_count": 0,
                         "risk": risk,
                         "ai_score": self.ai_advisor.context.get("last_signal_review", {}).get("score", 0.5)
                     }
+                    state_changed = True
                 
                 meta = self.position_meta[ticket]
                 if "partial_closed_count" not in meta: meta["partial_closed_count"] = 0
@@ -289,9 +333,13 @@ class TradingBot:
 
                 # 1. Update MFE (Best Price)
                 if pos.type == 0: # BUY
-                    if cur > meta["best_price"]: meta["best_price"] = cur
+                    if cur > meta["best_price"]:
+                        meta["best_price"] = cur
+                        state_changed = True
                 else: # SELL
-                    if cur < meta["best_price"]: meta["best_price"] = cur
+                    if cur < meta["best_price"]:
+                        meta["best_price"] = cur
+                        state_changed = True
 
                 # 2. Partial Profit Taking (1:1 and 2:1 RR)
                 if meta["risk"] > 0 and meta["partial_closed_count"] < 2:
@@ -312,6 +360,7 @@ class TradingBot:
                         if close_vol >= 0.01:
                             self._execute_partial_close(ticket, symbol, pos.type, close_vol, magic, "PPT Level 1 (1:1)")
                             meta["partial_closed_count"] = 1
+                            state_changed = True
                             # Move SL to BE
                             self._modify_sl_tp(ticket, symbol, open_price, pos.tp)
                             continue
@@ -322,49 +371,68 @@ class TradingBot:
                         if close_vol >= 0.01:
                             self._execute_partial_close(ticket, symbol, pos.type, close_vol, magic, "PPT Level 2 (2:1)")
                             meta["partial_closed_count"] = 2
+                            state_changed = True
                             continue
 
                 # 3. Optimized MFE Trailing
-                # 1. Base Trail: 50% give-back
-                give_back_pct = ts_cfg.get("mfe_trail_base", 0.5)
-                
-                # 2. Profit-Dependent (Tighten as profit increases)
-                risk = meta.get("risk", 0)
-                excursion = (meta["best_price"] - open_price) if pos.type == 0 else (open_price - meta["best_price"])
-                
-                if risk > 0:
-                    rr_reached = excursion / risk
-                    if rr_reached > 3.0: give_back_pct = 0.3
-                    elif rr_reached > 1.5: give_back_pct = 0.4
-                
-                # 3. Time-Based (Tighten after many candles - not easily available here, using timestamp as proxy)
-                # (Optional: fetch duration if needed)
+                if ts_cfg.get("enabled", True):
+                    # 1. Base Trail: 50% give-back
+                    give_back_pct = ts_cfg.get("mfe_trail_base", 0.5)
+                    
+                    # 2. Profit-Dependent (Tighten as profit increases)
+                    risk = meta.get("risk", 0)
+                    excursion = (meta["best_price"] - open_price) if pos.type == 0 else (open_price - meta["best_price"])
+                    
+                    if risk > 0:
+                        rr_reached = excursion / risk
+                        if rr_reached > 3.0: give_back_pct = 0.3
+                        elif rr_reached > 1.5: give_back_pct = 0.4
+                    
+                    # 3. Time-Based (Tighten after many candles - not easily available here, using timestamp as proxy)
+                    # (Optional: fetch duration if needed)
 
-                give_back_pct = max(0.1, min(give_back_pct, 0.9))
-                
-                new_sl = pos.sl
-                if pos.type == 0: # BUY
-                    if excursion > 0:
-                        mfe_sl = meta["best_price"] - (excursion * give_back_pct)
-                        if mfe_sl > new_sl: new_sl = mfe_sl
-                else: # SELL
-                    if excursion > 0:
-                        mfe_sl = meta["best_price"] + (excursion * give_back_pct)
-                        if mfe_sl < new_sl or new_sl == 0: new_sl = mfe_sl
+                    give_back_pct = max(0.1, min(give_back_pct, 0.9))
+                    
+                    new_sl = pos.sl
+                    if pos.type == 0: # BUY
+                        if excursion > 0:
+                            mfe_sl = meta["best_price"] - (excursion * give_back_pct)
+                            if mfe_sl > new_sl: new_sl = mfe_sl
+                    else: # SELL
+                        if excursion > 0:
+                            mfe_sl = meta["best_price"] + (excursion * give_back_pct)
+                            if mfe_sl < new_sl or new_sl == 0: new_sl = mfe_sl
 
-                # Only send modification if SL actually improved
-                moved = (pos.type == 0 and new_sl > pos.sl) or (pos.type == 1 and (new_sl < pos.sl or pos.sl == 0))
-                if moved:
-                    req = {
-                        "action":   mt5.TRADE_ACTION_SLTP,
-                        "symbol":   symbol,
-                        "position": pos.ticket,
-                        "sl":       round(float(new_sl), 2),
-                        "tp":       pos.tp,
-                    }
-                    result = mt5.order_send(req)
-                    if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-                        self.analysis_logger.log(f"[MFE Trail] Ticket {pos.ticket} SL → {new_sl:.2f}", "INFO")
+                    # Only send modification if SL actually improved
+                    moved = (pos.type == 0 and new_sl > pos.sl) or (pos.type == 1 and (new_sl < pos.sl or pos.sl == 0))
+                    if moved:
+                        req = {
+                            "action":   mt5.TRADE_ACTION_SLTP,
+                            "symbol":   symbol,
+                            "position": pos.ticket,
+                            "sl":       round(float(new_sl), 2),
+                            "tp":       pos.tp,
+                        }
+                        result = mt5.order_send(req)
+                        if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                            self.analysis_logger.log(f"[MFE Trail] Ticket {pos.ticket} SL → {new_sl:.2f}", "INFO")
+
+            # Memory management & State JSON Sync
+            active_tickets = {p.ticket for p in positions if p.magic == magic}
+            tracked_tickets = list(self.position_meta.keys())
+            closed_something = False
+            for t in tracked_tickets:
+                if t not in active_tickets:
+                    del self.position_meta[t]
+                    state_changed = True
+                    closed_something = True
+
+            if state_changed:
+                self._save_state()
+            
+            if closed_something:
+                self._update_realized_pnl()
+
 
         except Exception as e:
             logger.warning("_manage_trailing_stops error: %s", e)
@@ -549,11 +617,31 @@ class TradingBot:
                     }
 
                     # Fetch candles (cached per timeframe)
+                    fetch_start = time.time()
+                    
+                    self.dashboard.fetch_status = "[bold yellow]Data 1/5 (H4)...[/]"
+                    self.dashboard.update()
                     h4_candles = self.data_fetcher.fetch_candles(symbol, "H4", 250)
+                    
+                    self.dashboard.fetch_status = "[bold yellow]Data 2/5 (H1)...[/]"
+                    self.dashboard.update()
                     h1_candles = self.data_fetcher.fetch_candles(symbol, "H1", 600) # Added H1 for MTF
+                    
+                    self.dashboard.fetch_status = "[bold yellow]Data 3/5 (M30)...[/]"
+                    self.dashboard.update()
                     m30_candles = self.data_fetcher.fetch_candles(symbol, "M30", 1540)
+                    
+                    self.dashboard.fetch_status = "[bold yellow]Data 4/5 (D1)...[/]"
+                    self.dashboard.update()
                     d1_candles = self.data_fetcher.fetch_candles(symbol, "D1", 100) # Added D1
+                    
+                    self.dashboard.fetch_status = "[bold yellow]Data 5/5 (M5)...[/]"
+                    self.dashboard.update()
                     m5_candles = self.data_fetcher.fetch_candles(symbol, "M5", 2000)
+                    
+                    self.dashboard.fetch_ms = int((time.time() - fetch_start) * 1000)
+                    self.dashboard.fetch_status = ""
+                    self.dashboard.update()
 
                     if h4_candles and h1_candles and m30_candles and m5_candles and d1_candles:
                         # Trailing SL is now handled by the real-time thread
@@ -689,9 +777,7 @@ class TradingBot:
                                 result = self.connection.place_order(symbol, signal, lot_size)
                                 if result:
                                     self.last_trade_time[symbol] = current_candle_time
-                                    self.daily_trades += 1
-                                    self.dashboard.daily_trades = self.daily_trades
-                                    
+                                                                        
                                     # Notify via Telegram
                                     self.notification_manager.notify_trade_open(symbol, signal.direction, signal.entry_price, lot_size, signal.stop_loss, signal.take_profit)
                                     
