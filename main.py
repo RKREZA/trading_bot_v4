@@ -79,18 +79,20 @@ class TradingBot:
         self.notified_deals = set() # Track closed deals to avoid duplicate alerts
         self.last_ai_eval_time = None
         self.state_file = "bot_state.json"
+        self.state_lock = threading.Lock()
         self._load_state()
 
 
     def _save_state(self):
-        state = {
-            "position_meta": self.position_meta,
-            "notified_deals": list(self.notified_deals),
-            "equity": {
-                "peak_equity": self.peak_equity,
-                "max_drawdown_reached": self.max_drawdown_reached
+        with self.state_lock:
+            state = {
+                "position_meta": self.position_meta,
+                "notified_deals": list(self.notified_deals),
+                "equity": {
+                    "peak_equity": self.peak_equity,
+                    "max_drawdown_reached": self.max_drawdown_reached
+                }
             }
-        }
         try:
             with open(self.state_file, "w") as f:
                 json.dump(state, f)
@@ -104,11 +106,12 @@ class TradingBot:
         try:
             with open(self.state_file, "r") as f:
                 state = json.load(f)
-                self.position_meta = {int(k): v for k, v in state.get("position_meta", {}).items()}
-                self.notified_deals = set(state.get("notified_deals", []))
-                eq = state.get("equity", {})
-                self.peak_equity = eq.get("peak_equity", 0.0)
-                self.max_drawdown_reached = eq.get("max_drawdown_reached", 0.0)
+                with self.state_lock:
+                    self.position_meta = {int(k): v for k, v in state.get("position_meta", {}).items()}
+                    self.notified_deals = set(state.get("notified_deals", []))
+                    eq = state.get("equity", {})
+                    self.peak_equity = eq.get("peak_equity", 0.0)
+                    self.max_drawdown_reached = eq.get("max_drawdown_reached", 0.0)
                 logger.debug("Bot state restored from %s", self.state_file)
         except Exception as e:
             logger.error("Failed to load state from %s: %s", self.state_file, e)
@@ -314,35 +317,47 @@ class TradingBot:
                     continue
 
                 ticket = pos.ticket
-                if ticket not in self.position_meta:
-                    # Initialize metadata if missing (e.g. after restart)
-                    risk = abs(pos.price_open - pos.sl) if pos.sl > 0 else 0
-                    self.position_meta[ticket] = {
-                        "ticket": ticket,
-                        "best_price": pos.price_current,
-                        "partial_closed_count": 0,
-                        "risk": risk,
-                        "ai_score": self.ai_advisor.context.get("last_signal_review", {}).get("score", 0.5)
-                    }
-                    state_changed = True
                 
-                meta = self.position_meta[ticket]
-                if "partial_closed_count" not in meta: meta["partial_closed_count"] = 0
+                # Retrieve/Init metadata locks
+                with self.state_lock:
+                    if ticket not in self.position_meta:
+                        # Initialize metadata if missing (e.g. after restart)
+                        risk = abs(pos.price_open - pos.sl) if pos.sl > 0 else 0
+                        self.position_meta[ticket] = {
+                            "ticket": ticket,
+                            "best_price": pos.price_current,
+                            "partial_closed_count": 0,
+                            "risk": risk,
+                            "ai_score": self.ai_advisor.context.get("last_signal_review", {}).get("score", 0.5)
+                        }
+                        state_changed = True
+                    
+                    if "partial_closed_count" not in self.position_meta[ticket]:
+                        self.position_meta[ticket]["partial_closed_count"] = 0
+                        
+                    # Cache snapshot for unlock safety
+                    meta_risk = self.position_meta[ticket]["risk"]
+                    meta_partial_closed_count = self.position_meta[ticket]["partial_closed_count"]
+                    meta_best_price = self.position_meta[ticket]["best_price"]
+                    meta_ai_score = self.position_meta[ticket].get("ai_score", 0.5)
+
                 cur = pos.price_current
                 open_price = pos.price_open
 
                 # 1. Update MFE (Best Price)
                 if pos.type == 0: # BUY
-                    if cur > meta["best_price"]:
-                        meta["best_price"] = cur
+                    if cur > meta_best_price:
+                        with self.state_lock: self.position_meta[ticket]["best_price"] = cur
+                        meta_best_price = cur
                         state_changed = True
                 else: # SELL
-                    if cur < meta["best_price"]:
-                        meta["best_price"] = cur
+                    if cur < meta_best_price:
+                        with self.state_lock: self.position_meta[ticket]["best_price"] = cur
+                        meta_best_price = cur
                         state_changed = True
 
                 # 2. Partial Profit Taking (1:1 and 2:1 RR)
-                if meta["risk"] > 0 and meta["partial_closed_count"] < 2:
+                if meta_risk > 0 and meta_partial_closed_count < 2:
                     profit = (cur - open_price) if pos.type == 0 else (open_price - cur)
                     
                     pp_cfg = self.config.get("strategy_defaults", {}).get("partial_profit_config", {
@@ -351,26 +366,28 @@ class TradingBot:
                     })
                     
                     # Step 1: 1:1 RR
-                    if meta["partial_closed_count"] == 0 and profit >= meta["risk"] * pp_cfg["level1_rr"]:
+                    if meta_partial_closed_count == 0 and profit >= meta_risk * pp_cfg["level1_rr"]:
                         # AI Adaptation: Take more if AI is cautious
                         l1_pct = pp_cfg["level1_pct"]
-                        if meta.get("ai_score", 0.5) < 0.4: l1_pct += 0.15
+                        if meta_ai_score < 0.4: l1_pct += 0.15
                         
                         close_vol = round(pos.volume * l1_pct, 2)
                         if close_vol >= 0.01:
                             self._execute_partial_close(ticket, symbol, pos.type, close_vol, magic, "PPT Level 1 (1:1)")
-                            meta["partial_closed_count"] = 1
+                            with self.state_lock: self.position_meta[ticket]["partial_closed_count"] = 1
+                            meta_partial_closed_count = 1
                             state_changed = True
                             # Move SL to BE
                             self._modify_sl_tp(ticket, symbol, open_price, pos.tp)
                             continue
 
                     # Step 2: 2:1 RR
-                    elif meta["partial_closed_count"] == 1 and profit >= meta["risk"] * pp_cfg["level2_rr"]:
+                    elif meta_partial_closed_count == 1 and profit >= meta_risk * pp_cfg["level2_rr"]:
                         close_vol = round(pos.volume * pp_cfg["level2_pct"], 2) # Use current volume left
                         if close_vol >= 0.01:
                             self._execute_partial_close(ticket, symbol, pos.type, close_vol, magic, "PPT Level 2 (2:1)")
-                            meta["partial_closed_count"] = 2
+                            with self.state_lock: self.position_meta[ticket]["partial_closed_count"] = 2
+                            meta_partial_closed_count = 2
                             state_changed = True
                             continue
 
@@ -380,8 +397,8 @@ class TradingBot:
                     give_back_pct = ts_cfg.get("mfe_trail_base", 0.5)
                     
                     # 2. Profit-Dependent (Tighten as profit increases)
-                    risk = meta.get("risk", 0)
-                    excursion = (meta["best_price"] - open_price) if pos.type == 0 else (open_price - meta["best_price"])
+                    risk = meta_risk
+                    excursion = (meta_best_price - open_price) if pos.type == 0 else (open_price - meta_best_price)
                     
                     if risk > 0:
                         rr_reached = excursion / risk
@@ -396,11 +413,11 @@ class TradingBot:
                     new_sl = pos.sl
                     if pos.type == 0: # BUY
                         if excursion > 0:
-                            mfe_sl = meta["best_price"] - (excursion * give_back_pct)
+                            mfe_sl = meta_best_price - (excursion * give_back_pct)
                             if mfe_sl > new_sl: new_sl = mfe_sl
                     else: # SELL
                         if excursion > 0:
-                            mfe_sl = meta["best_price"] + (excursion * give_back_pct)
+                            mfe_sl = meta_best_price + (excursion * give_back_pct)
                             if mfe_sl < new_sl or new_sl == 0: new_sl = mfe_sl
 
                     # Only send modification if SL actually improved
@@ -419,13 +436,15 @@ class TradingBot:
 
             # Memory management & State JSON Sync
             active_tickets = {p.ticket for p in positions if p.magic == magic}
-            tracked_tickets = list(self.position_meta.keys())
             closed_something = False
-            for t in tracked_tickets:
-                if t not in active_tickets:
-                    del self.position_meta[t]
-                    state_changed = True
-                    closed_something = True
+            
+            with self.state_lock:
+                tracked_tickets = list(self.position_meta.keys())
+                for t in tracked_tickets:
+                    if t not in active_tickets:
+                        del self.position_meta[t]
+                        state_changed = True
+                        closed_something = True
 
             if state_changed:
                 self._save_state()

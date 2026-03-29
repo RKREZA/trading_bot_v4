@@ -29,7 +29,7 @@ class _OpenTrade:
         "signal", "entry_price", "lot", "sl", "tp",
         "entry_time", "regime", "ai_score", "spread", "slippage",
         "best_price", "trail_phase", "partial_closed_count", "tp_partial_1", "tp_partial_2",
-        "comm_entry_paid", "comm_entry_amount", "session"
+        "comm_entry_paid", "comm_entry_amount", "session", "total_commission_paid"
     )
 
     def __init__(self, signal: TradeSignal, entry_price: float, lot: float,
@@ -50,6 +50,7 @@ class _OpenTrade:
         self.comm_entry_paid = False
         self.session = session
         self.comm_entry_amount = 0.0
+        self.total_commission_paid = 0.0
         
         # Calculate multi-level partial TPs (1:1 and 2:1 RR)
         risk = abs(entry_price - signal.stop_loss)
@@ -135,6 +136,8 @@ class BacktestEngine:
         symbol_cfg = self.config.get("symbols_config", {}).get(symbol, {})
         point = symbol_cfg.get("point", 0.01)
         contract_size = symbol_cfg.get("contract_size", 100)
+        lot_step = symbol_cfg.get("lot_step", 0.01)
+        min_lot = symbol_cfg.get("min_lot", 0.01)
         
         trades = []
         session_stats = {} # session -> {trades, wins, pnl}
@@ -180,6 +183,27 @@ class BacktestEngine:
         tick_idx = 0
         tick_count = len(ticks) if ticks else 0
         pending_signal = None  # Next-candle entry: stores signal for delayed execution
+        
+        def _try_ppt(trade: _OpenTrade, close_factor: float, tp_price: float):
+            raw_close_lot = trade.lot * close_factor
+            close_lot = round(raw_close_lot / lot_step) * lot_step
+            close_lot = round(close_lot, 2)
+            if close_lot < min_lot:
+                return False, 0.0, 0.0 # Skip PPT
+            elif round(trade.lot - close_lot, 2) < min_lot:
+                close_lot = round(trade.lot - min_lot, 2)
+            if close_lot < min_lot:
+                return False, 0.0, 0.0 # Skip
+            pnl = (tp_price - trade.entry_price) if trade.signal.direction == "BUY" else (trade.entry_price - tp_price)
+            pnl = pnl * contract_size * close_lot
+            comm = self._get_commission(symbol, close_lot) * 0.5
+            trade.total_commission_paid += comm
+            self.balance += (pnl - comm)
+            trade.lot = round(trade.lot - close_lot, 2)
+            if self.config.get("trailing_stop", {}).get("enabled", True):
+                trade.sl = trade.entry_price
+            return True, pnl, comm
+
         
         with tqdm(range(200, len(m5_candles)), desc=f"Backtesting {symbol}", unit=" candle") as pbar:
             for i in pbar:
@@ -274,6 +298,7 @@ class BacktestEngine:
                         self.balance -= comm_entry
                         open_trade.comm_entry_paid = True
                         open_trade.comm_entry_amount = comm_entry
+                        open_trade.total_commission_paid += comm_entry
                     
                     # Fix Look-ahead Bias: use ATR from [i-1] for decisions at start of candle i
                     current_atr = m5_atr_series[i-1]
@@ -335,56 +360,28 @@ class BacktestEngine:
                             if open_trade.signal.direction == "BUY":
                                 # Level 1
                                 if open_trade.partial_closed_count == 0 and bid_h >= open_trade.tp_partial_1:
-                                    close_lot = open_trade.lot * 0.25
-                                    pnl = (open_trade.tp_partial_1 - open_trade.entry_price) * contract_size * close_lot
-                                    comm = self._get_commission(symbol, close_lot)
-                                    self.balance += (pnl - comm)
-                                    open_trade.lot -= close_lot
-                                    
-                                    # Move SL to BE only if trailing_stop is enabled
-                                    if self.config.get("trailing_stop", {}).get("enabled", True):
-                                        open_trade.sl = open_trade.entry_price # BE
-                                        
+                                    success, pnl, comm = _try_ppt(open_trade, 0.25, open_trade.tp_partial_1)
                                     open_trade.partial_closed_count = 1
-                                    if not quiet: pbar.write(f"[{candle_time}] Buy PPT1 @ {open_trade.tp_partial_1:.2f} | PnL: ${pnl:.2f} | Comm: ${comm:.2f}")
+                                    if success and not quiet: pbar.write(f"[{candle_time}] Buy PPT1 @ {open_trade.tp_partial_1:.2f} | PnL: ${pnl:.2f} | Comm: ${comm:.2f}")
         
                                 # Level 2
                                 elif open_trade.partial_closed_count == 1 and bid_h >= open_trade.tp_partial_2:
-                                    close_lot = open_trade.lot * 0.33 # ~25% of original (1/3 of remaining 0.75)
-                                    pnl = (open_trade.tp_partial_2 - open_trade.entry_price) * contract_size * close_lot
-                                    comm = self._get_commission(symbol, close_lot)
-                                    self.balance += (pnl - comm)
-                                    open_trade.lot -= close_lot
+                                    success, pnl, comm = _try_ppt(open_trade, 0.33, open_trade.tp_partial_2)
                                     open_trade.partial_closed_count = 2
-                                    if not quiet: pbar.write(f"[{candle_time}] Buy PPT2 @ {open_trade.tp_partial_2:.2f} | PnL: ${pnl:.2f} | Comm: ${comm:.2f}")
+                                    if success and not quiet: pbar.write(f"[{candle_time}] Buy PPT2 @ {open_trade.tp_partial_2:.2f} | PnL: ${pnl:.2f} | Comm: ${comm:.2f}")
         
                             else: # SELL
                                 # Level 1
                                 if open_trade.partial_closed_count == 0 and ask_l <= open_trade.tp_partial_1:
-                                    close_lot = open_trade.lot * 0.25
-                                    pnl = (open_trade.entry_price - open_trade.tp_partial_1) * contract_size * close_lot
-                                    # PPT exit commission (remaining 50% for the closed portion)
-                                    comm_ppt = self._get_commission(symbol, close_lot) * 0.5
-                                    self.balance += (pnl - comm_ppt)
-                                    open_trade.lot -= close_lot
-                                    
-                                    # Move SL to BE only if trailing_stop is enabled
-                                    if self.config.get("trailing_stop", {}).get("enabled", True):
-                                        open_trade.sl = open_trade.entry_price # BE
-                                        
+                                    success, pnl, comm = _try_ppt(open_trade, 0.25, open_trade.tp_partial_1)
                                     open_trade.partial_closed_count = 1
-                                    if not quiet: pbar.write(f"[{candle_time}] Sell PPT1 @ {open_trade.tp_partial_1:.2f} | PnL: ${pnl:.2f} | Comm_Exit: ${comm_ppt:.2f}")
+                                    if success and not quiet: pbar.write(f"[{candle_time}] Sell PPT1 @ {open_trade.tp_partial_1:.2f} | PnL: ${pnl:.2f} | Comm_Exit: ${comm:.2f}")
         
                                 # Level 2
                                 elif open_trade.partial_closed_count == 1 and ask_l <= open_trade.tp_partial_2:
-                                    close_lot = open_trade.lot * 0.33
-                                    pnl = (open_trade.entry_price - open_trade.tp_partial_2) * contract_size * close_lot
-                                    # PPT exit commission (remaining 50% for the closed portion)
-                                    comm_ppt = self._get_commission(symbol, close_lot) * 0.5
-                                    self.balance += (pnl - comm_ppt)
-                                    open_trade.lot -= close_lot
+                                    success, pnl, comm = _try_ppt(open_trade, 0.33, open_trade.tp_partial_2)
                                     open_trade.partial_closed_count = 2
-                                    if not quiet: pbar.write(f"[{candle_time}] Sell PPT2 @ {open_trade.tp_partial_2:.2f} | PnL: ${pnl:.2f} | Comm_Exit: ${comm_ppt:.2f}")
+                                    if success and not quiet: pbar.write(f"[{candle_time}] Sell PPT2 @ {open_trade.tp_partial_2:.2f} | PnL: ${pnl:.2f} | Comm_Exit: ${comm:.2f}")
     
                         if not closed:
                             # Save SL before MFE/trail updates for intra-candle bias check
@@ -485,11 +482,10 @@ class BacktestEngine:
                         pnl = (final_exit - open_trade.entry_price) * (1 if open_trade.signal.direction == "BUY" else -1) * contract_size * open_trade.lot
                         # Exit commission (remaining 50% of round-turn for the current lot)
                         comm_exit = self._get_commission(symbol, open_trade.lot) * 0.5
+                        open_trade.total_commission_paid += comm_exit
                         
                         final_pnl = pnl - comm_exit 
-                        # Total for logging is 50% of original lot (entry) + 50% of exit lot + 50% of PPT lots
-                        # Simpler: Total comm paid is trackable if we wanted, but for records we just need this trade's total.
-                        total_comm = comm_exit + (self._get_commission(symbol, open_trade.lot) * 0.5) # Approximate
+                        total_comm = round(open_trade.total_commission_paid, 2)
                         
                         # Ensure datetime objects for pandas/metrics
                         entry_dt = open_trade.entry_time if isinstance(open_trade.entry_time, datetime) else datetime.fromtimestamp(open_trade.entry_time, tz=timezone.utc)

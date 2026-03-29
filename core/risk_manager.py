@@ -19,16 +19,19 @@ class RiskManager:
 
     def _calculate_kelly_fraction(self) -> float:
         """Calculate Kelly Fraction based on trade history."""
-        if len(self.trade_history) < 10:
+        # Fix Memory Leak: only run on recent trades window
+        recent_trades = self.trade_history[-100:]
+        
+        if len(recent_trades) < 10:
             return self.base_risk_pct / 100.0 # Default to base risk if not enough data
             
-        wins = [t['pnl'] for t in self.trade_history if t['pnl'] > 0]
-        losses = [abs(t['pnl']) for t in self.trade_history if t['pnl'] <= 0]
+        wins = [t['pnl'] for t in recent_trades if t['pnl'] > 0]
+        losses = [abs(t['pnl']) for t in recent_trades if t['pnl'] <= 0]
         
         if not wins or not losses:
             return self.base_risk_pct / 100.0
             
-        win_rate = len(wins) / len(self.trade_history)
+        win_rate = len(wins) / len(recent_trades)
         avg_win = sum(wins) / len(wins)
         avg_loss = sum(losses) / len(losses)
         

@@ -298,6 +298,32 @@ class MT5Connection:
             logger.warning("Order attempt %d/%d failed: retcode=%s, comment=%s",
                            attempt+1, max_retries, result.retcode, result.comment)
             if attempt < max_retries - 1:
+                if result.retcode in [10004, 10020]: # REQUOTE, PRICE_CHANGED
+                    logger.warning("Execution rejected (Requote/Price Changed). Retrying...")
+                    time.sleep(0.150)
+                    tick = mt5.symbol_info_tick(symbol)
+                    if tick:
+                        price = tick.ask if signal.direction == "BUY" else tick.bid
+                        deviation += 10 # Widen acceptable deviation parameter
+                    continue
+                
+                elif result.retcode == 10021: # INVALID_STOPS
+                    logger.warning("Execution rejected (Invalid Stops). Recalculating SL/TP...")
+                    time.sleep(0.150)
+                    tick = mt5.symbol_info_tick(symbol)
+                    if tick:
+                        price = tick.ask if signal.direction == "BUY" else tick.bid
+                        risk_distance = abs(signal.entry_price - signal.stop_loss)
+                        reward_distance = abs(signal.take_profit - signal.entry_price)
+                        if signal.direction == "BUY":
+                            signal.stop_loss = price - risk_distance
+                            signal.take_profit = price + reward_distance
+                        else:
+                            signal.stop_loss = price + risk_distance
+                            signal.take_profit = price - reward_distance
+                        signal.entry_price = price
+                    continue
+                    
                 time.sleep(delay)
 
         return None
