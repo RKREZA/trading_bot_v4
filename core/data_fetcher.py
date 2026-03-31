@@ -46,7 +46,7 @@ class DataFetcher:
     def _cache_key(self, symbol: str, timeframe: str, count: int) -> str:
         return f"{symbol}_{timeframe}_{count}"
 
-    def fetch_candles(self, symbol: str, timeframe: str, count: int = 500) -> List[dict]:
+    def fetch_candles(self, symbol: str, timeframe: str, count: int = 500, force_refresh: bool = False) -> List[dict]:
         """
         Fetch candle data, returning cached data if still fresh.
         """
@@ -58,9 +58,9 @@ class DataFetcher:
         ttl = CACHE_TTL.get(timeframe, 60)
         now = time.time()
 
-        # Return cached data if fresh
+        # Return cached data if fresh (and not forced)
         cached = self._cache.get(key)
-        if cached and (now - cached["timestamp"]) < ttl:
+        if not force_refresh and cached and (now - cached["timestamp"]) < ttl:
             return cached["data"]
 
         # Fetch from MT5

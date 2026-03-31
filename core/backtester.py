@@ -9,6 +9,9 @@ from datetime import datetime, timezone
 from typing import List, Dict, Optional
 from tqdm import tqdm
 from tabulate import tabulate
+import warnings
+from tqdm import TqdmExperimentalWarning
+warnings.filterwarnings("ignore", category=TqdmExperimentalWarning)
 
 # Add the project root to sys.path
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -182,9 +185,16 @@ class BacktestEngine:
         # Pre-compute rolling average ATR for realistic spread/slippage models
         m5_avg_atr = pd.Series(m5_atr_series).rolling(window=20, min_periods=1).mean().values
         
-        comm_entry = 0
-        tick_idx = 0
-        tick_count = len(ticks) if ticks else 0
+        # --- Optimization: Convert ticks to structured Numpy array ---
+        tick_times = None
+        tick_arr = None
+        if ticks:
+            # Using structured arrays for memory efficiency and vectorized access
+            tick_dtype = [('time', 'i8'), ('bid', 'f8'), ('ask', 'f8')]
+            tick_arr = np.array([(t['time'], t['bid'], t['ask']) for t in ticks], dtype=tick_dtype)
+            tick_times = tick_arr['time']
+            logger.info("[Backtest] Processed %d ticks into structured Numpy array.", len(ticks))
+        
         pending_signal = None  # Next-candle entry: stores signal for delayed execution
         
         def _try_ppt(trade: _OpenTrade, close_factor: float, tp_price: float):
@@ -208,9 +218,9 @@ class BacktestEngine:
             return True, pnl, comm
 
         
-        # --- FIX 2: Use dynamic_ncols to prevent terminal wrapping ---
+        # Use standard tqdm with custom configuration for better visibility
         with tqdm(range(200, len(m5_candles)), desc=f"BT:{symbol}", unit="c", 
-                  dynamic_ncols=True, file=sys.stdout, mininterval=0.1, ascii=True, leave=True) as pbar:
+                  dynamic_ncols=True, leave=True, colour="cyan") as pbar:
             for i in pbar:
                 current_candle = m5_candles[i]
                 candle_time = m5_times[i]
@@ -317,33 +327,46 @@ class BacktestEngine:
                     exit_price = 0
                     result_type = ""
                     
-                    # If we have ticks for this candle, check them sequentially
-                    candle_ticks = []
-                    if ticks:
+                    # Optimized Tick-Level Slicing
+                    candle_ticks = None
+                    if tick_arr is not None:
+                        start_time = current_candle['time']
                         next_candle_time = m5_candles[i+1]['time'] if i+1 < len(m5_candles) else float('inf')
-                        while tick_idx < tick_count and ticks[tick_idx]['time'] < next_candle_time:
-                            candle_ticks.append(ticks[tick_idx])
-                            tick_idx += 1
+                        
+                        start_idx = np.searchsorted(tick_times, start_time, side='left')
+                        end_idx = np.searchsorted(tick_times, next_candle_time, side='left')
+                        
+                        if start_idx < end_idx:
+                            candle_ticks = tick_arr[start_idx:end_idx]
                     
-                    if candle_ticks:
-                        for t in candle_ticks:
-                            bid, ask = t['bid'], t['ask']
-                            if open_trade.signal.direction == "BUY":
-                                if bid <= open_trade.sl:
+                    if candle_ticks is not None:
+                        # Vectorized Exit Check
+                        bids = candle_ticks['bid']
+                        asks = candle_ticks['ask']
+                        
+                        if open_trade.signal.direction == "BUY":
+                            sl_hits = bids <= open_trade.sl
+                            tp_hits = bids >= open_trade.tp
+                            if np.any(sl_hits | tp_hits):
+                                # Find first event
+                                idx_sl = np.where(sl_hits)[0][0] if np.any(sl_hits) else len(bids)
+                                idx_tp = np.where(tp_hits)[0][0] if np.any(tp_hits) else len(bids)
+                                if idx_sl < idx_tp:
                                     exit_price, result_type, closed = open_trade.sl, "SL", True
-                                    break
-                                elif bid >= open_trade.tp:
+                                else:
                                     exit_price, result_type, closed = open_trade.tp, "TP", True
-                                    break
-                            else: # SELL
-                                if ask >= open_trade.sl:
+                        else: # SELL
+                            sl_hits = asks >= open_trade.sl
+                            tp_hits = asks <= open_trade.tp
+                            if np.any(sl_hits | tp_hits):
+                                idx_sl = np.where(sl_hits)[0][0] if np.any(sl_hits) else len(asks)
+                                idx_tp = np.where(tp_hits)[0][0] if np.any(tp_hits) else len(asks)
+                                if idx_sl < idx_tp:
                                     exit_price, result_type, closed = open_trade.sl, "SL", True
-                                    break
-                                elif ask <= open_trade.tp:
+                                else:
                                     exit_price, result_type, closed = open_trade.tp, "TP", True
-                                    break
                     else:
-                        # Fallback to Candle-Level (OHLC)
+                        # Fallback to Candle-Level (OHLC) with spread adjustment
                         bid_h, bid_l = current_candle['high'], current_candle['low']
                         ask_h, ask_l = bid_h + spread_val, bid_l + spread_val
                         
@@ -536,11 +559,13 @@ class BacktestEngine:
                         continue
                 
                 if i % 25 == 0:
+                    sl_count = sum(1 for t in trades if t['result'] == 'SL')
+                    tp_count = sum(1 for t in trades if t['result'] == 'TP')
                     postfix = {
-                        "date": candle_time.strftime('%m-%d'),
-                        "bal": f"${self.balance:.0f}",
-                        "tr": len(trades),
-                        "st": "OPEN" if open_trade else "IDLE"
+                        "date": candle_time.strftime('%d-%m-%y'),
+                        "balance": f"${self.balance:.0f}",
+                        "trade": f"{len(trades)} [sl: {sl_count}, tp: {tp_count}]",
+                        "status": "OPEN" if open_trade else "IDLE"
                     }
                     pbar.set_postfix(postfix, refresh=False)
     

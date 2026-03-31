@@ -87,6 +87,10 @@ class TradingBot:
         self.state_lock = threading.Lock()
         self._load_state()
 
+        # Reconcile local meta-state with live MT5 positions upon startup
+        if self.connection.connect():
+            self._reconcile_positions()
+
 
     def _save_state(self):
         with self.state_lock:
@@ -334,6 +338,42 @@ class TradingBot:
         self.dashboard.win_count = self.win_count
         self.dashboard.loss_count = self.loss_count
 
+    def _reconcile_positions(self) -> None:
+        """
+        Hardens state management by syncing position_meta with live MT5 tickets.
+        Prevents KeyError and Orphaned Position desync on restarts.
+        """
+        if mt5 is None: return
+        try:
+            magic = int(self.config.get("magic_number", 234000))
+            active_positions = mt5.positions_get()
+            live_tickets = {p.ticket: p for p in active_positions if p.magic == magic} if active_positions else {}
+            
+            with self.state_lock:
+                # 1. Remove ghost tickets (meta exists but trade is gone)
+                for t in list(self.position_meta.keys()):
+                    if t not in live_tickets:
+                        logger.info("[Reconcile] Removing ghost ticket: %d", t)
+                        del self.position_meta[t]
+
+                # 2. Add missing metadata (trade exists but meta is missing)
+                for t, pos in live_tickets.items():
+                    if t not in self.position_meta:
+                        logger.info("[Reconcile] Rebuilding meta for active ticket: %d", t)
+                        risk = abs(pos.price_open - pos.sl) if pos.sl > 0 else 0
+                        self.position_meta[t] = {
+                            "ticket": t,
+                            "best_price": pos.price_current,
+                            "partial_closed_count": 0,
+                            "risk": risk,
+                            "ai_score": 0.5 # Default if missing
+                        }
+            
+            self._save_state()
+            logger.info("Position reconciliation complete. %d active trades tracked.", len(live_tickets))
+        except Exception as e:
+            logger.error("Reconciliation failed: %s", e)
+
     # ------------------------------------------------------------------
     # Trailing Stop Logic (live)
     # ------------------------------------------------------------------
@@ -567,18 +607,39 @@ class TradingBot:
 
     def _process_strategy_cycle(self, symbol: str, mid_price: float):
         if mt5 is None: return
+        
+        # Drive the cycle by MT5 Tick Time for precision
+        tick = mt5.symbol_info_tick(symbol)
+        if not tick: return
+        
+        tick_time = tick.time
+        # Round down to the nearest 5-minute (M5) boundary
+        m5_boundary = (tick_time // 300) * 300
+        
+        # Check if we should force a fresh data fetch (start of new candle)
+        last_boundary = getattr(self, "_last_m5_boundary", 0)
+        force_refresh = (m5_boundary > last_boundary)
+        
+        # Optimization: Only process full strategy if a new M5 boundary is crossed 
+        # or every 30 seconds for intra-candle updates (optional but safe)
         now_ts = time.time()
-        m5_tick = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, 1)
-        current_candle_time = m5_tick[0][0] if m5_tick is not None and len(m5_tick) > 0 else 0
-        last_proc = getattr(self, "_last_proc_candle", 0)
         last_proc_real = getattr(self, "_last_proc_realtime", 0)
         
-        if current_candle_time <= last_proc and (now_ts - last_proc_real) < 30:
+        if not force_refresh and (now_ts - last_proc_real) < 30:
             return
 
-        self._last_proc_candle = current_candle_time
+        if force_refresh:
+            self._last_m5_boundary = m5_boundary
+            logger.info("[Stale Candle Prevention] New M5 boundary detected: %s. Forcing fresh MT5 fetch.", 
+                         datetime.fromtimestamp(m5_boundary, tz=timezone.utc).strftime("%H:%M:%S"))
+
         self._last_proc_realtime = now_ts
-        candles = self._fetch_all_data(symbol)
+        
+        # Pass force_refresh to fetch all data accurately
+        candles = {}
+        for tf, count in [("H4", 250), ("H1", 600), ("M30", 1540), ("D1", 100), ("M5", 2000)]:
+            candles[tf] = self.data_fetcher.fetch_candles(symbol, tf, count, force_refresh=force_refresh)
+
         if not all(k in candles and candles[k] for k in ["H4", "H1", "M30", "M5", "D1"]):
             return
 
@@ -595,20 +656,28 @@ class TradingBot:
         self._update_dashboard_state(symbol, signal, h4_trend=h4_trend, m30_structure=m30_struct)
 
         if signal:
+            # Shifted to Macro-only AI Context for Execution
             if self.ai_advisor.is_high_impact_news():
                 self.analysis_logger.log(f"News Avoidance active. Skipping {signal.direction}", "WARNING")
                 return
 
-            if current_candle_time != self.last_ai_eval_time:
-                if self.ai_advisor.evaluate_signal_async(signal, h4_trend, symbol):
-                    self.last_ai_eval_time = current_candle_time
+            # LOT & RISK Adjustment (Macro AI Context)
+            ai_risk_mult = self.ai_advisor.lot_multiplier # Derived from Macro Risk (LOW, MD, HI)
+            ai_bias = self.ai_advisor.session_bias # BULLISH/BEARISH
+            
+            # Anti-Trend Filter: Reduce risk if macro bias contradicts signal
+            risk_scaling = 1.0
+            if (signal.direction == "BUY" and ai_bias == "BEARISH") or \
+               (signal.direction == "SELL" and ai_bias == "BULLISH"):
+                risk_scaling = 0.5
+                self.analysis_logger.log(f"Macro Bias ({ai_bias}) contradicts signal. Scaling risk 50%.", "INFO")
 
-            ai_review = self.ai_advisor.context.get("last_signal_review", {})
-            if ai_review.get("verdict") == "REJECT":
-                self.analysis_logger.log(f"AI REJECTION: {ai_review.get('reason')}", "WARNING")
-                return
+            # Fire off async evaluation for reporting, but don't block execution
+            self.ai_advisor.evaluate_signal_async(signal, h4_trend, symbol)
 
             risk_pct = self.risk_manager.calculate_scaled_risk(self.connection.account_info.get('balance'), session)
+            risk_pct = risk_pct * ai_risk_mult * risk_scaling
+            
             if risk_pct > 0 and self.position_manager.count_open_positions(symbol) < self.config.get("risk", {}).get("max_open_positions", 2):
                 lot = self.position_manager.calculate_lot_size(symbol, signal, risk_pct)
                 if signal.rejection_type == "VOL_SCALING": lot *= 0.5
