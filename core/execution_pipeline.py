@@ -30,6 +30,35 @@ class ExecutionPipeline:
         
     def execute_cycle(self, symbol: str, m30: "CandleArray", h1: "CandleArray", h4: "CandleArray", m5: "CandleArray", d1: "CandleArray", current_price: float, session: str) -> bool:
         """Runs one full execution cycle for a symbol."""
+        # 0. Risk Context & Circuit Breakers
+        acc_info = self.connection.get_account_snapshot()
+        current_balance = acc_info.get("balance", 0.0)
+        current_equity = acc_info.get("equity", 0.0)
+        
+        # [FIX]: Trigger daily reset for Risk Manager at midnight in LIVE trading
+        from datetime import datetime, timezone
+        current_date = datetime.now(timezone.utc).date()
+        if not hasattr(self, '_last_reset_date') or self._last_reset_date != current_date:
+            self.risk_manager.reset_daily_stats(current_balance)
+            self._last_reset_date = current_date
+        
+        daily_trades = self.strategy.daily_trades
+        daily_losses = self.strategy.daily_losses
+        # Use session-specific consecutive losses if available, otherwise 0
+        con_losses = self.strategy.consecutive_losses.get(session, 0)
+        
+        allowed, cb_reason = self.risk_manager.check_circuit_breakers(
+            current_balance=current_balance,
+            current_equity=current_equity,
+            daily_trades=daily_trades,
+            daily_losses=daily_losses,
+            consecutive_losses=con_losses
+        )
+        
+        if not allowed:
+            logger.warning(f"CIRCUIT BREAKER HALT: {cb_reason}")
+            # We still run analyze so it can report trend/regime for dashboard, but it will return None signal
+        
         # 1. Generate Signal
         signal, trend, regime = self.strategy.analyze(
             symbol=symbol,
@@ -39,7 +68,8 @@ class ExecutionPipeline:
             m5_candles=m5,
             d1_candles=d1,
             current_price=current_price,
-            session=session
+            session=session,
+            circuit_breaker_safe=allowed
         )
         
         if not signal:
@@ -48,15 +78,6 @@ class ExecutionPipeline:
         # 2. Open Position Check
         if self.position_manager.count_open_positions(symbol) > 0:
             logger.info("Signal ignored — position already open for %s", symbol)
-            return False
-            
-        # 3. Circuit Breaker Check
-        allowed, reason = self.risk_manager.circuit_breaker.check_all({
-            "daily_losses": self.risk_manager.trade_history,
-            "margin_level": self.connection.account_info.get("margin_level", 9999) if self.connection.account_info else 9999
-        })
-        if not allowed:
-            self.notification_manager.notify_critical("CIRCUIT BREAKER", reason)
             return False
 
         # 4. AI Advisory (Veto) Check

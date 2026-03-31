@@ -70,6 +70,7 @@ class StrategyEngine:
         self.cooldown_candles = self.strategy_config.get("cooldown_candles", 20)
         self.last_stop_time: Optional[datetime] = None
         self.daily_losses = 0
+        self.daily_trades = 0
         self.last_loss_date = None
         self.m5_trade_counter = 0 # To track cooldown in backtest candles
         self.last_m5_stop_index = -999
@@ -78,7 +79,7 @@ class StrategyEngine:
         self.session_cfg = config.get("session_config", {})
         self.tradeable_sessions = {
             _SESSION_KEY_MAP[k] for k, v in self.session_cfg.items()
-            if v.get("enabled", False) and k in _SESSION_KEY_MAP
+            if isinstance(v, dict) and v.get("enabled", False) and k in _SESSION_KEY_MAP
         } if self.session_cfg else _DEFAULT_SESSIONS
         
         self.consecutive_losses = {s: 0 for s in _DEFAULT_SESSIONS}
@@ -174,8 +175,27 @@ class StrategyEngine:
     def analyze(self, symbol: str, h4_candles: 'CandleArray', h1_candles: 'CandleArray', m30_candles: 'CandleArray',
                 m5_candles: 'CandleArray', current_price: float,
                 d1_candles: Optional['CandleArray'] = None, session: Optional[str] = None,
-                preprocessed: Optional[dict] = None) -> Tuple[Optional[TradeSignal], str, str]:
+                preprocessed: Optional[dict] = None, circuit_breaker_safe: bool = True) -> Tuple[Optional[TradeSignal], str, str]:
         
+        # 0. Daily Reset Logic (Must run before circuit breaker checks to allow daily recovery)
+        raw_ts = m5_candles.time[-1]
+        if isinstance(raw_ts, (int, float, np.integer, np.floating)):
+            timestamp = datetime.fromtimestamp(float(raw_ts), tz=timezone.utc)
+        elif isinstance(raw_ts, str):
+            try: timestamp = datetime.fromisoformat(raw_ts)
+            except ValueError: timestamp = datetime.fromtimestamp(float(raw_ts), tz=timezone.utc)
+        else:
+            timestamp = raw_ts 
+            
+        current_date = timestamp.date()
+        if self.last_loss_date != current_date:
+            self.daily_losses = 0
+            self.daily_trades = 0
+            self.last_loss_date = current_date
+            for s in self.consecutive_losses:
+                self.consecutive_losses[s] = 0
+                self.session_cooldown_active[s] = False
+
         if preprocessed:
             # High-Performance Path for Backtesting
             effective_trend = preprocessed["h4_trend"]
@@ -188,13 +208,21 @@ class StrategyEngine:
             vol_scaling_flag = preprocessed["vol_scaling"]
             m5_atr = preprocessed["m5_atr"]
             
+            # [FIX]: Prevent disabled sessions from sneaking into the backtest
             if session and session not in self.tradeable_sessions:
                 return None, effective_trend, str(regime)
                 
-            self.m5_trade_counter += 1
-            if self.m5_trade_counter - self.last_m5_stop_index < self.cooldown_candles:
-                return None, "COOLDOWN", "NEUTRAL"
-                
+            if not circuit_breaker_safe:
+                return None, effective_trend, str(regime)
+            
+        if session and self.session_cooldown_active.get(session, False):
+            return None, "SESSION_COOLDOWN", "NEUTRAL"
+
+        self.m5_trade_counter += 1
+        if self.m5_trade_counter - self.last_m5_stop_index < self.cooldown_candles:
+            return None, "COOLDOWN", "NEUTRAL"
+            
+        if preprocessed:
             # Passing full arrays directly (inner methods safely index the ends)
             signal = None
             if effective_trend == "BULLISH":
@@ -240,34 +268,6 @@ class StrategyEngine:
             if hasattr(self, param):
                 setattr(self, param, value)
 
-        # 0. Choppy Mitigation Guards
-        raw_ts = m5_candles.time[-1]
-        if isinstance(raw_ts, (int, float, np.integer, np.floating)):
-            timestamp = datetime.fromtimestamp(float(raw_ts), tz=timezone.utc)
-        elif isinstance(raw_ts, str):
-            try:
-                timestamp = datetime.fromisoformat(raw_ts)
-            except ValueError:
-                timestamp = datetime.fromtimestamp(float(raw_ts), tz=timezone.utc)
-        else:
-            timestamp = raw_ts 
-            
-        current_date = timestamp.date()
-        
-        if self.last_loss_date != current_date:
-            self.daily_losses = 0
-            self.last_loss_date = current_date
-            for s in self.consecutive_losses:
-                self.consecutive_losses[s] = 0
-                self.session_cooldown_active[s] = False
-            
-        if self.daily_losses >= self.max_daily_losses:
-            return None, "DAILY_LOSS_LIMIT", "NEUTRAL"
-            
-        if session and self.session_cooldown_active.get(session, False):
-            return None, "SESSION_COOLDOWN", "NEUTRAL"
-
-        self.m5_trade_counter += 1
         if self.m5_trade_counter - self.last_m5_stop_index < self.cooldown_candles:
             return None, "COOLDOWN", "NEUTRAL"
 
@@ -313,6 +313,9 @@ class StrategyEngine:
         if regime == MarketRegime.LOW_LIQUIDITY:
             return None, "LOW_LIQUIDITY", str(regime)
             
+        if not circuit_breaker_safe:
+            return None, h4_trend, str(regime)
+
         m30_closes = m30_candles.close
         m30_ema_val = self._calculate_ema(m30_closes, 10) 
 
@@ -517,6 +520,7 @@ class StrategyEngine:
     def report_trade_result(self, result: str, timestamp: datetime, session: Optional[str] = None):
         """Called by bot/backtester to report trade exit results. Thread-safe."""
         with self.lock:
+            self.daily_trades += 1
             if result == "SL":
                 self.daily_losses += 1
                 self.last_m5_stop_index = self.m5_trade_counter
@@ -530,6 +534,15 @@ class StrategyEngine:
                 if session:
                     self.consecutive_losses[session] = 0
                     self.session_cooldown_active[session] = False
+
+    def reset_daily_stats(self):
+        """Reset tracking for daily trade limits and session losses."""
+        with self.lock:
+            self.daily_losses = 0
+            self.daily_trades = 0
+            for s in self.consecutive_losses:
+                self.consecutive_losses[s] = 0
+                self.session_cooldown_active[s] = False
 
     def preprocess_history(self, h4: 'CandleArray', h1: 'CandleArray', m30: 'CandleArray', m5: 'CandleArray') -> dict:
         """

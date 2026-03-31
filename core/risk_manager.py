@@ -46,9 +46,45 @@ class RiskManager:
         self.silent = False
         
         self.initial_balance = None
+        self.day_start_balance = None
         self.current_max_balance = 0.0
         self.session_cfg = config.get("session_config", {})
         self.trade_history = []
+
+    def reset_daily_stats(self, balance: float):
+        """Reset daily tracking for circuit breakers."""
+        self.day_start_balance = balance
+        if not self.silent: logger.info(f"Daily Risk Stats Reset. Day Start Balance: ${balance:.2f}")
+
+    def check_circuit_breakers(self, current_balance: float, current_equity: float, daily_trades: int, daily_losses: int, consecutive_losses: int) -> Tuple[bool, str]:
+        """
+        Hard Circuit Breakers based on config.
+        Returns (Allowed, Reason).
+        """
+        # Ensure we have a day start balance
+        if self.day_start_balance is None:
+            self.day_start_balance = current_balance
+
+        # 1. Max Daily Trades
+        if daily_trades >= self.risk_config.get("max_daily_trades", 3):
+            return False, "CIRCUIT_BREAKER: Max daily trades reached"
+
+        # 2. Max Consecutive Losses
+        if consecutive_losses >= self.risk_config.get("max_consecutive_losses", 3):
+            return False, "CIRCUIT_BREAKER: Max consecutive losses reached"
+
+        # 3. Daily Loss Percent (Equity vs Day Start)
+        daily_loss_pct = (self.day_start_balance - current_equity) / self.day_start_balance * 100
+        if daily_loss_pct >= self.risk_config.get("max_daily_loss_percent", 5.0):
+            return False, f"CIRCUIT_BREAKER: Daily loss limit hit ({daily_loss_pct:.2f}%)"
+
+        # 4. Max Drawdown Halt (Equity vs Current Max Balance)
+        if self.current_max_balance == 0: self.current_max_balance = current_balance
+        max_drawdown_pct = (self.current_max_balance - current_equity) / self.current_max_balance * 100
+        if max_drawdown_pct >= self.risk_config.get("max_drawdown_halt_pct", 10.0):
+            return False, f"CIRCUIT_BREAKER: Max drawdown halt ({max_drawdown_pct:.2f}%)"
+
+        return True, "OK"
 
     def _calculate_kelly_fraction(self) -> float:
         """Calculate Kelly Fraction based on trade history. Thread-safe."""
@@ -85,6 +121,7 @@ class RiskManager:
         """
         if self.initial_balance is None:
             self.initial_balance = current_balance
+            self.day_start_balance = current_balance
             self.current_max_balance = current_balance
         
         # 1. Dynamic Kelly Risk

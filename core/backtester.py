@@ -577,10 +577,28 @@ class BacktestEngine:
                 if not open_trade and pending_signal is None:
                     # High-Performance Signal Check
                     pre_at_i = m5_precomputed[i]
+                    
+                    # [NEW] Circuit Breaker Sync for Backtest
+                    if i == 200 or candle_dt.date() != datetime.fromtimestamp(float(m5_times[i-1]), tz=timezone.utc).date(): 
+                        self.risk_manager.reset_daily_stats(self.balance)
+                        if hasattr(self.strategy, 'reset_daily_stats'):
+                            self.strategy.reset_daily_stats()
+                    
+                    current_con_losses = max(self.strategy.consecutive_losses.values()) if self.strategy.consecutive_losses else 0
+                    
+                    allowed, cb_reason = self.risk_manager.check_circuit_breakers(
+                        current_balance=self.balance,
+                        current_equity=self.balance, # Backtester assumes no floating unrealized equity for simplicity
+                        daily_trades=self.strategy.daily_trades,
+                        daily_losses=self.strategy.daily_losses,
+                        consecutive_losses=current_con_losses
+                    )
+                    
                     signal, h4_trend, regime_str = self.strategy.analyze(
                         symbol, h4_slice, h1_slice, m30_slice, m5_slice, bid, 
                         d1_candles=d1_candles, session=current_session,
-                        preprocessed=pre_at_i
+                        preprocessed=pre_at_i,
+                        circuit_breaker_safe=allowed
                     )
                     
                     if signal:

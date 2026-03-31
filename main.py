@@ -185,6 +185,9 @@ class TradingBot:
             self._write_performance_report()
             with self.state_lock:
                 self.daily_pnl = 0.0; self.daily_trades = 0; self.win_count = 0; self.loss_count = 0; self.last_reset_day = today
+                # Reset RiskManager stats (Equity tracking)
+                acc = self.connection.get_account_snapshot()
+                self.risk_manager.reset_daily_stats(acc.get("balance", 0.0))
             self._save_state()
 
     def _manage_trailing_stops(self, symbol: str, current_bid: float, current_ask: float) -> None:
