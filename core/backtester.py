@@ -205,7 +205,8 @@ class BacktestEngine:
             return True, pnl, comm
 
         
-        with tqdm(range(200, len(m5_candles)), desc=f"Backtesting {symbol}", unit=" candle") as pbar:
+        with tqdm(range(200, len(m5_candles)), desc=f"BT:{symbol}", unit="c", 
+                  ncols=100, file=sys.stdout, mininterval=0.3, ascii=True) as pbar:
             for i in pbar:
                 current_candle = m5_candles[i]
                 candle_time = m5_times[i]
@@ -531,16 +532,13 @@ class BacktestEngine:
                         open_trade = None
                         continue
                 
-                if i % 10 == 0:
+                if i % 25 == 0:
                     postfix = {
-                        "date": candle_time.strftime('%Y-%m-%d'),
-                        "balance": f"${self.balance:.2f}",
-                        "trades": len(trades),
-                        "status": "OPEN" if open_trade else "SEARCH"
+                        "date": candle_time.strftime('%m-%d'),
+                        "bal": f"${self.balance:.0f}",
+                        "tr": len(trades),
+                        "st": "OPEN" if open_trade else "IDLE"
                     }
-                    if open_trade:
-                        postfix["sl"] = f"{open_trade.sl:.2f}"
-                        postfix["tp"] = f"{open_trade.tp:.2f}"
                     pbar.set_postfix(postfix, refresh=False)
     
                 # --- Signal Generation (store as pending for next-candle entry) ---

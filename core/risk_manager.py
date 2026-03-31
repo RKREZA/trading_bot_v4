@@ -18,12 +18,14 @@ class RiskManager:
         self.trade_history = []
 
     def _calculate_kelly_fraction(self) -> float:
-        """Calculate Kelly Fraction based on trade history."""
+        """Calculate Kelly Fraction based on trade history. Thread-safe."""
         # Fix Memory Leak: only run on recent trades window
         recent_trades = self.trade_history[-100:]
         
-        if len(recent_trades) < 10:
-            return self.base_risk_pct / 100.0 # Default to base risk if not enough data
+        min_trades = self.risk_config.get("kelly_min_trades", 15)
+        if len(recent_trades) < min_trades:
+            # Not enough data for statistical significance, return base risk
+            return self.base_risk_pct / 100.0
             
         wins = [t['pnl'] for t in recent_trades if t['pnl'] > 0]
         losses = [abs(t['pnl']) for t in recent_trades if t['pnl'] <= 0]
@@ -37,7 +39,11 @@ class RiskManager:
         
         if avg_win == 0: return 0.0
         
-        kelly = (win_rate * avg_win - (1 - win_rate) * avg_loss) / avg_win
+        # Kelly % = (win_rate / avg_loss_ratio) - ((1 - win_rate) / avg_win_ratio)
+        # Simplified: (bp - q) / b where b is odds (avg_win/avg_loss)
+        odds = avg_win / avg_loss if avg_loss > 0 else 1.0
+        kelly = (win_rate * odds - (1 - win_rate)) / odds if odds > 0 else 0.0
+        
         return max(0.0, kelly)
 
     def calculate_scaled_risk(self, current_balance: float, session: Optional[str] = None) -> float:
@@ -85,8 +91,15 @@ class RiskManager:
         return risk_pct
 
     def update_history(self, trade_record: Dict):
-        """Update internal trade history for Kelly calculation."""
+        """Update internal trade history for Kelly calculation. Prevents duplicates by ticket."""
+        ticket = trade_record.get('ticket')
+        if ticket:
+            if any(t.get('ticket') == ticket for t in self.trade_history):
+                return
         self.trade_history.append(trade_record)
+        # Keep window to 200 trades to prevent memory bloat
+        if len(self.trade_history) > 200:
+            self.trade_history = self.trade_history[-200:]
 
     def check_daily_stop(self, daily_pnl_pct: float) -> bool:
         """Check if daily loss limit (e.g., -5%) is hit."""

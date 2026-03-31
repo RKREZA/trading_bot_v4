@@ -6,6 +6,7 @@ Handles connection lifecycle, health checks, and auto-reconnect.
 import logging
 import os
 import time
+import math
 from datetime import datetime, timezone
 from typing import Optional, List
 
@@ -274,15 +275,33 @@ class MT5Connection:
         deviation = self.config.get("symbols_config", {}).get(symbol, {}).get("deviation", 20)
         magic = self.config.get("magic_number", BOT_MAGIC_NUMBER)
 
+        # Stop Level Check
+        stops_level = symbol_info.trade_stops_level
+        point = symbol_info.point
+        
         for attempt in range(max_retries):
+            # Recalculate stops if needed to respect stops_level
+            min_dist = stops_level * point
+            sl = float(signal.stop_loss)
+            tp = float(signal.take_profit)
+            
+            # Clamp SL/TP to minimum stops_level distance
+            if abs(price - sl) < min_dist:
+                sl = price - min_dist if signal.direction == "BUY" else price + min_dist
+                logger.info("Adjusting SL to respect stops_level: %s", sl)
+            
+            if tp != 0 and abs(price - tp) < min_dist:
+                tp = price + min_dist if signal.direction == "BUY" else price - min_dist
+                logger.info("Adjusting TP to respect stops_level: %s", tp)
+
             request = {
                 "action": mt5.TRADE_ACTION_DEAL,
                 "symbol": symbol,
                 "volume": float(lot_size),
                 "type": order_type,
                 "price": price,
-                "sl": float(signal.stop_loss),
-                "tp": float(signal.take_profit),
+                "sl": float(sl),
+                "tp": float(tp),
                 "deviation": deviation,
                 "magic": magic,
                 "comment": "Bot V3",
@@ -297,30 +316,39 @@ class MT5Connection:
 
             logger.warning("Order attempt %d/%d failed: retcode=%s, comment=%s",
                            attempt+1, max_retries, result.retcode, result.comment)
+            
             if attempt < max_retries - 1:
-                if result.retcode in [10004, 10020]: # REQUOTE, PRICE_CHANGED
-                    logger.warning("Execution rejected (Requote/Price Changed). Retrying...")
-                    time.sleep(0.150)
+                # 10004 REQUOTE, 10006 REJECTED, 10020 PRICE_CHANGED
+                if result.retcode in [10004, 10006, 10020]: 
+                    logger.warning("Retrying with new tick...")
+                    time.sleep(0.2)
                     tick = mt5.symbol_info_tick(symbol)
                     if tick:
                         price = tick.ask if signal.direction == "BUY" else tick.bid
-                        deviation += 10 # Widen acceptable deviation parameter
+                        deviation += 5
                     continue
                 
                 elif result.retcode == 10021: # INVALID_STOPS
-                    logger.warning("Execution rejected (Invalid Stops). Recalculating SL/TP...")
+                    logger.warning("Execution rejected (Invalid Stops). Enforcing broker minimum stops...")
                     time.sleep(0.150)
                     tick = mt5.symbol_info_tick(symbol)
-                    if tick:
+                    sym_info = mt5.symbol_info(symbol)
+                    
+                    if tick and sym_info:
                         price = tick.ask if signal.direction == "BUY" else tick.bid
-                        risk_distance = abs(signal.entry_price - signal.stop_loss)
-                        reward_distance = abs(signal.take_profit - signal.entry_price)
+                        # Absolute minimum distance allowed by broker
+                        min_stop_distance = sym_info.trade_stops_level * sym_info.point
+                        
+                        # Calculate original intended risk
+                        calculated_risk = abs(signal.entry_price - signal.stop_loss)
+                        # Force SL to be at least the broker's minimum distance
+                        safe_risk_distance = max(calculated_risk, min_stop_distance)
+                        
                         if signal.direction == "BUY":
-                            signal.stop_loss = price - risk_distance
-                            signal.take_profit = price + reward_distance
+                            signal.stop_loss = price - safe_risk_distance
                         else:
-                            signal.stop_loss = price + risk_distance
-                            signal.take_profit = price - reward_distance
+                            signal.stop_loss = price + safe_risk_distance
+                        
                         signal.entry_price = price
                     continue
                     
@@ -375,28 +403,45 @@ class PositionManager:
             logger.error("Cannot get symbol info for %s", symbol)
             return 0.01
 
+        # Professional Cross-Currency Lot Sizing logic:
+        # Uses SYMBOL_TRADE_TICK_VALUE (Value of 1 lot for 1 tick in account currency)
+        tick_size = symbol_info.trade_tick_size
+        tick_value = symbol_info.trade_tick_value
         point = symbol_info.point
-        contract_size = symbol_info.trade_contract_size
-
-        risk_points = abs(signal.entry_price - signal.stop_loss) / point
-        if risk_points <= 0:
-            logger.warning("Zero risk distance, cannot calculate lot size")
+        
+        if tick_size <= 0 or tick_value <= 0:
+            logger.error("Invalid tick info for %s: size=%s, value=%s", symbol, tick_size, tick_value)
             return 0.01
 
-        # Enforce minimum risk points floor (prevent lot inflation on tight stops)
+        sl_distance = abs(signal.entry_price - signal.stop_loss)
+        if sl_distance <= 0:
+            logger.warning("Zero SL distance for %s, using fallback", symbol)
+            return 0.01
+
+        # Number of ticks in SL distance
+        ticks_in_sl = sl_distance / tick_size
+        
+        # Risk per 1.0 lot in account currency
+        risk_per_lot = ticks_in_sl * tick_value
+        
+        if risk_per_lot <= 0:
+            return 0.01
+
+        lot = risk_amount / risk_per_lot
+
+        # Clamp to floor based on min_sl_points if needed
+        risk_points = sl_distance / point
         min_sl_points = self.connection.config.get("strategy_defaults", {}).get("min_sl_points", 150)
         if risk_points < min_sl_points:
-            risk_points = min_sl_points
-
-        # NOTE: point_value assumes quote currency == account currency (USD).
-        # For cross-currency pairs (e.g. EURJPY with a USD account), multiply
-        # by the relevant FX conversion rate before going live with new symbols.
-        point_value = contract_size * point
-        lot = risk_amount / (risk_points * point_value)
+            # Scale down lot proportionally to avoid risk inflation on tiny SLs
+            lot *= (risk_points / min_sl_points)
 
         # Round to allowed step
         step = symbol_info.volume_step
         lot = round(lot / step) * step
         # Clamp to min/max
         lot = max(symbol_info.volume_min, min(symbol_info.volume_max, lot))
-        return lot
+
+        # Dynamic rounding based on step precision (e.g., 0.01 -> 2, 0.001 -> 3)
+        decimals = abs(int(math.log10(step))) if step < 1 else 0
+        return round(float(lot), decimals)

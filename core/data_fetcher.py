@@ -65,6 +65,7 @@ class DataFetcher:
 
         # Fetch from MT5
         try:
+            import pandas as pd
             # Explicitly select symbol to ensure it's in MarketWatch
             if not mt5.symbol_select(symbol, True):
                 error = mt5.last_error()
@@ -77,7 +78,6 @@ class DataFetcher:
             
             if rates is None or len(rates) == 0:
                 # Try to find exactly how much history is available
-                # Binary search or just try 50%
                 logger.warning("%s %s: Full history (%d) not available. Retrying with half...", symbol, timeframe, count)
                 temp_count = count // 2
                 while temp_count >= 100:
@@ -91,33 +91,9 @@ class DataFetcher:
                 logger.error("No data returned for %s %s after retries", symbol, timeframe)
                 return cached["data"] if cached else []
 
-            candles = []
-            dtype_names = rates.dtype.names if hasattr(rates, "dtype") else None
-            for r in rates:
-                if dtype_names:
-                    candles.append({
-                        "time": int(r["time"]),
-                        "open": float(r["open"]),
-                        "high": float(r["high"]),
-                        "low": float(r["low"]),
-                        "close": float(r["close"]),
-                        "tick_volume": int(r["tick_volume"]),
-                    })
-                else:
-                    # Some versions return tuples or named arrays without dtype.names
-                    # Fallback to index-based mapping if needed, but dict(r) usually works for named rows
-                    try:
-                        candles.append(dict(r))
-                    except:
-                        # Fallback for pure tuples
-                        candles.append({
-                            "time": int(r[0]),
-                            "open": float(r[1]),
-                            "high": float(r[2]),
-                            "low": float(r[3]),
-                            "close": float(r[4]),
-                            "tick_volume": int(r[5]),
-                        })
+            # Vectorized conversion using Pandas (much faster than manual loops for O(N) bottlenecks)
+            df = pd.DataFrame(rates)
+            candles = df.to_dict('records')
 
             # Update cache
             self._cache[key] = {"data": candles, "timestamp": now}

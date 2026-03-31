@@ -1,11 +1,25 @@
-"""
-TRADING BOT V3 - Logging Setup
-Configures console + rotating file logging
-"""
-
 import logging
 import os
+import sys
 from logging.handlers import RotatingFileHandler
+
+
+class TqdmLoggingHandler(logging.Handler):
+    """
+    Redirects logging to tqdm.write to avoid breaking progress bars.
+    """
+    def __init__(self, level=logging.NOTSET):
+        super().__init__(level)
+
+    def emit(self, record):
+        try:
+            from tqdm import tqdm
+            import sys
+            msg = self.format(record)
+            tqdm.write(msg, file=sys.stdout)
+            self.flush()
+        except Exception:
+            self.handleError(record)
 
 
 def setup_logging(log_dir: str = "logs", level: int = logging.INFO, console: bool = False) -> logging.Logger:
@@ -28,7 +42,7 @@ def setup_logging(log_dir: str = "logs", level: int = logging.INFO, console: boo
     
     # Console handler
     if console:
-        console_handler = logging.StreamHandler()
+        console_handler = TqdmLoggingHandler()
         console_handler.setLevel(level)
         console_handler.setFormatter(formatter)
         root_logger.addHandler(console_handler)

@@ -80,6 +80,9 @@ class StrategyEngine:
         
         self.consecutive_losses = {s: 0 for s in _DEFAULT_SESSIONS}
         self.session_cooldown_active = {s: False for s in _DEFAULT_SESSIONS}
+        
+        import threading
+        self.lock = threading.Lock()
 
     @staticmethod
     def get_session_from_hour(hour: int, utc_offset: int = 0) -> str:
@@ -102,32 +105,39 @@ class StrategyEngine:
         logger.info(message)
 
     def _calculate_rsi(self, prices: np.ndarray, period: int = 14) -> float:
-        if len(prices) < period + 1: return 50.0
-        deltas = np.diff(prices)
-        if len(deltas) == 0: return 50.0
-        up = np.where(deltas > 0, deltas, 0)
-        down = np.where(deltas < 0, -deltas, 0)
+        """
+        High-performance vectorized RSI calculation using pandas ewm.
+        Uses Wilder's Smoothing method for consistency with MT5/TradingView.
+        """
+        if len(prices) < period + 1:
+            return 50.0
+
+        import pandas as pd
+        s = pd.Series(prices)
+        delta = s.diff()
         
-        avg_up = np.mean(up[:period])
-        avg_down = np.mean(down[:period])
+        up = delta.where(delta > 0, 0)
+        down = delta.where(delta < 0, 0).abs()
         
-        for i in range(period, len(deltas)):
-            avg_up = (avg_up * (period - 1) + up[i]) / period
-            avg_down = (avg_down * (period - 1) + down[i]) / period
-            
-        if avg_down == 0: return 100.0
-        rs = avg_up / avg_down
-        return 100.0 - (100.0 / (1.0 + rs))
+        # Wilder's Smoothing: ewm with alpha = 1 / period
+        roll_up = up.ewm(alpha=1.0/period, adjust=False).mean()
+        roll_down = down.abs().ewm(alpha=1.0/period, adjust=False).mean()
+        
+        rs = roll_up / roll_down
+        rsi = 100.0 - (100.0 / (1.0 + rs))
+        return float(rsi.iloc[-1])
 
     def _calculate_ema_series(self, prices: np.ndarray, period: int) -> np.ndarray:
-        if len(prices) == 0: return np.array([])
-        if period <= 0: return prices
-        alpha = 2 / (period + 1)
-        ema_series = np.zeros_like(prices)
-        ema_series[0] = prices[0]
-        for i in range(1, len(prices)):
-            ema_series[i] = (prices[i] - ema_series[i-1]) * alpha + ema_series[i-1]
-        return ema_series
+        """
+        High-performance vectorized EMA calculation using pandas.
+        """
+        if len(prices) == 0:
+            return np.array([])
+        if period <= 1:
+            return prices
+
+        import pandas as pd
+        return pd.Series(prices).ewm(span=period, adjust=False).mean().to_numpy()
 
     def _calculate_ema(self, prices: np.ndarray, period: int) -> float:
         series = self._calculate_ema_series(prices, period)
@@ -468,17 +478,18 @@ class StrategyEngine:
         return min(95.0, base + conf_bonus + strength_bonus)
 
     def report_trade_result(self, result: str, timestamp: datetime, session: Optional[str] = None):
-        """Called by bot/backtester to report trade exit results."""
-        if result == "SL":
-            self.daily_losses += 1
-            self.last_m5_stop_index = self.m5_trade_counter
-            self.last_stop_time = timestamp
-            
-            if session:
-                self.consecutive_losses[session] = self.consecutive_losses.get(session, 0) + 1
-                if self.consecutive_losses[session] >= 2:
-                    self.session_cooldown_active[session] = True
-        elif result == "TP":
-            if session:
-                self.consecutive_losses[session] = 0
-                self.session_cooldown_active[session] = False
+        """Called by bot/backtester to report trade exit results. Thread-safe."""
+        with self.lock:
+            if result == "SL":
+                self.daily_losses += 1
+                self.last_m5_stop_index = self.m5_trade_counter
+                self.last_stop_time = timestamp
+                
+                if session:
+                    self.consecutive_losses[session] = self.consecutive_losses.get(session, 0) + 1
+                    if self.consecutive_losses[session] >= 2:
+                        self.session_cooldown_active[session] = True
+            elif result == "TP":
+                if session:
+                    self.consecutive_losses[session] = 0
+                    self.session_cooldown_active[session] = False
