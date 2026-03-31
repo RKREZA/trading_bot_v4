@@ -128,7 +128,13 @@ class BacktestEngine:
         idx = bisect.bisect_right(times, time_threshold) - 1
         return idx
 
-    def run(self, symbol: str, h4_candles: List[dict], h1_candles: List[dict], m30_candles: List[dict], m5_candles: List[dict], d1_candles: List[dict], ticks: Optional[List[dict]] = None, quiet: bool = False):
+    def run(self, symbol: str, h4_candles: List[dict], h1_candles: List[dict], m30_candles: List[dict], 
+            m5_candles: List[dict], d1_candles: List[dict], ticks: Optional[List[dict]] = None, 
+            quiet: bool = False, tick_entry: bool = False):
+        """
+        Main simulation loop.
+        :param tick_entry: If True, enters trades within the same candle a signal is generated (Realistic Breakout).
+        """
         
         # --- FIX 1: Silence background modules so they don't break the progress bar ---
         self.strategy.silent = True
@@ -196,26 +202,6 @@ class BacktestEngine:
             logger.info("[Backtest] Processed %d ticks into structured Numpy array.", len(ticks))
         
         pending_signal = None  # Next-candle entry: stores signal for delayed execution
-        
-        def _try_ppt(trade: _OpenTrade, close_factor: float, tp_price: float):
-            raw_close_lot = trade.lot * close_factor
-            close_lot = round(raw_close_lot / lot_step) * lot_step
-            close_lot = round(close_lot, 2)
-            if close_lot < min_lot:
-                return False, 0.0, 0.0 # Skip PPT
-            elif round(trade.lot - close_lot, 2) < min_lot:
-                close_lot = round(trade.lot - min_lot, 2)
-            if close_lot < min_lot:
-                return False, 0.0, 0.0 # Skip
-            pnl = (tp_price - trade.entry_price) if trade.signal.direction == "BUY" else (trade.entry_price - tp_price)
-            pnl = pnl * contract_size * close_lot
-            comm = self._get_commission(symbol, close_lot) * 0.5
-            trade.total_commission_paid += comm
-            self.balance += (pnl - comm)
-            trade.lot = round(trade.lot - close_lot, 2)
-            if self.config.get("trailing_stop", {}).get("enabled", True):
-                trade.sl = trade.entry_price
-            return True, pnl, comm
 
         
         # Use standard tqdm with custom configuration for better visibility
@@ -268,43 +254,17 @@ class BacktestEngine:
                         pending_signal = None
                         continue
                 
-                # --- Execute Pending Signal at this candle's OPEN (next-candle entry) ---
-                if not open_trade and pending_signal is not None:
+                # --- Execute Pending Signal at this candle's OPEN (next-candle mode) ---
+                if not open_trade and pending_signal is not None and not tick_entry:
                     ps = pending_signal
                     pending_signal = None
                     
-                    current_atr = m5_atr_series[i-1]
-                    avg_atr_here = m5_avg_atr[i-1]
-                    spread_val = self._get_spread(symbol, current_atr, avg_atr_here, point, ps["session"])
-                    slippage = self._get_slippage(symbol, current_atr, avg_atr_here, point)
-                    
-                    # Entry at this candle's OPEN (realistic: order fills after signal candle closes)
-                    entry_open = current_candle['open']
-                    ask = entry_open + (spread_val * point)
-                    bid = entry_open
-                    
-                    sig = ps["signal"]
-                    entry = ask + slippage if sig.direction == "BUY" else bid - slippage
-                    
-                    # Recalculate lot with actual entry price and current balance
-                    risk_pct = self.risk_manager.calculate_scaled_risk(self.balance, session=ps["session"])
-                    lot = self._calc_lot_size(self.balance, entry, sig.stop_loss, point, contract_size, risk_pct)
-                    
-                    if sig.rejection_type == "VOL_SCALING":
-                        lot *= 0.5
-                        lot = max(0.01, round(lot, 2))
-                        sig.reasons.append("Vol Scaling (50% Lot)")
-                    
-                    open_trade = _OpenTrade(
-                        sig, entry, lot, candle_time,
-                        ps["regime"], ps["ai_score"], spread_val, slippage,
-                        ps["session"]
+                    open_trade = self._handle_entry(
+                        symbol, ps["signal"], current_candle, candle_time,
+                        point, contract_size, ps["session"], ps["regime"],
+                        ps["ai_score"], m5_avg_atr[i-1], m5_atr_series[i-1]
                     )
-                    
-                    self.notification_manager.notify_trade_open(symbol, sig.direction, entry, lot, sig.stop_loss, sig.take_profit)
-                    # if not quiet:
-                    #     t_str = candle_time.strftime('%Y-%m-%d %H:%M') if isinstance(candle_time, datetime) else str(candle_time)
-                    #     pbar.write(f"[{t_str}] OPENED {sig.direction} @ {entry:.5f} | Lot: {lot} (next-candle entry)")
+                    self.notification_manager.notify_trade_open(symbol, open_trade.signal.direction, open_trade.entry_price, open_trade.lot, open_trade.sl, open_trade.tp)
 
                 if open_trade:
                     if not hasattr(open_trade, 'comm_entry_paid') or not open_trade.comm_entry_paid:
@@ -387,28 +347,24 @@ class BacktestEngine:
                             if open_trade.signal.direction == "BUY":
                                 # Level 1
                                 if open_trade.partial_closed_count == 0 and bid_h >= open_trade.tp_partial_1:
-                                    success, pnl, comm = _try_ppt(open_trade, 0.25, open_trade.tp_partial_1)
+                                    success, pnl, comm = self._handle_partial_tp(open_trade, 0.25, open_trade.tp_partial_1, symbol, contract_size, lot_step, min_lot)
                                     open_trade.partial_closed_count = 1
-                                    # if success and not quiet: pbar.write(f"[{candle_time}] Buy PPT1 @ {open_trade.tp_partial_1:.2f} | PnL: ${pnl:.2f} | Comm: ${comm:.2f}")
         
                                 # Level 2
                                 elif open_trade.partial_closed_count == 1 and bid_h >= open_trade.tp_partial_2:
-                                    success, pnl, comm = _try_ppt(open_trade, 0.33, open_trade.tp_partial_2)
+                                    success, pnl, comm = self._handle_partial_tp(open_trade, 0.33, open_trade.tp_partial_2, symbol, contract_size, lot_step, min_lot)
                                     open_trade.partial_closed_count = 2
-                                    # if success and not quiet: pbar.write(f"[{candle_time}] Buy PPT2 @ {open_trade.tp_partial_2:.2f} | PnL: ${pnl:.2f} | Comm: ${comm:.2f}")
         
                             else: # SELL
                                 # Level 1
                                 if open_trade.partial_closed_count == 0 and ask_l <= open_trade.tp_partial_1:
-                                    success, pnl, comm = _try_ppt(open_trade, 0.25, open_trade.tp_partial_1)
+                                    success, pnl, comm = self._handle_partial_tp(open_trade, 0.25, open_trade.tp_partial_1, symbol, contract_size, lot_step, min_lot)
                                     open_trade.partial_closed_count = 1
-                                    # if success and not quiet: pbar.write(f"[{candle_time}] Sell PPT1 @ {open_trade.tp_partial_1:.2f} | PnL: ${pnl:.2f} | Comm_Exit: ${comm:.2f}")
         
                                 # Level 2
                                 elif open_trade.partial_closed_count == 1 and ask_l <= open_trade.tp_partial_2:
-                                    success, pnl, comm = _try_ppt(open_trade, 0.33, open_trade.tp_partial_2)
+                                    success, pnl, comm = self._handle_partial_tp(open_trade, 0.33, open_trade.tp_partial_2, symbol, contract_size, lot_step, min_lot)
                                     open_trade.partial_closed_count = 2
-                                    # if success and not quiet: pbar.write(f"[{candle_time}] Sell PPT2 @ {open_trade.tp_partial_2:.2f} | PnL: ${pnl:.2f} | Comm_Exit: ${comm:.2f}")
     
                         if not closed:
                             # Save SL before MFE/trail updates for intra-candle bias check
@@ -612,13 +568,34 @@ class BacktestEngine:
                                 else:
                                     signal.stop_loss += (ai_sl_buffer * current_atr)
                             
-                            # Store as pending — will execute at NEXT candle's open
-                            pending_signal = {
-                                "signal": signal,
-                                "ai_score": ai_score,
-                                "regime": ai_features["regime"],
-                                "session": current_session,
-                            }
+                            # Execute
+                            if tick_entry and not open_trade:
+                                # Breakout mode: Entry at the breakout level within current candle
+                                entry_price = signal.entry_price
+                                if candle_ticks is not None:
+                                    # Find first tick crossing the level
+                                    if signal.direction == "BUY":
+                                        matches = np.where(candle_ticks['ask'] >= entry_price)[0]
+                                    else:
+                                        matches = np.where(candle_ticks['bid'] <= entry_price)[0]
+                                    
+                                    if len(matches) > 0:
+                                        entry_price = candle_ticks[matches[0]]['ask' if signal.direction == "BUY" else 'bid']
+                                
+                                open_trade = self._handle_entry(
+                                    symbol, signal, current_candle, candle_time,
+                                    point, contract_size, current_session, ai_features["regime"],
+                                    ai_score, avg_atr_here, current_atr, force_price=entry_price
+                                )
+                                self.notification_manager.notify_trade_open(symbol, signal.direction, open_trade.entry_price, open_trade.lot, signal.stop_loss, signal.take_profit)
+                            else:
+                                # Next-candle mode: Store as pending
+                                pending_signal = {
+                                    "signal": signal,
+                                    "ai_score": ai_score,
+                                    "regime": ai_features["regime"],
+                                    "session": current_session,
+                                }
 
         performance = PerformanceMetrics.calculate_metrics(trades, self.initial_balance)
         performance['trades'] = trades
@@ -670,6 +647,66 @@ class BacktestEngine:
         print("\n" + tabulate(summary_data, headers="firstrow", tablefmt="fancy_grid"))
 
         return performance
+
+    def _handle_entry(self, symbol: str, signal: TradeSignal, current_candle: dict, candle_time: datetime,
+                      point: float, contract_size: float, session: str, regime: str, ai_score: float,
+                      avg_atr_here: float, current_atr: float, force_price: Optional[float] = None) -> _OpenTrade:
+        """Centralized helper for trade execution (Slippage, Spread, Lot calculation)."""
+        spread_val = self._get_spread(symbol, current_atr, avg_atr_here, point, session)
+        slippage = self._get_slippage(symbol, current_atr, avg_atr_here, point)
+        
+        # Entry Price: Either a forced tick/breakout level or the candle OHLC
+        ref_price = force_price if force_price is not None else current_candle['open']
+        
+        if signal.direction == "BUY":
+            entry = ref_price + (spread_val * point) + slippage
+        else:
+            entry = ref_price - slippage
+            
+        risk_pct = self.risk_manager.calculate_scaled_risk(self.balance, session=session)
+        lot = self._calc_lot_size(self.balance, entry, signal.stop_loss, point, contract_size, risk_pct)
+        
+        if signal.rejection_type == "VOL_SCALING":
+            lot = max(0.01, round(lot * 0.5, 2))
+            
+        trade = _OpenTrade(
+            signal, entry, lot, candle_time,
+            regime, ai_score, spread_val, slippage, session
+        )
+        
+        # Initial commission
+        comm_entry = self._get_commission(symbol, lot) * 0.5
+        self.balance -= comm_entry
+        trade.comm_entry_paid = True
+        trade.comm_entry_amount = comm_entry
+        trade.total_commission_paid = comm_entry
+        
+        return trade
+
+    def _handle_partial_tp(self, trade: _OpenTrade, close_factor: float, tp_price: float, 
+                          symbol: str, contract_size: float, lot_step: float, min_lot: float):
+        """Helper to process partial profit taking."""
+        raw_close_lot = trade.lot * close_factor
+        close_lot = round(raw_close_lot / lot_step) * lot_step
+        close_lot = round(close_lot, 2)
+        
+        if close_lot < min_lot:
+            return False, 0.0, 0.0 # Skip PPT
+        elif round(trade.lot - close_lot, 2) < min_lot:
+            close_lot = round(trade.lot - min_lot, 2)
+            
+        if close_lot < min_lot:
+            return False, 0.0, 0.0 # Skip
+            
+        pnl = (tp_price - trade.entry_price) if trade.signal.direction == "BUY" else (trade.entry_price - tp_price)
+        pnl = pnl * contract_size * close_lot
+        comm = self._get_commission(symbol, close_lot) * 0.5
+        trade.total_commission_paid += comm
+        self.balance += (pnl - comm)
+        trade.lot = round(trade.lot - close_lot, 2)
+        if self.config.get("trailing_stop", {}).get("enabled", True):
+            trade.sl = trade.entry_price
+        return True, pnl, comm
 
     def _run_monte_carlo_drawdown(self, trades: List[Dict], iterations: int = 100) -> float:
         """Randomly shuffle trade order 100 times and find the worst-case max drawdown."""

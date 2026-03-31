@@ -106,38 +106,51 @@ class StrategyEngine:
 
     def _calculate_rsi(self, prices: np.ndarray, period: int = 14) -> float:
         """
-        High-performance vectorized RSI calculation using pandas ewm.
+        High-performance pure NumPy RSI calculation.
         Uses Wilder's Smoothing method for consistency with MT5/TradingView.
         """
         if len(prices) < period + 1:
             return 50.0
 
-        import pandas as pd
-        s = pd.Series(prices)
-        delta = s.diff()
+        deltas = np.diff(prices)
+        seed = deltas[:period]
+        up = seed[seed >= 0].sum() / period
+        down = -seed[seed < 0].sum() / period
+
+        # Alpha for Wilder's Smoothing is 1/period
+        alpha = 1.0 / period
         
-        up = delta.where(delta > 0, 0)
-        down = delta.where(delta < 0, 0).abs()
-        
-        # Wilder's Smoothing: ewm with alpha = 1 / period
-        roll_up = up.ewm(alpha=1.0/period, adjust=False).mean()
-        roll_down = down.abs().ewm(alpha=1.0/period, adjust=False).mean()
-        
-        rs = roll_up / roll_down
-        rsi = 100.0 - (100.0 / (1.0 + rs))
-        return float(rsi.iloc[-1])
+        # Recursive calculation using a tight loop (vectorized isn't possible for recursive EMA)
+        # But this is far faster than creating a Pandas Series.
+        for i in range(period, len(deltas)):
+            diff = deltas[i]
+            if diff > 0:
+                up = (up * (period - 1) + diff) / period
+                down = (down * (period - 1)) / period
+            else:
+                up = (up * (period - 1)) / period
+                down = (down * (period - 1) - diff) / period
+
+        if down == 0:
+            return 100.0
+        rs = up / down
+        return float(100.0 - (100.0 / (1.0 + rs)))
 
     def _calculate_ema_series(self, prices: np.ndarray, period: int) -> np.ndarray:
-        """
-        High-performance vectorized EMA calculation using pandas.
-        """
+        """High-performance pure NumPy EMA series."""
         if len(prices) == 0:
             return np.array([])
         if period <= 1:
             return prices
 
-        import pandas as pd
-        return pd.Series(prices).ewm(span=period, adjust=False).mean().to_numpy()
+        alpha = 2.0 / (period + 1.0)
+        n = len(prices)
+        ema = np.empty(n)
+        ema[0] = prices[0]
+        
+        for i in range(1, n):
+            ema[i] = prices[i] * alpha + ema[i-1] * (1 - alpha)
+        return ema
 
     def _calculate_ema(self, prices: np.ndarray, period: int) -> float:
         series = self._calculate_ema_series(prices, period)

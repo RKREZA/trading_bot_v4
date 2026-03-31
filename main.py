@@ -10,6 +10,7 @@ import os
 import sys
 import time
 import threading
+import queue
 import itertools
 import copy
 from colorama import init; init()
@@ -85,6 +86,7 @@ class TradingBot:
         self.last_ai_eval_time = None
         self.state_file = "bot_state.json"
         self.state_lock = threading.Lock()
+        self.execution_queue = queue.Queue()
         self._load_state()
 
         # Reconcile local meta-state with live MT5 positions upon startup
@@ -215,7 +217,8 @@ class TradingBot:
             if mt5 is None: return
             from datetime import timezone as _tz
             today_start = datetime.now(_tz.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-            deals = mt5.history_deals_get(today_start, datetime.now(_tz.utc))
+            with MT5Connection.MT5_LOCK:
+                deals = mt5.history_deals_get(today_start, datetime.now(_tz.utc))
             if deals is None:
                 return
             
@@ -269,7 +272,8 @@ class TradingBot:
     def _update_dashboard_live_data(self, symbol):
         """High-frequency dashboard data: Account, Positions, and Ticks."""
         if mt5 is None: return
-        info = mt5.account_info()
+        with MT5Connection.MT5_LOCK:
+            info = mt5.account_info()
         if info:
             self.dashboard.account_info = {
                 "login": info.login,
@@ -288,9 +292,11 @@ class TradingBot:
         self.dashboard.market_open = self.connection.get_market_status(symbol)
 
         # Get latest tick for price/spread
-        tick = mt5.symbol_info_tick(symbol)
-        if tick:
+        with MT5Connection.MT5_LOCK:
+            tick = mt5.symbol_info_tick(symbol)
             sym_info = mt5.symbol_info(symbol)
+        
+        if tick:
             self.dashboard.tick = {
                 "bid": tick.bid,
                 "ask": tick.ask,
@@ -346,7 +352,8 @@ class TradingBot:
         if mt5 is None: return
         try:
             magic = int(self.config.get("magic_number", 234000))
-            active_positions = mt5.positions_get()
+            with MT5Connection.MT5_LOCK:
+                active_positions = mt5.positions_get()
             live_tickets = {p.ticket: p for p in active_positions if p.magic == magic} if active_positions else {}
             
             with self.state_lock:
@@ -385,7 +392,8 @@ class TradingBot:
         try:
             if mt5 is None: return
             magic = int(self.config.get("magic_number", 234000))
-            positions = mt5.positions_get(symbol=symbol)
+            with MT5Connection.MT5_LOCK:
+                positions = mt5.positions_get(symbol=symbol)
             if not positions:
                 return
 
@@ -453,8 +461,9 @@ class TradingBot:
                             with self.state_lock: self.position_meta[ticket]["partial_closed_count"] = 1
                             meta_partial_closed_count = 1
                             state_changed = True
-                            tick = mt5.symbol_info_tick(symbol)
-                            be_price = open_price + tick.ask - tick.bid if tick and pos.type == 0 else open_price - (tick.ask - tick.bid) if tick else open_price
+                            with MT5Connection.MT5_LOCK:
+                                tick = mt5.symbol_info_tick(symbol)
+                            be_price = open_price + (tick.ask - tick.bid) if tick and pos.type == 0 else open_price - (tick.ask - tick.bid) if tick else open_price
                             self._modify_sl_tp(ticket, symbol, be_price, pos.tp)
                             continue
 
@@ -506,7 +515,25 @@ class TradingBot:
 
     def _execute_partial_close(self, ticket, symbol, pos_type, volume, magic, comment):
         if mt5 is None: return
-        tick = mt5.symbol_info_tick(symbol)
+        
+        # If called from background thread, push to queue
+        if threading.current_thread() is not threading.main_thread():
+            command = {
+                "action": "PARTIAL_CLOSE",
+                "ticket": ticket,
+                "symbol": symbol,
+                "pos_type": pos_type,
+                "volume": volume,
+                "magic": magic,
+                "comment": comment
+            }
+            self.execution_queue.put(command)
+            return
+
+        with MT5Connection.MT5_LOCK:
+            tick = mt5.symbol_info_tick(symbol)
+        if not tick: return
+        
         req = {
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": symbol,
@@ -520,12 +547,27 @@ class TradingBot:
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": self.connection.get_filling_mode(symbol),
         }
-        res = mt5.order_send(req)
+        with MT5Connection.MT5_LOCK:
+            res = mt5.order_send(req)
+        
         if res and res.retcode == mt5.TRADE_RETCODE_DONE:
             self.analysis_logger.log(f"Partial Close: {comment} | Vol: {volume}", "INFO")
 
     def _modify_sl_tp(self, ticket, symbol, sl, tp):
         if mt5 is None: return
+
+        # If called from background thread, push to queue
+        if threading.current_thread() is not threading.main_thread():
+            command = {
+                "action": "MODIFY_SL",
+                "ticket": ticket,
+                "symbol": symbol,
+                "sl": sl,
+                "tp": tp
+            }
+            self.execution_queue.put(command)
+            return
+
         mod_req = {
             "action": mt5.TRADE_ACTION_SLTP,
             "symbol": symbol,
@@ -533,7 +575,27 @@ class TradingBot:
             "sl": round(float(sl), 2),
             "tp": round(float(tp), 2),
         }
-        mt5.order_send(mod_req)
+        with MT5Connection.MT5_LOCK:
+            mt5.order_send(mod_req)
+
+    def _process_execution_queue(self):
+        """Processes pending MT5 orders/modifications from background threads."""
+        while not self.execution_queue.empty():
+            try:
+                cmd = self.execution_queue.get_nowait()
+                action = cmd.get("action")
+                
+                if action == "MODIFY_SL":
+                    self._modify_sl_tp(cmd["ticket"], cmd["symbol"], cmd["sl"], cmd["tp"])
+                elif action == "PARTIAL_CLOSE":
+                    self._execute_partial_close(cmd["ticket"], cmd["symbol"], cmd["pos_type"], 
+                                             cmd["volume"], cmd["magic"], cmd["comment"])
+                
+                self.execution_queue.task_done()
+            except queue.Empty:
+                break
+            except Exception as e:
+                logger.error("Error processing execution queue: %s", e)
 
     def _trailing_stop_thread_runner(self, symbol: str) -> None:
         if mt5 is None: return
@@ -553,7 +615,9 @@ class TradingBot:
                         cached_m30 = fresh
                         last_atr_time = now
 
-                tick = mt5.symbol_info_tick(symbol)
+                with MT5Connection.MT5_LOCK:
+                    tick = mt5.symbol_info_tick(symbol)
+                
                 if tick is None:
                     time.sleep(TICK_POLL_SECS)
                     continue
@@ -605,44 +669,60 @@ class TradingBot:
         except Exception:
             return {}
 
-    def _process_strategy_cycle(self, symbol: str, mid_price: float):
-        if mt5 is None: return
+    def _update_market_data(self, symbol: str) -> Optional[dict]:
+        """Pipeline Stage 1: Market Connectivity and Incremental Data."""
+        if not self.connection.ensure_connected():
+            return None
+
+        # 1. Update Dashboard Heartbeat
+        self.dashboard.account_info = self.connection.account_info
+        sym_info = self.data_fetcher.get_symbol_info(symbol)
+        if not sym_info:
+            return None
+
+        mid_price = (sym_info["bid"] + sym_info["ask"]) / 2
+        self.dashboard.tick = {
+            "bid": sym_info["bid"], "ask": sym_info["ask"], "price": mid_price,
+            "spread": sym_info["spread"] * sym_info["point"], "contract_size": sym_info["contract_size"]
+        }
+
+        # 2. Cycle Synchronization Logic
+        with MT5Connection.MT5_LOCK:
+            tick = mt5.symbol_info_tick(symbol)
+        if not tick: return None
         
-        # Drive the cycle by MT5 Tick Time for precision
-        tick = mt5.symbol_info_tick(symbol)
-        if not tick: return
-        
-        tick_time = tick.time
-        # Round down to the nearest 5-minute (M5) boundary
-        m5_boundary = (tick_time // 300) * 300
-        
-        # Check if we should force a fresh data fetch (start of new candle)
+        m5_boundary = (tick.time // 300) * 300
         last_boundary = getattr(self, "_last_m5_boundary", 0)
         force_refresh = (m5_boundary > last_boundary)
         
-        # Optimization: Only process full strategy if a new M5 boundary is crossed 
-        # or every 30 seconds for intra-candle updates (optional but safe)
-        now_ts = time.time()
-        last_proc_real = getattr(self, "_last_proc_realtime", 0)
+        now = time.time()
+        last_proc = getattr(self, "_last_proc_realtime", 0)
         
-        if not force_refresh and (now_ts - last_proc_real) < 30:
-            return
+        if not force_refresh and (now - last_proc) < 30:
+            return None
 
         if force_refresh:
             self._last_m5_boundary = m5_boundary
-            logger.info("[Stale Candle Prevention] New M5 boundary detected: %s. Forcing fresh MT5 fetch.", 
+            logger.info("[Pipeline] New candle boundary detected: %s", 
                          datetime.fromtimestamp(m5_boundary, tz=timezone.utc).strftime("%H:%M:%S"))
 
-        self._last_proc_realtime = now_ts
+        self._last_proc_realtime = now
         
-        # Pass force_refresh to fetch all data accurately
+        # 3. Fetch Multi-Timeframe Data (Incremental via DataFetcher)
         candles = {}
         for tf, count in [("H4", 250), ("H1", 600), ("M30", 1540), ("D1", 100), ("M5", 2000)]:
             candles[tf] = self.data_fetcher.fetch_candles(symbol, tf, count, force_refresh=force_refresh)
 
         if not all(k in candles and candles[k] for k in ["H4", "H1", "M30", "M5", "D1"]):
-            return
+            return None
 
+        return {"candles": candles, "mid_price": mid_price}
+
+    def _evaluate_new_signals(self, symbol: str, data: dict) -> Optional[tuple]:
+        """Pipeline Stage 2: Technical Strategy Analysis."""
+        candles = data["candles"]
+        mid_price = data["mid_price"]
+        
         session = self._get_session()
         if session != self.last_logged_session:
             self.analysis_logger.log(f"Market Session: {session}", "INFO")
@@ -654,40 +734,63 @@ class TradingBot:
         )
 
         self._update_dashboard_state(symbol, signal, h4_trend=h4_trend, m30_structure=m30_struct)
-
+        
         if signal:
-            # Shifted to Macro-only AI Context for Execution
-            if self.ai_advisor.is_high_impact_news():
-                self.analysis_logger.log(f"News Avoidance active. Skipping {signal.direction}", "WARNING")
+            return signal, h4_trend, session
+        return None
+
+    def _execute_orders(self, symbol: str, context: tuple):
+        """Pipeline Stage 3: AI Veto, Risk Scaling, and MT5 Placement."""
+        signal, h4_trend, session = context
+
+        # 1. News Avoidance
+        if self.ai_advisor.is_high_impact_news():
+            self.analysis_logger.log(f"News Avoidance active. Skipping {signal.direction}", "WARNING")
+            return
+
+        # 2. Logic & AI Review
+        ai_risk_mult = self.ai_advisor.lot_multiplier
+        ai_bias = self.ai_advisor.session_bias
+        risk_scaling = 1.0
+        
+        if (signal.direction == "BUY" and ai_bias == "BEARISH") or \
+           (signal.direction == "SELL" and ai_bias == "BULLISH"):
+            risk_scaling = 0.5
+            self.analysis_logger.log(f"Macro Bias contradicts signal ({ai_bias}). Scaling risk 50%.", "INFO")
+
+        # Blocking wait for AI signal evaluation (5s Timeout)
+        self.ai_advisor.evaluate_signal_async(signal, h4_trend, symbol)
+        if self.ai_advisor.wait_for_eval(timeout=5):
+            ai_review = self.ai_advisor.context.get("last_signal_review", {})
+            verdict = ai_review.get("verdict", "VALID")
+            
+            if verdict == "AVOID":
+                self.analysis_logger.log(f"AI VETO: {ai_review.get('reasoning', 'No reason provided')}", "WARNING")
                 return
-
-            # LOT & RISK Adjustment (Macro AI Context)
-            ai_risk_mult = self.ai_advisor.lot_multiplier # Derived from Macro Risk (LOW, MD, HI)
-            ai_bias = self.ai_advisor.session_bias # BULLISH/BEARISH
+            elif verdict == "CAUTION":
+                risk_scaling *= 0.75
+                self.analysis_logger.log("AI CAUTION: Scaling risk by 25%.", "INFO")
             
-            # Anti-Trend Filter: Reduce risk if macro bias contradicts signal
-            risk_scaling = 1.0
-            if (signal.direction == "BUY" and ai_bias == "BEARISH") or \
-               (signal.direction == "SELL" and ai_bias == "BULLISH"):
-                risk_scaling = 0.5
-                self.analysis_logger.log(f"Macro Bias ({ai_bias}) contradicts signal. Scaling risk 50%.", "INFO")
+            adj = ai_review.get("confidence_adjustment", 0)
+            signal.confidence = max(0, min(100, signal.confidence + adj))
+        else:
+            self.analysis_logger.log("AI API Timeout: Defaulting to technical strategy.", "INFO")
 
-            # Fire off async evaluation for reporting, but don't block execution
-            self.ai_advisor.evaluate_signal_async(signal, h4_trend, symbol)
-
-            risk_pct = self.risk_manager.calculate_scaled_risk(self.connection.account_info.get('balance'), session)
-            risk_pct = risk_pct * ai_risk_mult * risk_scaling
+        # 3. Final Placement
+        risk_pct = self.risk_manager.calculate_scaled_risk(self.connection.account_info.get('balance'), session)
+        risk_pct = risk_pct * ai_risk_mult * risk_scaling
+        
+        if risk_pct > 0 and self.position_manager.count_open_positions(symbol) < self.config.get("risk", {}).get("max_open_positions", 2):
+            lot = self.position_manager.calculate_lot_size(symbol, signal, risk_pct)
+            if signal.rejection_type == "VOL_SCALING": lot *= 0.5
             
-            if risk_pct > 0 and self.position_manager.count_open_positions(symbol) < self.config.get("risk", {}).get("max_open_positions", 2):
-                lot = self.position_manager.calculate_lot_size(symbol, signal, risk_pct)
-                if signal.rejection_type == "VOL_SCALING": lot *= 0.5
-                order = self.connection.place_order(symbol, signal, lot)
-                if order:
-                    self.analysis_logger.log(f"LIVE TRADE: {signal.direction} {lot}", "SUCCESS")
-                    self._log_signal_to_file(symbol, signal, lot, order['ticket'])
-                    self._save_state()
-
+            order = self.connection.place_order(symbol, signal, lot)
+            if order:
+                self.analysis_logger.log(f"LIVE TRADE: {signal.direction} {lot}", "SUCCESS")
+                self._log_signal_to_file(symbol, signal, lot, order['ticket'])
+                self._save_state()
     def run_live(self):
+        """Main execution entry point: Institutional-grade Pipeline Architecture."""
         if not self.connection.connect(): return
         symbol = self.config.get("symbol", "BTCUSDm")
         self.dashboard.selected_symbol = symbol
@@ -695,41 +798,50 @@ class TradingBot:
         self.dashboard.running = True
         self.dashboard.start()
 
+        # Start Trailing Stop / MT5 Command Processing Thread
         trail_thread = threading.Thread(target=self._trailing_stop_thread_runner, args=(symbol,), daemon=True)
         trail_thread.start()
 
         try:
             while self.running:
+                # 1. Reset Daily Thresholds
                 self._reset_daily_stats()
+                
+                # 2. Process Background Orders (from TrailThread)
+                self._process_execution_queue()
+                
+                # 3. Health & Risk Checks
                 if not self._check_trading_limits():
-                    time.sleep(60)
+                    time.sleep(10)
                     continue
-                if not self.connection.ensure_connected():
-                    time.sleep(5)
-                    continue
-
-                self.dashboard.account_info = self.connection.account_info
-                sym_info = self.data_fetcher.get_symbol_info(symbol)
-                if not sym_info:
-                    time.sleep(1)
+                
+                # 4. Pipeline Stage 1: Market Data Update (Incremental Fetch)
+                market_data = self._update_market_data(symbol)
+                if not market_data:
+                    time.sleep(0.1)
                     continue
 
-                mid_price = (sym_info["bid"] + sym_info["ask"]) / 2
-                self.dashboard.tick = {
-                    "bid": sym_info["bid"], "ask": sym_info["ask"], "price": mid_price,
-                    "spread": sym_info["spread"] * sym_info["point"], "contract_size": sym_info["contract_size"]
-                }
-                self._process_strategy_cycle(symbol, mid_price)
+                # 5. Pipeline Stage 2: Signal Evaluation
+                signal_context = self._evaluate_new_signals(symbol, market_data)
+                
+                # 6. Pipeline Stage 3: Order Execution
+                if signal_context:
+                    self._execute_orders(symbol, signal_context)
+
+                # 7. Post-Cycle State Management
                 self._update_realized_pnl()
-                time.sleep(1)
+                
+                # High-frequency polling (10Hz) to process queue and dashboard
+                time.sleep(0.1)
+                
         except Exception as e:
-            self.analysis_logger.log(f"Critical error: {e}", "CRITICAL")
+            self.analysis_logger.log(f"Critical execution error: {e}", "CRITICAL")
         finally:
             self.running = False
             self.dashboard.stop()
             self.connection.disconnect()
 
-    def run_backtest(self, symbol: str, from_date: Optional[str] = None, to_date: Optional[str] = None, use_ticks: bool = False):
+    def run_backtest(self, symbol: str, from_date: Optional[str] = None, to_date: Optional[str] = None, use_ticks: bool = False, tick_entry: bool = False):
         if not self.connection.connect(): return
         logger.info("Fetching data for %s...", symbol)
         d_to = datetime.now()
@@ -761,7 +873,7 @@ class TradingBot:
             return
 
         engine = BacktestEngine(self.config, self.strategy)
-        results = engine.run(symbol, h4, h1, m30, m5, d1, ticks=ticks)
+        results = engine.run(symbol, h4, h1, m30, m5, d1, ticks=ticks, tick_entry=tick_entry)
         logger.info(f"Backtest Complete. Profit: {results.get('net_profit', 0):.2f}")
 
     def run_full_validation(self, symbol: str, from_date: Optional[str] = None, to_date: Optional[str] = None):
@@ -795,14 +907,15 @@ def main():
     parser.add_argument("--config", type=str, default="config.json")
     parser.add_argument("--from", dest="at_from", type=str)
     parser.add_argument("--to", dest="at_to", type=str)
-    parser.add_argument("--ticks", action="store_true")
+    parser.add_argument("--ticks", action="store_true", help="Use real ticks for exits")
+    parser.add_argument("--tick-entry", action="store_true", help="Enter at exact tick breakout")
     args = parser.parse_args()
 
     setup_logging(console=any([args.backtest, args.full, args.optimize]))
     bot = TradingBot(args.config)
     if args.optimize: bot.run_optimization(args.symbol)
     elif args.full: bot.run_full_validation(args.symbol, args.at_from, args.at_to)
-    elif args.backtest: bot.run_backtest(args.symbol, args.at_from, args.at_to, args.ticks)
+    elif args.backtest: bot.run_backtest(args.symbol, args.at_from, args.at_to, args.ticks, args.tick_entry)
     else: bot.run_live()
 
 if __name__ == "__main__":

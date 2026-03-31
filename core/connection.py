@@ -7,6 +7,7 @@ import logging
 import os
 import time
 import math
+import threading
 from datetime import datetime, timezone
 from typing import Optional, List
 
@@ -24,6 +25,10 @@ BOT_MAGIC_NUMBER = 234000
 
 class MT5Connection:
     """Manages the MT5 terminal connection with health checks and auto-reconnect."""
+    
+    # Global lock for all mt5.* library calls across the entire application.
+    # This prevents race conditions and segmentation faults in the non-thread-safe C-wrapper.
+    MT5_LOCK = threading.Lock()
 
     def __init__(self, max_retries: int = 5, health_check_interval: int = 30):
         self.max_retries = max_retries
@@ -66,18 +71,23 @@ class MT5Connection:
 
         for attempt in range(self.max_retries):
             try:
-                mt5.shutdown()
+                with self.MT5_LOCK:
+                    mt5.shutdown()
                 time.sleep(2)
                 logger.info("Attempt %d/%d...", attempt + 1, self.max_retries)
 
-                if not mt5.initialize(
-                    login=creds["login"],
-                    password=creds["password"],
-                    server=creds["server"],
-                    timeout=30000,
-                    portable=False,
-                ):
-                    error = mt5.last_error()
+                with self.MT5_LOCK:
+                    success = mt5.initialize(
+                        login=creds["login"],
+                        password=creds["password"],
+                        server=creds["server"],
+                        timeout=30000,
+                        portable=False,
+                    )
+                
+                if not success:
+                    with self.MT5_LOCK:
+                        error = mt5.last_error()
                     logger.warning("Failed: %s", error)
                     if error[0] == -10005:
                         logger.warning("MT5 terminal is not running. Open MT5 first!")
@@ -86,10 +96,15 @@ class MT5Connection:
                     time.sleep(3)
                     continue
 
-                info = mt5.account_info()
+                with self.MT5_LOCK:
+                    info = mt5.account_info()
+                
                 if info is None:
-                    logger.warning("Account info failed: %s", mt5.last_error())
-                    mt5.shutdown()
+                    with self.MT5_LOCK:
+                        err = mt5.last_error()
+                    logger.warning("Account info failed: %s", err)
+                    with self.MT5_LOCK:
+                        mt5.shutdown()
                     time.sleep(3)
                     continue
 
@@ -111,7 +126,8 @@ class MT5Connection:
     def disconnect(self):
         """Cleanly disconnect from MT5."""
         if mt5 is not None:
-            mt5.shutdown()
+            with self.MT5_LOCK:
+                mt5.shutdown()
         self.connected = False
         logger.info("MT5 disconnected")
 
@@ -125,7 +141,8 @@ class MT5Connection:
             return True
 
         try:
-            info = mt5.account_info()
+            with self.MT5_LOCK:
+                info = mt5.account_info()
             if info is None:
                 logger.warning("Health check failed — connection lost")
                 self.connected = False
@@ -157,7 +174,8 @@ class MT5Connection:
         try:
             # We use the time of the last received tick as a proxy for server time
             # Since TerminalInfo doesn't have it in Python, we fetch any liquid symbol
-            tick = mt5.symbol_info_tick(info.login_symbol if hasattr(info, 'login_symbol') else "BTCUSDm")
+            with self.MT5_LOCK:
+                tick = mt5.symbol_info_tick(info.login_symbol if hasattr(info, 'login_symbol') else "BTCUSDm")
             if tick:
                 server_time = datetime.fromtimestamp(tick.time, tz=timezone.utc).strftime("%H:%M:%S")
             else:
@@ -187,7 +205,8 @@ class MT5Connection:
         if mt5 is None: return False
         
         # 1. Basic Trade Mode Check
-        symbol_info = mt5.symbol_info(symbol)
+        with self.MT5_LOCK:
+            symbol_info = mt5.symbol_info(symbol)
         if symbol_info is None: return False
         
         # If explicitly disabled, it's definitely closed
@@ -198,7 +217,8 @@ class MT5Connection:
         # Many brokers (like Exness) keep trade_mode=4 (Full) on weekends,
         # but stop producing candles. We check if the last M1 candle is 'fresh'.
         try:
-            rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 0, 1)
+            with self.MT5_LOCK:
+                rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 0, 1)
             if rates is None or len(rates) == 0:
                 return False
                 
@@ -222,7 +242,8 @@ class MT5Connection:
         if mt5 is None:
             return 0
 
-        symbol_info = mt5.symbol_info(symbol)
+        with self.MT5_LOCK:
+            symbol_info = mt5.symbol_info(symbol)
         if symbol_info is None:
             return mt5.ORDER_FILLING_RETURN
 
@@ -247,19 +268,23 @@ class MT5Connection:
         if not self.ensure_connected():
             return None
 
-        symbol_info = mt5.symbol_info(symbol)
+        with self.MT5_LOCK:
+            symbol_info = mt5.symbol_info(symbol)
         if symbol_info is None:
             logger.error("%s not found, can not call order_check()", symbol)
             return None
 
         if not symbol_info.visible:
             logger.info("%s is not visible, trying to switch on", symbol)
-            if not mt5.symbol_select(symbol, True):
+            with self.MT5_LOCK:
+                select_res = mt5.symbol_select(symbol, True)
+            if not select_res:
                 logger.error("symbol_select(%s) failed, exit", symbol)
                 return None
 
         # Determine order type and price
-        tick = mt5.symbol_info_tick(symbol)
+        with self.MT5_LOCK:
+            tick = mt5.symbol_info_tick(symbol)
         if tick is None:
             logger.error("Cannot get tick for %s", symbol)
             return None
@@ -309,7 +334,9 @@ class MT5Connection:
                 "type_filling": self.get_filling_mode(symbol),
             }
 
-            result = mt5.order_send(request)
+            with self.MT5_LOCK:
+                result = mt5.order_send(request)
+            
             if result.retcode in [mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_DONE_PARTIAL, mt5.TRADE_RETCODE_PLACED]:
                 logger.info("Order placed successfully. Ticket: %s", result.order)
                 return {"ticket": result.order, "volume": result.volume, "price": result.price}
@@ -322,7 +349,8 @@ class MT5Connection:
                 if result.retcode in [10004, 10006, 10020]: 
                     logger.warning("Retrying with new tick...")
                     time.sleep(0.2)
-                    tick = mt5.symbol_info_tick(symbol)
+                    with self.MT5_LOCK:
+                        tick = mt5.symbol_info_tick(symbol)
                     if tick:
                         price = tick.ask if signal.direction == "BUY" else tick.bid
                         deviation += 5
@@ -331,8 +359,9 @@ class MT5Connection:
                 elif result.retcode == 10021: # INVALID_STOPS
                     logger.warning("Execution rejected (Invalid Stops). Enforcing broker minimum stops...")
                     time.sleep(0.150)
-                    tick = mt5.symbol_info_tick(symbol)
-                    sym_info = mt5.symbol_info(symbol)
+                    with self.MT5_LOCK:
+                        tick = mt5.symbol_info_tick(symbol)
+                        sym_info = mt5.symbol_info(symbol)
                     
                     if tick and sym_info:
                         price = tick.ask if signal.direction == "BUY" else tick.bid
@@ -361,7 +390,8 @@ class MT5Connection:
         if not self.ensure_connected():
             return []
         try:
-            orders = mt5.orders_get(symbol=symbol)
+            with self.MT5_LOCK:
+                orders = mt5.orders_get(symbol=symbol)
             return orders if orders else []
         except Exception as e:
             logger.error("Error fetching pending orders: %s", e)
@@ -379,7 +409,9 @@ class PositionManager:
         if not self.connection.ensure_connected():
             return []
         try:
-            positions = mt5.positions_get(symbol=symbol)
+            # Reusing the connection's lock for PositionManager
+            with self.connection.MT5_LOCK:
+                positions = mt5.positions_get(symbol=symbol)
             return positions if positions else []
         except Exception as e:
             logger.error("Error fetching positions: %s", e)
@@ -398,7 +430,9 @@ class PositionManager:
 
         risk_amount = account_balance * (risk_percent / 100.0)
 
-        symbol_info = mt5.symbol_info(symbol)
+        with self.connection.MT5_LOCK:
+            symbol_info = mt5.symbol_info(symbol)
+        
         if symbol_info is None:
             logger.error("Cannot get symbol info for %s", symbol)
             return 0.01

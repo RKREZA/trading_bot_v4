@@ -13,6 +13,7 @@ try:
 except ImportError:
     mt5 = None
 
+from .connection import MT5Connection
 logger = logging.getLogger("trading_bot.data")
 
 # Cache duration per timeframe (seconds)
@@ -44,11 +45,27 @@ class DataFetcher:
         self._cache: Dict[str, dict] = {}  # key -> {data, timestamp}
 
     def _cache_key(self, symbol: str, timeframe: str, count: int) -> str:
+        """Generate a unique cache key."""
         return f"{symbol}_{timeframe}_{count}"
+
+    def _merge_candles(self, existing: List[dict], new: List[dict], max_len: int) -> List[dict]:
+        """Merge new candles into existing cache, deduplicating by timestamp."""
+        if not existing: return new
+        if not new: return existing
+        
+        # Combine existing and new, keyed by time to automatically deduplicate
+        # We prefer 'new' data for the same timestamp
+        combined = {c['time']: c for c in existing}
+        for c in new:
+            combined[c['time']] = c
+            
+        # Sort by time and trim to max_len
+        sorted_times = sorted(combined.keys())
+        return [combined[t] for t in sorted_times[-max_len:]]
 
     def fetch_candles(self, symbol: str, timeframe: str, count: int = 500, force_refresh: bool = False) -> List[dict]:
         """
-        Fetch candle data, returning cached data if still fresh.
+        Fetch candle data, returning cached data or incrementally updating it.
         """
         if timeframe not in TIMEFRAME_MAP or TIMEFRAME_MAP[timeframe] is None:
             logger.warning("Invalid timeframe: %s", timeframe)
@@ -58,46 +75,66 @@ class DataFetcher:
         ttl = CACHE_TTL.get(timeframe, 60)
         now = time.time()
 
-        # Return cached data if fresh (and not forced)
         cached = self._cache.get(key)
-        if not force_refresh and cached and (now - cached["timestamp"]) < ttl:
+        
+        # 1. Light Cache Check (Return if extremely fresh)
+        if not force_refresh and cached and (now - cached["timestamp"]) < (ttl / 2):
             return cached["data"]
+
+        # 2. Incremental Fetch Decision
+        fetch_count = count
+        is_incremental = False
+        
+        # [THE FIX]: If we already have the full history cached, we ONLY need 
+        # to fetch the latest few candles to update the tip, regardless of force_refresh!
+        if cached and len(cached["data"]) >= count:
+            fetch_count = 10 # Just get the latest 10 candles
+            is_incremental = True
 
         # Fetch from MT5
         try:
             import pandas as pd
-            # Explicitly select symbol to ensure it's in MarketWatch
-            if not mt5.symbol_select(symbol, True):
+            with MT5Connection.MT5_LOCK:
+                select_res = mt5.symbol_select(symbol, True)
+            if not select_res:
                 error = mt5.last_error()
                 logger.error("symbol_select failed for %s: %s", symbol, error)
                 return []
             
-            # Resilient fetching: if the full count fails, try to get as much as possible
-            logger.debug("MT5 Fetch: %s %s (%d candles)...", symbol, timeframe, count)
-            rates = mt5.copy_rates_from_pos(symbol, TIMEFRAME_MAP[timeframe], 0, count)
+            logger.debug("MT5 Fetch (%s): %s %s (%d candles)...", 
+                         "INC" if is_incremental else "FULL", symbol, timeframe, fetch_count)
+            
+            with MT5Connection.MT5_LOCK:
+                rates = mt5.copy_rates_from_pos(symbol, TIMEFRAME_MAP[timeframe], 0, fetch_count)
             
             if rates is None or len(rates) == 0:
-                # Try to find exactly how much history is available
-                logger.warning("%s %s: Full history (%d) not available. Retrying with half...", symbol, timeframe, count)
-                temp_count = count // 2
-                while temp_count >= 100:
-                    rates = mt5.copy_rates_from_pos(symbol, TIMEFRAME_MAP[timeframe], 0, temp_count)
-                    if rates is not None and len(rates) > 0:
-                        logger.info("%s %s: Recovered %d candles (requested %d)", symbol, timeframe, len(rates), count)
-                        break
-                    temp_count //= 2
+                if not is_incremental:
+                    # Fallback for full fetch failure
+                    logger.warning("%s %s: Full history (%d) not available. Retrying with half...", symbol, timeframe, count)
+                    temp_count = count // 2
+                    while temp_count >= 100:
+                        with MT5Connection.MT5_LOCK:
+                            rates = mt5.copy_rates_from_pos(symbol, TIMEFRAME_MAP[timeframe], 0, temp_count)
+                        if rates is not None and len(rates) > 0:
+                            logger.info("%s %s: Recovered %d candles (requested %d)", symbol, timeframe, len(rates), count)
+                            break
+                        temp_count //= 2
             
             if rates is None or len(rates) == 0:
-                logger.error("No data returned for %s %s after retries", symbol, timeframe)
                 return cached["data"] if cached else []
 
-            # Vectorized conversion using Pandas (much faster than manual loops for O(N) bottlenecks)
+            # Convert to dicts
             df = pd.DataFrame(rates)
-            candles = df.to_dict('records')
+            new_candles = df.to_dict('records')
+
+            # 3. Merge or Replace
+            if is_incremental:
+                candles = self._merge_candles(cached["data"], new_candles, count)
+            else:
+                candles = new_candles
 
             # Update cache
             self._cache[key] = {"data": candles, "timestamp": now}
-            logger.debug("Fetched %d %s candles for %s", len(candles), timeframe, symbol)
             return candles
 
         except Exception as e:
@@ -112,11 +149,12 @@ class DataFetcher:
             return []
 
         try:
-            if not mt5.symbol_select(symbol, True):
-                return []
+            with MT5Connection.MT5_LOCK:
+                if not mt5.symbol_select(symbol, True):
+                    return []
 
-            logger.debug("MT5 Range Fetch: %s %s (%s to %s)...", symbol, timeframe, date_from, date_to)
-            rates = mt5.copy_rates_range(symbol, TIMEFRAME_MAP[timeframe], date_from, date_to)
+                logger.debug("MT5 Range Fetch: %s %s (%s to %s)...", symbol, timeframe, date_from, date_to)
+                rates = mt5.copy_rates_range(symbol, TIMEFRAME_MAP[timeframe], date_from, date_to)
             
             if rates is None or len(rates) == 0:
                 logger.warning("No range data for %s %s", symbol, timeframe)
@@ -142,12 +180,13 @@ class DataFetcher:
         Fetch real tick data for a specific date range.
         """
         try:
-            if not mt5.symbol_select(symbol, True):
-                return []
+            with MT5Connection.MT5_LOCK:
+                if not mt5.symbol_select(symbol, True):
+                    return []
 
-            logger.debug("MT5 Tick Fetch: %s (%s to %s)...", symbol, date_from, date_to)
-            # Fetch all ticks (bid, ask, last)
-            ticks = mt5.copy_ticks_range(symbol, date_from, date_to, mt5.COPY_TICKS_ALL)
+                logger.debug("MT5 Tick Fetch: %s (%s to %s)...", symbol, date_from, date_to)
+                # Fetch all ticks (bid, ask, last)
+                ticks = mt5.copy_ticks_range(symbol, date_from, date_to, mt5.COPY_TICKS_ALL)
             
             if ticks is None or len(ticks) == 0:
                 logger.warning("No tick data for %s", symbol)
@@ -171,7 +210,8 @@ class DataFetcher:
     def get_symbol_info(self, symbol: str) -> Optional[dict]:
         """Get current symbol information (tick data)."""
         try:
-            info = mt5.symbol_info(symbol)
+            with MT5Connection.MT5_LOCK:
+                info = mt5.symbol_info(symbol)
             if info is None:
                 return None
             return {
