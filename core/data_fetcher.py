@@ -17,13 +17,13 @@ logger = logging.getLogger("trading_bot.data")
 
 # Cache duration per timeframe (seconds)
 CACHE_TTL = {
-    "M1": 60,
-    "M5": 300,
-    "M15": 900,
-    "M30": 1800,
-    "H1": 3600,
-    "H4": 14400,
-    "D1": 86400,
+    "M1": 1,
+    "M5": 2,
+    "M15": 10,
+    "M30": 30,
+    "H1": 60,
+    "H4": 300,
+    "D1": 3600,
 }
 
 TIMEFRAME_MAP = {

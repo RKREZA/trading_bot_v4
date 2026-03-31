@@ -291,7 +291,7 @@ class MT5Connection:
             }
 
             result = mt5.order_send(request)
-            if result.retcode == mt5.TRADE_RETCODE_DONE:
+            if result.retcode in [mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_DONE_PARTIAL, mt5.TRADE_RETCODE_PLACED]:
                 logger.info("Order placed successfully. Ticket: %s", result.order)
                 return {"ticket": result.order, "volume": result.volume, "price": result.price}
 
@@ -382,6 +382,11 @@ class PositionManager:
         if risk_points <= 0:
             logger.warning("Zero risk distance, cannot calculate lot size")
             return 0.01
+
+        # Enforce minimum risk points floor (prevent lot inflation on tight stops)
+        min_sl_points = self.connection.config.get("strategy_defaults", {}).get("min_sl_points", 150)
+        if risk_points < min_sl_points:
+            risk_points = min_sl_points
 
         # NOTE: point_value assumes quote currency == account currency (USD).
         # For cross-currency pairs (e.g. EURJPY with a USD account), multiply

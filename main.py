@@ -91,13 +91,34 @@ class TradingBot:
                 "equity": {
                     "peak_equity": self.peak_equity,
                     "max_drawdown_reached": self.max_drawdown_reached
-                }
+                },
+                "last_trade_time": self.last_trade_time
             }
         try:
             with open(self.state_file, "w") as f:
                 json.dump(state, f)
         except Exception as e:
             logger.error("Failed to save state: %s", e)
+
+    def _log_signal_to_file(self, symbol, signal, lot_size, ticket):
+        """Append valid signal information to signal.log."""
+        try:
+            log_entry = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "symbol": symbol,
+                "direction": signal.direction,
+                "entry": signal.entry_price,
+                "sl": signal.stop_loss,
+                "tp": signal.take_profit,
+                "lot": lot_size,
+                "ticket": ticket,
+                "confidence": signal.confidence,
+                "confluence": signal.confluence_score
+            }
+            with open("signal.log", "a") as f:
+                f.write(json.dumps(log_entry) + "\n")
+        except Exception as e:
+            logger.error("Failed to log signal to file: %s", e)
 
     def _load_state(self):
         import os
@@ -112,6 +133,7 @@ class TradingBot:
                     eq = state.get("equity", {})
                     self.peak_equity = eq.get("peak_equity", 0.0)
                     self.max_drawdown_reached = eq.get("max_drawdown_reached", 0.0)
+                    self.last_trade_time = state.get("last_trade_time", {})
                 logger.debug("Bot state restored from %s", self.state_file)
         except Exception as e:
             logger.error("Failed to load state from %s: %s", self.state_file, e)
@@ -361,8 +383,8 @@ class TradingBot:
                     profit = (cur - open_price) if pos.type == 0 else (open_price - cur)
                     
                     pp_cfg = self.config.get("strategy_defaults", {}).get("partial_profit_config", {
-                        "level1_rr": 1.0, "level1_pct": 0.25,
-                        "level2_rr": 2.0, "level2_pct": 0.25
+                        "level1_rr": 1.5, "level1_pct": 0.25,
+                        "level2_rr": 2.5, "level2_pct": 0.25
                     })
                     
                     # Step 1: 1:1 RR
@@ -377,8 +399,11 @@ class TradingBot:
                             with self.state_lock: self.position_meta[ticket]["partial_closed_count"] = 1
                             meta_partial_closed_count = 1
                             state_changed = True
-                            # Move SL to BE
-                            self._modify_sl_tp(ticket, symbol, open_price, pos.tp)
+                            # Move SL to BE + spread offset
+                            tick = mt5.symbol_info_tick(symbol)
+                            spread = (tick.ask - tick.bid) if tick else 0
+                            be_price = open_price + spread if pos.type == 0 else open_price - spread
+                            self._modify_sl_tp(ticket, symbol, be_price, pos.tp)
                             continue
 
                     # Step 2: 2:1 RR
@@ -393,8 +418,8 @@ class TradingBot:
 
                 # 3. Optimized MFE Trailing
                 if ts_cfg.get("enabled", True):
-                    # 1. Base Trail: 50% give-back
-                    give_back_pct = ts_cfg.get("mfe_trail_base", 0.5)
+                    # 1. Base Trail: 60% give-back
+                    give_back_pct = ts_cfg.get("mfe_trail_base", 0.6)
                     
                     # 2. Profit-Dependent (Tighten as profit increases)
                     risk = meta_risk
@@ -635,8 +660,21 @@ class TradingBot:
                         "contract_size": symbol_info["contract_size"],
                     }
 
-                    # Fetch candles (cached per timeframe)
-                    fetch_start = time.time()
+                    # Throttling Logic: Only run strategy if we haven't processed this candle OR at least 30s has passed
+                    now_ts = time.time()
+                    m5_tick = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, 1)
+                    current_candle_time = m5_tick[0][0] if m5_tick is not None and len(m5_tick) > 0 else 0
+                    
+                    last_proc = getattr(self, "_last_proc_candle", 0)
+                    last_proc_real = getattr(self, "_last_proc_realtime", 0)
+                    
+                    # Run if: new candle OR (it's the same candle but 30s have passed since last scan)
+                    if current_candle_time > last_proc or (now_ts - last_proc_real) >= 30:
+                        self._last_proc_candle = current_candle_time
+                        self._last_proc_realtime = now_ts
+                        
+                        # Fetch candles (cached per timeframe)
+                        fetch_start = time.time()
                     
                     self.dashboard.fetch_status = "[bold yellow]Data 1/5 (H4)...[/]"
                     self.dashboard.update()
@@ -793,14 +831,16 @@ class TradingBot:
 
                                 self.analysis_logger.log(f"Attempting to place {signal.direction} order for {symbol} with lot {lot_size:.3f}", "INFO")
 
+                                self.last_trade_time[symbol] = current_candle_time
+                                self._save_state()  # Ensure it is immediately persisted
+                                
                                 result = self.connection.place_order(symbol, signal, lot_size)
                                 if result:
-                                    self.last_trade_time[symbol] = current_candle_time
-                                                                        
                                     # Notify via Telegram
                                     self.notification_manager.notify_trade_open(symbol, signal.direction, signal.entry_price, lot_size, signal.stop_loss, signal.take_profit)
                                     
                                     self._update_realized_pnl()  # refresh P/L from MT5 deal history
+                                    self._log_signal_to_file(symbol, signal, lot_size, result['ticket'])
                                     self.analysis_logger.log(f"Trade executed: {result['ticket']}", "INFO")
                                     
                                     # Update Signal History (ONLY for placed orders)
