@@ -1,5 +1,8 @@
 # Python
 __pycache__/
+/__pycache__
+/core/__pycache__
+/tmp/__pycache__
 *.py[cod]
 *$py.class
 *.so
@@ -31,5 +34,7 @@ logs/
 # OS
 Thumbs.db
 .DS_Store
+
+# application data
 ai_context.json
 /backtest_results
