@@ -32,6 +32,7 @@ class ExecutionPipeline:
         """Runs one full execution cycle for a symbol."""
         # 1. Generate Signal
         signal, trend, regime = self.strategy.analyze(
+            symbol=symbol,
             m30_candles=m30,
             h1_candles=h1,
             h4_candles=h4,
@@ -45,7 +46,7 @@ class ExecutionPipeline:
             return False
             
         # 2. Open Position Check
-        if self.position_manager.has_open_position(symbol):
+        if self.position_manager.count_open_positions(symbol) > 0:
             logger.info("Signal ignored — position already open for %s", symbol)
             return False
             
@@ -108,15 +109,10 @@ class ExecutionPipeline:
         # 7. Order Execution
         logger.info("Executing %s %s | Lot: %s | SL: %s | TP: %s", signal.direction, symbol, lot, signal.stop_loss, signal.take_profit)
         
-        ticket = self.position_manager.place_order(
+        ticket = self.connection.place_order(
             symbol=symbol,
-            order_type=signal.direction,
-            volume=lot,
-            price=current_price,
-            sl=signal.stop_loss,
-            tp=signal.take_profit,
-            magic_number=self.config.magic_number if hasattr(self.config, 'magic_number') else self.config.get("magic_number", 234000),
-            comment="B3 Signal"
+            signal=signal,
+            lot_size=lot
         )
         
         if ticket:

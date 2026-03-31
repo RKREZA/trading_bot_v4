@@ -1,7 +1,7 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 import numpy as np
 from dataclasses import dataclass, fields
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 @dataclass(slots=True)
 class CandleArray:
@@ -54,6 +54,7 @@ class CandleArray:
 # Configuration Models
 
 class RiskConfig(BaseModel):
+    model_config = ConfigDict(extra='allow')
     risk_per_trade: float = 1.0
     max_daily_trades: int = 5
     daily_goal: float = 200.0
@@ -65,13 +66,14 @@ class RiskConfig(BaseModel):
     drawdown_scaling: bool = True
 
 class StrategyConfig(BaseModel):
+    model_config = ConfigDict(extra='allow')
     min_confluence_score: int = 4
     min_confidence: int = 60
     cooldown_candles: int = 20
     min_sl_points: int = 150
     # Additional keys mapping strategy specific config
 
-from pydantic import BaseModel, Field, ConfigDict
+# BotConfig combines all sub-configs
 
 class BotConfig(BaseModel):
     model_config = ConfigDict(extra='allow')
@@ -80,6 +82,6 @@ class BotConfig(BaseModel):
     magic_number: int = 234000
     risk: RiskConfig = Field(default_factory=RiskConfig)
     strategy_defaults: StrategyConfig = Field(default_factory=StrategyConfig)
-    session_config: Dict[str, dict] = Field(default_factory=dict)
-    symbols_config: Dict[str, dict] = Field(default_factory=dict)
-    backtest: Dict[str, dict] = Field(default_factory=dict)
+    session_config: Dict[str, Any] = Field(default_factory=dict)
+    symbols_config: Dict[str, Any] = Field(default_factory=dict)
+    backtest: Dict[str, Any] = Field(default_factory=dict)

@@ -40,7 +40,7 @@ from core.regime import MarketRegime
 from core.state_manager import SecureStateManager
 from core.execution_pipeline import ExecutionPipeline
 from core.trailing_stop import TrailingStopManager
-from dashboard import Dashboard, AnalysisLogger
+from dashboard import Dashboard, AnalysisLogger, AnalysisLoggerHandler
 
 # Load .env file if it exists
 load_dotenv()
@@ -57,6 +57,12 @@ class TradingBot:
     def __init__(self, config_path: str = "config.json"):
         self.config = self._load_config(config_path)
         self.analysis_logger = AnalysisLogger(max_entries=100)
+        
+        # Bridge standard logging to the dashboard logger
+        bridged_handler = AnalysisLoggerHandler(self.analysis_logger)
+        bridged_handler.setFormatter(logging.Formatter("%(name)s: %(message)s"))
+        logging.getLogger("trading_bot").addHandler(bridged_handler)
+        
         self.ai_advisor = AIAdvisor(self.config, self.analysis_logger)
         self.strategy = StrategyEngine(self.config, self.analysis_logger)
         self.dashboard = Dashboard(self.config, self.analysis_logger)
@@ -196,33 +202,59 @@ class TradingBot:
         checks.append(("MT5 connection", self.connection.connected))
         market_open = self.connection.get_market_status(self.config.get("symbol", "XAUUSDm"))
         checks.append(("Market open", market_open))
-        balance = self.connection.account_info.get("balance", 0)
+        
+        acc_info = self.connection.get_account_snapshot()
+        balance = acc_info.get("balance", 0)
         checks.append(("Balance > $100", balance > 100))
         
+        logger.info("-" * 30)
+        logger.info(" STARTUP HEALTH CHECKS")
+        logger.info("-" * 30)
         all_passed = all(c[1] for c in checks)
         for c in checks:
-            status = "✓" if c[1] else "✗"
+            status = "[OK]" if c[1] else "[FAIL]"
             logger.info(f"  {status} {c[0]}" + (f" — {c[2]}" if len(c) > 2 else ""))
             
         return all_passed
 
     def run_live(self):
-        if not self.connection.connect(): return
+        if not self.connection.connect(): 
+            logger.critical("Could not initialize MT5. Check terminal status and credentials.")
+            return
+            
         if not self._startup_checks():
             logger.critical("Startup checks failed. Exiting.")
             return
 
         symbol = self.config.get("symbol", "XAUUSDm")
         start_health_server(self, port=8081)
+        
+        # Start the CLI Dashboard
+        self.dashboard.start()
         self.running = True
         logger.info("Bot starting LIVE EXECUTIONS")
         
         try:
             while not self._shutdown_event.is_set():
+                start_cycle = time.time()
                 self._reset_daily_stats()
                 
-                # Update tick prices for trailing
+                # Fetch fresh account and tick data
+                acc = self.connection.get_account_snapshot()
                 tick = mt5.symbol_info_tick(symbol) if mt5 else None
+                
+                # Update Dashboard State
+                self.dashboard.account_info = acc
+                if tick:
+                    self.dashboard.tick = {"price": tick.bid, "spread": (tick.ask - tick.bid) / (mt5.symbol_info(symbol).point or 0.01)}
+                
+                self.dashboard.daily_pnl = self.daily_pnl
+                self.dashboard.daily_trades = self.daily_trades
+                self.dashboard.win_count = self.win_count
+                self.dashboard.loss_count = self.loss_count
+                self.dashboard.positions = self.connection.get_positions(symbol)
+                
+                # Update tick prices for trailing
                 if tick:
                     self._manage_trailing_stops(symbol, tick.bid, tick.ask)
 
@@ -238,17 +270,27 @@ class TradingBot:
                     session = "NEW_YORK" # simplified fallback if TimeManager missing
                     if hasattr(self.strategy, 'get_session_from_hour'):
                         session = self.strategy.get_session_from_hour(datetime.now(timezone.utc).hour)
+                    
+                    self.dashboard.session = session
+                    
+                    # Log to dashboard if needed
+                    # self.analysis_logger.log(f"Analyzed {symbol} at {current_price}")
                         
                     self.execution_pipeline.execute_cycle(
                         symbol, m30_candles, h1_candles, h4_candles, m5_candles, d1_candles, current_price, session
                     )
                 
+                # Final Dashboard update for the cycle
+                self.dashboard.fetch_ms = int((time.time() - start_cycle) * 1000)
+                self.dashboard.update()
+                
                 self._shutdown_event.wait(5.0)  # Sleep 5 seconds between signal checks
         except KeyboardInterrupt:
             logger.info("Ctrl+C received — shutting down gracefully")
         finally:
-            self._shutdown_event.set()
             self.running = False
+            self.dashboard.stop()
+            self._shutdown_event.set()
             self._save_state()
             self.connection.disconnect()
             logger.info("Shutdown complete.")
@@ -305,6 +347,7 @@ class TradingBot:
             self.connection.disconnect()
 
 if __name__ == "__main__":
+    setup_logging(console=True)
     parser = argparse.ArgumentParser()
     parser.add_argument("--backtest", action="store_true")
     parser.add_argument("--symbol", type=str, default="XAUUSDm")

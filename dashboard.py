@@ -30,6 +30,21 @@ class AnalysisLogger:
         return list(self._logs)[-count:]
 
 
+import logging
+class AnalysisLoggerHandler(logging.Handler):
+    """Bridge standard logging to AnalysisLogger."""
+    def __init__(self, analysis_logger: AnalysisLogger, level=logging.INFO):
+        super().__init__(level)
+        self.analysis_logger = analysis_logger
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            self.analysis_logger.log(msg, record.levelname)
+        except Exception:
+            self.handleError(record)
+
+
 class Dashboard:
     def __init__(self, config: dict, logger: Optional[AnalysisLogger] = None):
         self.config = config

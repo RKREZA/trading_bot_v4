@@ -400,10 +400,61 @@ class MT5Connection:
         try:
             with self.MT5_LOCK:
                 orders = mt5.orders_get(symbol=symbol)
-            return orders if orders else []
+            return list(orders) if orders else []
         except Exception as e:
             logger.error("Error fetching pending orders: %s", e)
             return []
+
+    def get_positions(self, symbol: str = None) -> List:
+        """Proxy to fetch open positions from MT5."""
+        if not self.ensure_connected():
+            return []
+        try:
+            with self.MT5_LOCK:
+                positions = mt5.positions_get(symbol=symbol)
+            return list(positions) if positions else []
+        except Exception as e:
+            logger.error("Error fetching positions: %s", e)
+            return []
+
+    def get_symbol_info(self, symbol: str) -> Optional[dict]:
+        """Safe wrapper to get core symbol parameters in a dictionary."""
+        if not self.ensure_connected():
+            return None
+        with self.MT5_LOCK:
+            info = mt5.symbol_info(symbol)
+        if not info:
+            return None
+        return {
+            "point": info.point,
+            "trade_tick_value": info.trade_tick_value,
+            "volume_min": info.volume_min,
+            "volume_max": info.volume_max,
+            "volume_step": info.volume_step,
+            "trade_stops_level": info.trade_stops_level
+        }
+
+    def modify_sl_tp(self, ticket: int, symbol: str, sl: float, tp: float):
+        """Request to modify SL/TP for an existing position."""
+        if not self.ensure_connected():
+            return False
+        
+        request = {
+            "action": mt5.TRADE_ACTION_SLTP,
+            "position": ticket,
+            "symbol": symbol,
+            "sl": float(sl),
+            "tp": float(tp),
+        }
+        
+        with self.MT5_LOCK:
+            result = mt5.order_send(request)
+            
+        if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+            return True
+        else:
+            logger.warning("SL/TP modification failed for %s: %s", ticket, result.comment if result else "No Result")
+            return False
 
 
 class PositionManager:
