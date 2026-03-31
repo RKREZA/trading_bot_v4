@@ -8,6 +8,7 @@ import bisect
 from datetime import datetime, timezone
 from typing import List, Dict, Optional
 from tqdm import tqdm
+from tabulate import tabulate
 
 # Add the project root to sys.path
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -125,10 +126,12 @@ class BacktestEngine:
         return idx
 
     def run(self, symbol: str, h4_candles: List[dict], h1_candles: List[dict], m30_candles: List[dict], m5_candles: List[dict], d1_candles: List[dict], ticks: Optional[List[dict]] = None, quiet: bool = False):
-        if quiet:
-            self.strategy.silent = True
-            self.risk_manager.silent = True
-            self.ai_filter.silent = True
+        
+        # --- FIX 1: Silence background modules so they don't break the progress bar ---
+        self.strategy.silent = True
+        self.risk_manager.silent = True
+        self.ai_filter.silent = True
+        self.notification_manager.enabled = False # Prevent Telegram spam/logs during BT
         
         # Reset balance for each run (prevents cross-run contamination)
         self.balance = self.initial_balance
@@ -205,8 +208,9 @@ class BacktestEngine:
             return True, pnl, comm
 
         
+        # --- FIX 2: Use dynamic_ncols to prevent terminal wrapping ---
         with tqdm(range(200, len(m5_candles)), desc=f"BT:{symbol}", unit="c", 
-                  ncols=100, file=sys.stdout, mininterval=0.3, ascii=True) as pbar:
+                  dynamic_ncols=True, file=sys.stdout, mininterval=0.1, ascii=True, leave=True) as pbar:
             for i in pbar:
                 current_candle = m5_candles[i]
                 candle_time = m5_times[i]
@@ -249,8 +253,7 @@ class BacktestEngine:
                         session_stats[s_name]["pnl"] += final_pnl
                         self.balance += final_pnl
                         self.risk_manager.update_history(trade_record)
-                        if not quiet:
-                            pbar.write(f"[{exit_dt}] GAP CLOSE {open_trade.signal.direction} | P&L: ${final_pnl:>8.2f}")
+                        # pbar.write(f"[{exit_dt}] GAP CLOSE {open_trade.signal.direction} | P&L: ${final_pnl:>8.2f}")
                         open_trade = None
                         pending_signal = None
                         continue
@@ -289,9 +292,9 @@ class BacktestEngine:
                     )
                     
                     self.notification_manager.notify_trade_open(symbol, sig.direction, entry, lot, sig.stop_loss, sig.take_profit)
-                    if not quiet:
-                        t_str = candle_time.strftime('%Y-%m-%d %H:%M') if isinstance(candle_time, datetime) else str(candle_time)
-                        pbar.write(f"[{t_str}] OPENED {sig.direction} @ {entry:.5f} | Lot: {lot} (next-candle entry)")
+                    # if not quiet:
+                    #     t_str = candle_time.strftime('%Y-%m-%d %H:%M') if isinstance(candle_time, datetime) else str(candle_time)
+                    #     pbar.write(f"[{t_str}] OPENED {sig.direction} @ {entry:.5f} | Lot: {lot} (next-candle entry)")
 
                 if open_trade:
                     if not hasattr(open_trade, 'comm_entry_paid') or not open_trade.comm_entry_paid:
@@ -363,26 +366,26 @@ class BacktestEngine:
                                 if open_trade.partial_closed_count == 0 and bid_h >= open_trade.tp_partial_1:
                                     success, pnl, comm = _try_ppt(open_trade, 0.25, open_trade.tp_partial_1)
                                     open_trade.partial_closed_count = 1
-                                    if success and not quiet: pbar.write(f"[{candle_time}] Buy PPT1 @ {open_trade.tp_partial_1:.2f} | PnL: ${pnl:.2f} | Comm: ${comm:.2f}")
+                                    # if success and not quiet: pbar.write(f"[{candle_time}] Buy PPT1 @ {open_trade.tp_partial_1:.2f} | PnL: ${pnl:.2f} | Comm: ${comm:.2f}")
         
                                 # Level 2
                                 elif open_trade.partial_closed_count == 1 and bid_h >= open_trade.tp_partial_2:
                                     success, pnl, comm = _try_ppt(open_trade, 0.33, open_trade.tp_partial_2)
                                     open_trade.partial_closed_count = 2
-                                    if success and not quiet: pbar.write(f"[{candle_time}] Buy PPT2 @ {open_trade.tp_partial_2:.2f} | PnL: ${pnl:.2f} | Comm: ${comm:.2f}")
+                                    # if success and not quiet: pbar.write(f"[{candle_time}] Buy PPT2 @ {open_trade.tp_partial_2:.2f} | PnL: ${pnl:.2f} | Comm: ${comm:.2f}")
         
                             else: # SELL
                                 # Level 1
                                 if open_trade.partial_closed_count == 0 and ask_l <= open_trade.tp_partial_1:
                                     success, pnl, comm = _try_ppt(open_trade, 0.25, open_trade.tp_partial_1)
                                     open_trade.partial_closed_count = 1
-                                    if success and not quiet: pbar.write(f"[{candle_time}] Sell PPT1 @ {open_trade.tp_partial_1:.2f} | PnL: ${pnl:.2f} | Comm_Exit: ${comm:.2f}")
+                                    # if success and not quiet: pbar.write(f"[{candle_time}] Sell PPT1 @ {open_trade.tp_partial_1:.2f} | PnL: ${pnl:.2f} | Comm_Exit: ${comm:.2f}")
         
                                 # Level 2
                                 elif open_trade.partial_closed_count == 1 and ask_l <= open_trade.tp_partial_2:
                                     success, pnl, comm = _try_ppt(open_trade, 0.33, open_trade.tp_partial_2)
                                     open_trade.partial_closed_count = 2
-                                    if success and not quiet: pbar.write(f"[{candle_time}] Sell PPT2 @ {open_trade.tp_partial_2:.2f} | PnL: ${pnl:.2f} | Comm_Exit: ${comm:.2f}")
+                                    # if success and not quiet: pbar.write(f"[{candle_time}] Sell PPT2 @ {open_trade.tp_partial_2:.2f} | PnL: ${pnl:.2f} | Comm_Exit: ${comm:.2f}")
     
                         if not closed:
                             # Save SL before MFE/trail updates for intra-candle bias check
@@ -527,8 +530,8 @@ class BacktestEngine:
                         # Notify via Telegram
                         self.notification_manager.notify_trade_close(symbol, trade_record['direction'], trade_record['exit'], final_pnl, result_type)
                         
-                        if not quiet:
-                            pbar.write(f"[{trade_record['exit_time']}] CLOSED {trade_record['direction']} | P&L: ${pnl:>8.2f} | Result: {result_type}")
+                        # if not quiet:
+                        #     pbar.write(f"[{trade_record['exit_time']}] CLOSED {trade_record['direction']} | P&L: ${pnl:>8.2f} | Result: {result_type}")
                         open_trade = None
                         continue
                 
@@ -609,6 +612,37 @@ class BacktestEngine:
                 performance['oos_consistency_score'] = oos_score
                 if oos_score < 0.5:
                     logger.warning(f"CAUTION: Out-of-Sample consistency score low ({oos_score:.2f}). Possible over-fitting.")
+
+        # --- Export to CSV ---
+        if trades:
+            os.makedirs("backtest_results", exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            csv_filename = f"backtest_results/{symbol}_trades_{timestamp}.csv"
+            pd.DataFrame(trades).to_csv(csv_filename, index=False)
+            print(f"\n[SUCCESS] Trade history exported to: {csv_filename}")
+
+        # --- Terminal Summary Table ---
+        sl_hits = sum(1 for t in trades if t['result'] == 'SL')
+        tp_hits = sum(1 for t in trades if t['result'] == 'TP')
+        prof_sl = sum(1 for t in trades if t['result'] == 'SL' and t['pnl'] > 0)
+
+        summary_data = [
+            ["Metric", "Value"],
+            ["Initial Balance", f"${performance.get('initial_balance', 0):,.2f}"],
+            ["Final Balance", f"${performance.get('final_balance', 0):,.2f}"],
+            ["Net Profit", f"${performance.get('net_profit', 0):,.2f}"],
+            ["Win Rate", f"{performance.get('win_rate', 0):.2f}%"],
+            ["Total Trades", performance.get('total_trades', 0)],
+            ["TP Hits", tp_hits],
+            ["SL Hits", sl_hits],
+            ["Profitable SL", f"{prof_sl} (Trailing)"],
+            ["Max Drawdown", f"{performance.get('max_drawdown', 0):.2f}%"],
+            ["Profit Factor", f"{performance.get('profit_factor', 0):.2f}"],
+            ["Sharpe Ratio", f"{performance.get('sharpe_ratio', 0):.2f}"],
+            ["MC Max DD", f"{performance.get('mc_max_drawdown', 0):.2f}%"]
+        ]
+        
+        print("\n" + tabulate(summary_data, headers="firstrow", tablefmt="fancy_grid"))
 
         return performance
 

@@ -12,6 +12,7 @@ import time
 import threading
 import itertools
 import copy
+from colorama import init; init()
 import pandas as pd
 from datetime import datetime, timezone, date, timedelta
 from typing import Optional
