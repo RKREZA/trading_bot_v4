@@ -2,8 +2,20 @@ import logging
 import os
 import sys
 from logging.handlers import RotatingFileHandler
+import json
 
-
+class StructuredFormatter(logging.Formatter):
+    def format(self, record):
+        log_data = {
+            "ts": self.formatTime(record),
+            "level": record.levelname,
+            "module": record.name,
+            "msg": record.getMessage(),
+        }
+        if hasattr(record, "trade_data"):
+            log_data["trade"] = record.trade_data
+            
+        return json.dumps(log_data)
 class TqdmLoggingHandler(logging.Handler):
     """
     Redirects logging to tqdm.write to avoid breaking progress bars.
@@ -53,7 +65,10 @@ def setup_logging(log_dir: str = "logs", level: int = logging.INFO, console: boo
         log_file, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
     )
     file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(formatter)
+    
+    structured_formatter = StructuredFormatter(datefmt="%Y-%m-%d %H:%M:%S")
+    file_handler.setFormatter(structured_formatter)
+    
     root_logger.addHandler(file_handler)
     
     root_logger.info("Logging initialized — file: %s", log_file)

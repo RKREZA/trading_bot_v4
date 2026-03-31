@@ -1,0 +1,34 @@
+﻿python : Traceback (most recent call 
+last):
+At line:1 char:1
++ python -c "from core.connection 
+import MT5Connection; print('OK')" 2> 
+...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecif 
+   ied: (Traceback (most recent call l  
+  ast)::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCom 
+   mandError
+ 
+  File "<string>", line 1, in <module>
+  File "C:\xampp\htdocs\trading_bot_v3\c
+ore\__init__.py", line 3, in <module>
+    from .connection import 
+MT5Connection
+  File "C:\xampp\htdocs\trading_bot_v3\c
+ore\connection.py", line 11, in <module>
+    from core.data_fetcher import 
+DataFetcher
+  File "C:\xampp\htdocs\trading_bot_v3\c
+ore\data_fetcher.py", line 16, in 
+<module>
+    from .connection import 
+MT5Connection
+ImportError: cannot import name 
+'MT5Connection' from partially 
+initialized module 'core.connection' 
+(most likely due to a circular import) (
+C:\xampp\htdocs\trading_bot_v3\core\conn
+ection.py)

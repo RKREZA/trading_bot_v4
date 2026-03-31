@@ -8,34 +8,44 @@ class MarketRegime:
     LOW_LIQUIDITY = "LOW_LIQUIDITY"
 
     @staticmethod
-    def classify(candles: List[Dict]) -> str:
-        if len(candles) < 20:
+    def classify(candles: List[Dict], lookback: int = 50) -> str:
+        if len(candles) < lookback:
             return MarketRegime.RANGING
 
-        closes = np.array([c['close'] for c in candles[-20:]])
-        highs = np.array([c['high'] for c in candles[-20:]])
-        lows = np.array([c['low'] for c in candles[-20:]])
-        
-        # Volatility check (using ATR or standard deviation)
-        returns = np.diff(np.log(closes))
-        volatility = np.std(returns)
-        
-        # Simple trend detection (ADX or EMA slope would be better, but let's keep it robust)
-        sma20 = np.mean(closes)
-        current_price = closes[-1]
-        
-        # Liquidity / Volume check (if available)
-        avg_volume = np.mean([c.get('tick_volume', 0) for i, c in enumerate(candles[-20:])])
-        current_volume = candles[-1].get('tick_volume', 0)
-        
-        if volatility > np.mean(returns) * 5: 
+        closes = np.array([c['close'] for c in candles[-lookback:]])
+        highs = np.array([c['high'] for c in candles[-lookback:]])
+        lows = np.array([c['low'] for c in candles[-lookback:]])
+        volumes = np.array([c.get('tick_volume', 1) for c in candles[-lookback:]])
+
+        # 1. Volatility: ATR as % of price (normalized)
+        # Using vectorized TR calculation for speed
+        tr = np.maximum(highs[1:] - lows[1:],
+                        np.maximum(np.abs(highs[1:] - closes[:-1]),
+                                   np.abs(lows[1:] - closes[:-1])))
+        atr = np.mean(tr[-14:])
+        atr_pct = (atr / closes[-1]) * 100  # ATR as percentage of price
+
+        # Relative Volatility: Use 75th percentile of recent ATR% as baseline
+        atr_series = (tr / closes[1:]) * 100
+        atr_baseline = np.percentile(atr_series, 75)
+
+        if atr_pct > atr_baseline * 2.0:
             return MarketRegime.HIGH_VOLATILITY
-            
-        if current_volume < avg_volume * 0.1: # Relaxed from 0.2
+
+        # 2. Low Liquidity: Volume collapse (relative to average)
+        avg_vol = np.mean(volumes)
+        recent_vol = np.mean(volumes[-5:])
+        if avg_vol > 0 and recent_vol < avg_vol * 0.15:
             return MarketRegime.LOW_LIQUIDITY
-            
-        # Trending if price is far from SMA (Filtered for noise: 0.01%)
-        if abs(current_price - sma20) / sma20 > 0.0001:
+
+        # 3. Trend: Kaufman's Efficiency Ratio (ER)
+        # ER = |net price change| / sum of absolute individual changes
+        net_change = abs(closes[-1] - closes[0])
+        sum_abs_changes = np.sum(np.abs(np.diff(closes)))
+        efficiency_ratio = net_change / sum_abs_changes if sum_abs_changes > 0 else 0
+
+        # ER > 0.3 is generally considered a strong trend
+        if efficiency_ratio > 0.3:
             return MarketRegime.TRENDING
-            
+
         return MarketRegime.RANGING

@@ -8,6 +8,7 @@ import os
 import time
 import math
 import threading
+from core.lot_calculator import LotCalculator
 from datetime import datetime, timezone
 from typing import Optional, List
 
@@ -167,6 +168,13 @@ class MT5Connection:
             return True
         logger.warning("Connection lost — attempting reconnect")
         return self.reconnect()
+
+    def get_account_snapshot(self) -> dict:
+        """Safe access to account info snapshot under MT5_LOCK."""
+        if not self.ensure_connected():
+            return {"connected": False, "balance": 0, "equity": 0, "profit": 0}
+        with self.MT5_LOCK:
+            return dict(self.account_info)
 
     def _update_account_info(self, info):
         """Update cached account information."""
@@ -428,7 +436,7 @@ class PositionManager:
         return len(self.get_open_positions(symbol))
 
     def calculate_lot_size(self, symbol: str, signal, risk_percent: float, account_balance: float = None) -> float:
-        """Calculate lot size based on risk percentage and stop-loss distance."""
+        """Calculate lot size based on risk percentage and stop-loss distance using unified LotCalculator."""
         if account_balance is None:
             account_balance = self.connection.account_info.get('balance', 1000)
 
@@ -444,45 +452,29 @@ class PositionManager:
             logger.error("Cannot get symbol info for %s", symbol)
             return 0.01
 
-        # Professional Cross-Currency Lot Sizing logic:
-        # Uses SYMBOL_TRADE_TICK_VALUE (Value of 1 lot for 1 tick in account currency)
-        tick_size = symbol_info.trade_tick_size
-        tick_value = symbol_info.trade_tick_value
-        point = symbol_info.point
-        
-        if tick_size <= 0 or tick_value <= 0:
-            logger.error("Invalid tick info for %s: size=%s, value=%s", symbol, tick_size, tick_value)
-            return 0.01
-
         sl_distance = abs(signal.entry_price - signal.stop_loss)
-        if sl_distance <= 0:
-            logger.warning("Zero SL distance for %s, using fallback", symbol)
-            return 0.01
-
-        # Number of ticks in SL distance
-        ticks_in_sl = sl_distance / tick_size
         
-        # Risk per 1.0 lot in account currency
-        risk_per_lot = ticks_in_sl * tick_value
-        
-        if risk_per_lot <= 0:
-            return 0.01
+        # Professional Cross-Currency Lot Sizing logic (delegated to LotCalculator)
+        lot = LotCalculator.calculate(
+            risk_amount=risk_amount,
+            sl_distance=sl_distance,
+            tick_size=symbol_info.trade_tick_size,
+            tick_value=symbol_info.trade_tick_value,
+            volume_min=symbol_info.volume_min,
+            volume_max=symbol_info.volume_max,
+            volume_step=symbol_info.volume_step
+        )
 
-        lot = risk_amount / risk_per_lot
-
-        # Clamp to floor based on min_sl_points if needed
+        # Scale down lot proportionally if SL is too tight (to avoid risk inflation)
+        point = symbol_info.point
         risk_points = sl_distance / point
         min_sl_points = self.connection.config.get("strategy_defaults", {}).get("min_sl_points", 150)
         if risk_points < min_sl_points:
-            # Scale down lot proportionally to avoid risk inflation on tiny SLs
             lot *= (risk_points / min_sl_points)
+            # Re-clamp and snap after scaling
+            lot = round(lot / symbol_info.volume_step) * symbol_info.volume_step
+            lot = max(symbol_info.volume_min, min(symbol_info.volume_max, lot))
 
-        # Round to allowed step
-        step = symbol_info.volume_step
-        lot = round(lot / step) * step
-        # Clamp to min/max
-        lot = max(symbol_info.volume_min, min(symbol_info.volume_max, lot))
-
-        # Dynamic rounding based on step precision (e.g., 0.01 -> 2, 0.001 -> 3)
-        decimals = abs(int(math.log10(step))) if step < 1 else 0
+        # Precision handling
+        decimals = max(0, -int(math.floor(math.log10(symbol_info.volume_step))))
         return round(float(lot), decimals)

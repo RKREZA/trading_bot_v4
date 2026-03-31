@@ -37,4 +37,6 @@ Thumbs.db
 
 # application data
 ai_context.json
+bot_state.json
 /backtest_results
+/.hypothesis

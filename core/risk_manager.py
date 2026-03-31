@@ -1,7 +1,39 @@
+from datetime import datetime, timezone
 import logging
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 logger = logging.getLogger("trading_bot.risk")
+
+class CircuitBreaker:
+    """Hard-stop safety mechanisms that go beyond Kelly/drawdown scaling."""
+    def __init__(self, config: dict):
+        self.risk_cfg = config.get("risk", {})
+        self.max_consecutive_losses = self.risk_cfg.get("max_consecutive_losses", 4)
+        self.max_hourly_trades = self.risk_cfg.get("max_hourly_trades", 3)
+        self.hourly_trades: Dict[int, int] = {}  # hour -> count
+    
+    def record_trade(self):
+        hour = datetime.now(timezone.utc).hour
+        self.hourly_trades[hour] = self.hourly_trades.get(hour, 0) + 1
+
+    def check_all(self, context: dict) -> Tuple[bool, str]:
+        """Returns (allowed, reason)."""
+        # 1. Consecutive losses
+        if context.get("consecutive_losses", 0) >= self.max_consecutive_losses:
+            return False, "CIRCUIT_BREAKER: Max consecutive losses"
+        
+        # 2. Hourly rate limit
+        hour = datetime.now(timezone.utc).hour
+        if self.hourly_trades.get(hour, 0) >= self.max_hourly_trades:
+            return False, "CIRCUIT_BREAKER: Hourly trade limit reached"
+        
+        # 3. Margin check
+        margin_level = context.get("margin_level", 9999)
+        if margin_level < 200:  # Below 200% margin level
+            return False, "CIRCUIT_BREAKER: Low margin"
+        
+        return True, "OK"
+
 
 class RiskManager:
     def __init__(self, config: dict):
@@ -10,6 +42,7 @@ class RiskManager:
         self.base_risk_pct = self.risk_config.get("risk_per_trade", 1.0)
         self.max_drawdown_limit = self.risk_config.get("max_drawdown_halt_pct", 10.0)
         self.drawdown_scaling_enabled = self.risk_config.get("drawdown_scaling", True)
+        self.circuit_breaker = CircuitBreaker(config)
         self.silent = False
         
         self.initial_balance = None

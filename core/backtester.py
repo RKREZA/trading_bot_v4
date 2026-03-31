@@ -20,9 +20,9 @@ if project_root not in sys.path:
 
 from core.performance import PerformanceMetrics
 from core.regime import MarketRegime
-from core.ai_filter import AIFilter
 from core.strategy_engine import StrategyEngine, TradeSignal
 from core.risk_manager import RiskManager
+from core.lot_calculator import LotCalculator
 from core.notifications import NotificationManager
 
 logger = logging.getLogger("trading_bot.backtester")
@@ -74,8 +74,7 @@ class BacktestEngine:
     def __init__(self, config: dict, strategy: StrategyEngine):
         self.config = config
         self.strategy = strategy
-        self.ai_filter = AIFilter(config)
-        self.ai_filter.backtest_mode = True
+        self.ai_filter = None
         self.initial_balance = config.get("backtest", {}).get("initial_balance", 1000)
         self.balance = self.initial_balance
         self.risk_manager = RiskManager(config)
@@ -110,17 +109,23 @@ class BacktestEngine:
             risk_pct = self.config.get("risk", {}).get("risk_per_trade", 1.0)
         risk_amount = balance * (risk_pct / 100.0)
         risk_dist_price = abs(entry - sl)
-        if risk_dist_price < point:
-            risk_dist_price = point * 10 
-
-        # Correct Lot Size Calculation for Gold
-        point_value = contract_size * point   # dollars per point (e.g. 100 * 0.01 = $1)
-        risk_points = risk_dist_price / point
-        lot = risk_amount / (risk_points * point_value)
         
-        lot = round(float(max(0.01, lot)), 2)
-        max_lot = self.config.get("risk", {}).get("max_lot_size", 5.0)
-        return min(lot, max_lot)
+        # Use unified LotCalculator
+        # In backtest mode, tick_size = point, and tick_value = contract_size * point
+        tick_size = point
+        tick_value = contract_size * point # Dollar value of 1 lot moving 1 point
+        
+        lot = LotCalculator.calculate(
+            risk_amount=risk_amount,
+            sl_distance=risk_dist_price,
+            tick_size=tick_size,
+            tick_value=tick_value,
+            volume_min=0.01, # Default for backtest unless symbol_info is added
+            volume_max=self.config.get("risk", {}).get("max_lot_size", 5.0),
+            volume_step=0.01
+        )
+        
+        return lot
 
     @staticmethod
     def _find_slice_index(times: List[datetime], time_threshold: datetime) -> int:
@@ -139,7 +144,7 @@ class BacktestEngine:
         # --- FIX 1: Silence background modules so they don't break the progress bar ---
         self.strategy.silent = True
         self.risk_manager.silent = True
-        self.ai_filter.silent = True
+        if self.ai_filter: self.ai_filter.silent = True
         self.notification_manager.enabled = False # Prevent Telegram spam/logs during BT
         
         # Reset balance for each run (prevents cross-run contamination)
@@ -188,9 +193,6 @@ class BacktestEngine:
         m5_times = [datetime.fromtimestamp(c['time'], tz=timezone.utc) for c in m5_candles]
         logger.debug("All times extracted.")
         
-        # Pre-compute rolling average ATR for realistic spread/slippage models
-        m5_avg_atr = pd.Series(m5_atr_series).rolling(window=20, min_periods=1).mean().values
-        
         # --- Optimization: Convert ticks to structured Numpy array ---
         tick_times = None
         tick_arr = None
@@ -200,6 +202,10 @@ class BacktestEngine:
             tick_arr = np.array([(t['time'], t['bid'], t['ask']) for t in ticks], dtype=tick_dtype)
             tick_times = tick_arr['time']
             logger.info("[Backtest] Processed %d ticks into structured Numpy array.", len(ticks))
+            
+        # --- Optimization: Pre-calculate all Strategy/Regime Data (Vectorized) ---
+        pre_ctx = self.strategy.preprocess_history(h4_candles, h1_candles, m30_candles, m5_candles)
+        m5_precomputed = pre_ctx["m5"]
         
         pending_signal = None  # Next-candle entry: stores signal for delayed execution
 
@@ -531,35 +537,20 @@ class BacktestEngine:
     
                 # --- Signal Generation (store as pending for next-candle entry) ---
                 if not open_trade and pending_signal is None:
-                    h4_idx = self._find_slice_index(h4_times, candle_time)
-                    h1_idx = self._find_slice_index(h1_times, candle_time)
-                    m30_idx = self._find_slice_index(m30_times, candle_time)
-                    
-                    h4_slice = h4_candles[:h4_idx + 1]
-                    h1_slice = h1_candles[:h1_idx + 1]
-                    m30_slice = m30_candles[:m30_idx + 1]
-                    m5_slice = m5_candles[:i + 1]
-                    
-                    current_atr = m5_atr_series[i-1]
-                    avg_atr_here = m5_avg_atr[i-1]
-                    spread_val = self._get_spread(symbol, current_atr, avg_atr_here, point,
-                                                  self.strategy.get_session_from_hour(
-                                                      candle_time.hour if hasattr(candle_time, 'hour') else 0, utc_offset))
-                    
-                    bid = current_candle['close']
-                    ask = bid + (spread_val * point)
-                    
-                    current_hour = candle_time.hour if hasattr(candle_time, 'hour') else 0
-                    current_session = self.strategy.get_session_from_hour(current_hour, utc_offset)
-                    
-                    signal, h4_trend, m30_structure = self.strategy.analyze(symbol, h4_slice, h1_slice, m30_slice, m5_slice, bid, d1_candles=d1_candles, session=current_session)
+                    # High-Performance Signal Check
+                    pre_at_i = m5_precomputed[i]
+                    signal, h4_trend, regime_str = self.strategy.analyze(
+                        symbol, h4_slice, h1_slice, m30_slice, m5_slice, bid, 
+                        d1_candles=d1_candles, session=current_session,
+                        preprocessed=pre_at_i
+                    )
                     
                     if signal:
                         ai_features = {
                             "direction": signal.direction,
                             "confidence": signal.confidence,
                             "atr": current_atr,
-                            "regime": MarketRegime.classify(m30_slice),
+                            "regime": regime_str,
                             "timestamp": candle_time
                         }
                         ai_decision, ai_score, ai_sl_buffer = self.ai_filter.filter_signal(ai_features)
@@ -630,7 +621,11 @@ class BacktestEngine:
         # --- Terminal Summary Table ---
         sl_hits = sum(1 for t in trades if t['result'] == 'SL')
         tp_hits = sum(1 for t in trades if t['result'] == 'TP')
-        prof_sl = sum(1 for t in trades if t['result'] == 'SL' and t['pnl'] > 0)
+        
+        # Calculate trailing stop hits (SL where pnl > 0 or sl move detected)
+        # Note: In our backtester 'SL' result is used for any stop hit.
+        trailing_sl_hits = sum(1 for t in trades if t['result'] == 'SL' and t['pnl'] > 0)
+        hard_sl_hits = sl_hits - trailing_sl_hits
 
         summary_data = [
             ["Metric", "Value"],
@@ -639,9 +634,9 @@ class BacktestEngine:
             ["Net Profit", f"${performance.get('net_profit', 0):,.2f}"],
             ["Win Rate", f"{performance.get('win_rate', 0):.2f}%"],
             ["Total Trades", performance.get('total_trades', 0)],
-            ["TP Hits", tp_hits],
-            ["SL Hits", sl_hits],
-            ["Profitable SL", f"{prof_sl} (Trailing)"],
+            ["TP Hits", f"{tp_hits} (Full Target)"],
+            ["SL Hits (Hard)", f"{hard_sl_hits} (Initial SL)"],
+            ["SL Hits (Trail)", f"{trailing_sl_hits} (Profit Protected)"],
             ["Max Drawdown", f"{performance.get('max_drawdown', 0):.2f}%"],
             ["Profit Factor", f"{performance.get('profit_factor', 0):.2f}"],
             ["Sharpe Ratio", f"{performance.get('sharpe_ratio', 0):.2f}"],

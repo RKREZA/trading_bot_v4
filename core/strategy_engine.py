@@ -104,37 +104,37 @@ class StrategyEngine:
         if self.analysis_logger: self.analysis_logger.log(message, level)
         logger.info(message)
 
-    def _calculate_rsi(self, prices: np.ndarray, period: int = 14) -> float:
-        """
-        High-performance pure NumPy RSI calculation.
-        Uses Wilder's Smoothing method for consistency with MT5/TradingView.
-        """
+    def _calculate_rsi_series(self, prices: np.ndarray, period: int = 14) -> np.ndarray:
+        """Vectorized RSI calculation for a series."""
         if len(prices) < period + 1:
-            return 50.0
+            return np.full(len(prices), 50.0)
 
         deltas = np.diff(prices)
-        seed = deltas[:period]
-        up = seed[seed >= 0].sum() / period
-        down = -seed[seed < 0].sum() / period
+        ups = np.where(deltas > 0, deltas, 0)
+        downs = np.where(deltas < 0, -deltas, 0)
 
         # Alpha for Wilder's Smoothing is 1/period
-        alpha = 1.0 / period
-        
-        # Recursive calculation using a tight loop (vectorized isn't possible for recursive EMA)
-        # But this is far faster than creating a Pandas Series.
-        for i in range(period, len(deltas)):
-            diff = deltas[i]
-            if diff > 0:
-                up = (up * (period - 1) + diff) / period
-                down = (down * (period - 1)) / period
-            else:
-                up = (up * (period - 1)) / period
-                down = (down * (period - 1) - diff) / period
+        n = len(prices)
+        avg_up = np.zeros(n)
+        avg_down = np.zeros(n)
 
-        if down == 0:
-            return 100.0
-        rs = up / down
-        return float(100.0 - (100.0 / (1.0 + rs)))
+        # Initialize with SMA for the first 'period'
+        avg_up[period] = np.mean(ups[:period])
+        avg_down[period] = np.mean(downs[:period])
+
+        # Recursive Wilder's Smoothing
+        for i in range(period + 1, n):
+            avg_up[i] = (avg_up[i-1] * (period - 1) + ups[i-1]) / period
+            avg_down[i] = (avg_down[i-1] * (period - 1) + downs[i-1]) / period
+
+        rs = np.divide(avg_up, avg_down, out=np.zeros_like(avg_up), where=avg_down != 0)
+        rsi = 100 - (100 / (1 + rs))
+        rsi[:period] = 50.0  # Seed period
+        return rsi
+
+    def _calculate_rsi(self, prices: np.ndarray, period: int = 14) -> float:
+        series = self._calculate_rsi_series(prices, period)
+        return float(series[-1])
 
     def _calculate_ema_series(self, prices: np.ndarray, period: int) -> np.ndarray:
         """High-performance pure NumPy EMA series."""
@@ -175,7 +175,49 @@ class StrategyEngine:
 
     def analyze(self, symbol: str, h4_candles: List[dict], h1_candles: List[dict], m30_candles: List[dict],
                 m5_candles: List[dict], current_price: float,
-                d1_candles: Optional[List[dict]] = None, session: Optional[str] = None) -> Tuple[Optional[TradeSignal], str, str]:
+                d1_candles: Optional[List[dict]] = None, session: Optional[str] = None,
+                preprocessed: Optional[dict] = None) -> Tuple[Optional[TradeSignal], str, str]:
+        
+        if preprocessed:
+            # High-Performance Path for Backtesting
+            # 'preprocessed' contains all pre-computed trends and regimes for current tick index
+            effective_trend = preprocessed["h4_trend"]
+            h4_strength = preprocessed["h4_strength"]
+            regime = preprocessed["regime"]
+            h1_rsi = preprocessed["h1_rsi"]
+            m30_ema_val = preprocessed["m30_ema"]
+            m30_atr = preprocessed["m30_atr"]
+            sma_atr_20 = preprocessed["sma_atr_20"]
+            vol_scaling_flag = preprocessed["vol_scaling"]
+            m5_atr = preprocessed["m5_atr"]
+            
+            # Skip heavy checks if untradeable session
+            if session and session not in self.tradeable_sessions:
+                return None, effective_trend, str(regime)
+                
+            # M5 trade counters / cooldowns handled here
+            self.m5_trade_counter += 1
+            if self.m5_trade_counter - self.last_m5_stop_index < self.cooldown_candles:
+                return None, "COOLDOWN", "NEUTRAL"
+                
+            # Execute Entry Logic
+            m30_closes = np.array([c['close'] for c in m30_candles[-10:]]) # Small slice for logic
+            signal = None
+            if effective_trend == "BULLISH":
+                if current_price > m30_ema_val and 25 < h1_rsi < 95:
+                    signal = self._check_breakout_entry(m30_candles[-50:], m5_candles[-50:], "BULLISH", current_price)
+            elif effective_trend == "BEARISH":
+                if current_price < m30_ema_val and 5 < h1_rsi < 75:
+                    signal = self._check_breakout_entry(m30_candles[-50:], m5_candles[-50:], "BEARISH", current_price)
+            
+            if signal:
+                signal.confluence_score, signal.reasons = self._calculate_confluence(
+                    effective_trend, h4_strength, regime, signal, m30_candles[-50:], m5_candles[-50:], m30_atr, m5_atr, session
+                )
+                if signal.confluence_score < self.min_confluence_score: return None, effective_trend, str(regime)
+                signal.confidence = self._calculate_confidence(signal.confluence_score, h4_strength, signal)
+            
+            return signal, effective_trend, str(regime)
         
         if not h4_candles or not h1_candles or not m30_candles or not m5_candles:
             return None, "RANGING", "NEUTRAL"
@@ -239,17 +281,26 @@ class StrategyEngine:
             return None, "COOLDOWN", "NEUTRAL"
 
         # 1. Volatility Filter (ATR Ratio)
-        m30_closes = np.array([c['close'] for c in m30_candles])
-        atr = self._calculate_atr(m30_candles)
+        m30_atr = self._calculate_atr(m30_candles)
+        m5_atr = self._calculate_atr(m5_candles)
         
-        # Calculate SMA of ATR(20)
+        # Calculate SMA of ATR(20) - Optimization: Use a simple rolling mean if needed, 
+        # but for now we just avoid the triple-redundant full ATR calls.
         atr_history = []
-        for j in range(len(m30_candles) - 20, len(m30_candles)):
-            if j < 1: continue
-            atr_history.append(self._calculate_atr(m30_candles[:j+1]))
+        # Optimization: instead of recomputing full ATR in a loop, we just use the last 20 TRs
+        highs = np.array([c['high'] for c in m30_candles])
+        lows = np.array([c['low'] for c in m30_candles])
+        closes = np.array([c['close'] for c in m30_candles])
+        tr = np.maximum(highs[1:] - lows[1:], 
+                        np.maximum(np.abs(highs[1:] - closes[:-1]), 
+                                   np.abs(lows[1:] - closes[:-1])))
         
-        sma_atr_20 = np.mean(atr_history) if atr_history else atr
-        atr_ratio = atr / sma_atr_20 if sma_atr_20 > 0 else 1.0
+        if len(tr) >= 20:
+            sma_atr_20 = np.mean(tr[-20:])
+        else:
+            sma_atr_20 = m30_atr
+            
+        atr_ratio = m30_atr / sma_atr_20 if sma_atr_20 > 0 else 1.0
         
         vol_scaling_flag = False
         if atr_ratio < 0.6 or atr_ratio > 2.5:
@@ -270,11 +321,9 @@ class StrategyEngine:
         regime = MarketRegime.classify(m30_candles)
 
         # 3. Volatility Check
-        atr = self._calculate_atr(m30_candles)
         if self.vol_enabled:
-            atr_lookback = m30_candles[-self.vol_lookback:] if len(m30_candles) > self.vol_lookback else m30_candles
-            atr_avg = self._calculate_atr(atr_lookback)
-            if atr > atr_avg * (self.vol_mult_high + 2.0) or atr < atr_avg * (self.vol_mult_low - 0.5):
+            # Optimization: Use the already computed m30_atr instead of recomputing
+            if m30_atr > sma_atr_20 * (self.vol_mult_high + 2.0) or m30_atr < sma_atr_20 * (self.vol_mult_low - 0.5):
                 return None, h4_trend, str(regime)
 
         # Pullback/Breakout logic: Allow both in Trending/Ranging to catch turns.
@@ -299,14 +348,15 @@ class StrategyEngine:
                 signal = self._check_pullback_entry(m30_candles, m5_candles, "BEARISH", current_price)
 
         if signal:
-            confluence, reasons = self._calculate_confluence(h4_trend, h4_strength, regime, signal, m30_candles, m5_candles)
+            confluence, reasons = self._calculate_confluence(h4_trend, h4_strength, regime, signal, 
+                                                           m30_candles, m5_candles, m30_atr, m5_atr, session)
             signal.confluence_score = confluence
             signal.reasons = reasons
             
             # AI Bias from context (passed through or read from config if available)
             ai_bias = self.config.get("ai_advisor", {}).get("bias", 0.0)
             
-            signal = self._set_sl_tp(signal, atr, m30_candles, h4_strength, session, confluence, ai_bias)
+            signal = self._set_sl_tp(signal, m30_atr, m30_candles, h4_strength, session, confluence, ai_bias)
             
             sl_dist = abs(signal.entry_price - signal.stop_loss)
             max_sl = 8.0 if "XAUUSD" in symbol else 0
@@ -454,7 +504,8 @@ class StrategyEngine:
         return signal
 
     def _calculate_confluence(self, h4_trend: str, h4_strength: int, regime: str, signal: TradeSignal,
-                              m30_candles: List[dict], m5_candles: List[dict]) -> Tuple[int, List[str]]:
+                              m30_candles: List[dict], m5_candles: List[dict],
+                              m30_atr: float, m5_atr: float, session: str) -> Tuple[int, List[str]]:
         reasons = []
         score = 0
         if (signal.direction == "BUY" and h4_trend == "BULLISH") or (signal.direction == "SELL" and h4_trend == "BEARISH"):
@@ -465,13 +516,11 @@ class StrategyEngine:
         if (signal.direction == "BUY" and h1_rsi > 50) or (signal.direction == "SELL" and h1_rsi < 50):
             score += 1; reasons.append("H1 Momentum")
             
-        current_hour = signal.timestamp.hour
-        session = self.get_session_from_hour(current_hour)
+        # Use already determined session from analyze() call
         if session in ["LONDON", "LONDON/NY", "NEW_YORK"]:
             score += 1; reasons.append(f"{session} Session")
             
-        atr = self._calculate_atr(m5_candles)
-        if atr > self._calculate_atr(m30_candles) * 0.1:
+        if m5_atr > m30_atr * 0.1:
             score += 1; reasons.append("Volatility Exp")
             
         m5_closes = np.array([c["close"] for c in m5_candles])
@@ -506,3 +555,102 @@ class StrategyEngine:
                 if session:
                     self.consecutive_losses[session] = 0
                     self.session_cooldown_active[session] = False
+
+    def preprocess_history(self, h4: List[dict], h1: List[dict], m30: List[dict], m5: List[dict]) -> dict:
+        """
+        Pre-calculates all technical indicators and trends for full history speed.
+        Returns a dictionary of mapped states for each M5 candle.
+        """
+        import time as timer
+        import logging
+        logger = logging.getLogger("trading_bot.strategy")
+        
+        start = timer.time()
+        logger.info("[Strategy] Vectorized Preprocessing started...")
+
+        # 1. Indicator Pre-calculations
+        h4_closes = np.array([c['close'] for c in h4])
+        h1_closes = np.array([c['close'] for c in h1])
+        m30_closes = np.array([c['close'] for c in m30])
+        m5_closes = np.array([c['close'] for c in m5])
+        
+        m30_ema = self._calculate_ema_series(m30_closes, 10)
+        h1_ema20 = self._calculate_ema_series(h1_closes, 14)
+        h1_rsi = self._calculate_rsi_series(h1_closes, 14)
+        
+        # 2. Time-based Mappings
+        m5_times = np.array([c['time'] for c in m5])
+        h4_times = np.array([c['time'] for c in h4])
+        h1_times = np.array([c['time'] for c in h1])
+        m30_times = np.array([c['time'] for c in m30])
+        
+        # Pre-compute H4 Trend for each H4 candle
+        h4_trend_data = []
+        for i in range(len(h4)):
+            slice_h4 = h4[:i+1]
+            if len(slice_h4) < 20:
+                h4_trend_data.append(("RANGING", 0))
+            else:
+                h4_trend_data.append(self._get_h4_trend(slice_h4))
+        
+        # Pre-compute M30 Regime and ATRs
+        m30_regime_data = []
+        m30_atr_data = []
+        sma_atr_20_data = []
+        
+        h30 = np.array([c['high'] for c in m30])
+        l30 = np.array([c['low'] for c in m30])
+        c30 = np.array([c['close'] for c in m30])
+        tr30 = np.zeros_like(c30)
+        tr30[1:] = np.maximum(h30[1:] - l30[1:], 
+                              np.maximum(np.abs(h30[1:] - c30[:-1]), 
+                                         np.abs(l30[1:] - c30[:-1])))
+        
+        for i in range(len(m30)):
+            slice_m30 = m30[:i+1]
+            reg = MarketRegime.classify(slice_m30)
+            m30_regime_data.append(reg)
+            
+            atr = np.mean(tr30[max(0, i-13):i+1]) if i > 0 else 0.1
+            m30_atr_data.append(atr)
+            sma_atr_20_data.append(np.mean(tr30[max(0, i-19):i+1]) if i > 0 else atr)
+
+        # 3. Final M5 Mapping
+        m5_precomputed = []
+        for i in range(len(m5)):
+            t = m5_times[i]
+            
+            # Find last closed candles
+            h4_idx = np.searchsorted(h4_times, t, side='right') - 1
+            h1_idx = np.searchsorted(h1_times, t, side='right') - 1
+            m30_idx = np.searchsorted(m30_times, t, side='right') - 1
+            
+            # Boundary check
+            h4_idx = max(0, h4_idx)
+            h1_idx = max(0, h1_idx)
+            m30_idx = max(0, m30_idx)
+
+            h1_t = "BULLISH" if h1_closes[h1_idx] > h1_ema20[h1_idx] else "BEARISH"
+            h4_t, h4_s = h4_trend_data[h4_idx]
+            
+            effective_trend = h4_t
+            if h4_t == "RANGING":
+                effective_trend = h1_t
+                h4_s = 20
+                
+            atr_ratio = m30_atr_data[m30_idx] / sma_atr_20_data[m30_idx] if sma_atr_20_data[m30_idx] > 0 else 1.0
+            
+            m5_precomputed.append({
+                "h4_trend": effective_trend,
+                "h4_strength": h4_s,
+                "regime": m30_regime_data[m30_idx],
+                "h1_rsi": h1_rsi[h1_idx],
+                "m30_ema": m30_ema[m30_idx],
+                "m30_atr": m30_atr_data[m30_idx],
+                "sma_atr_20": sma_atr_20_data[m30_idx],
+                "vol_scaling": (atr_ratio < 0.6 or atr_ratio > 2.5),
+                "m5_atr": 0.1
+            })
+            
+        logger.info("[Strategy] Preprocessing complete in %.2fs", timer.time() - start)
+        return {"m5": m5_precomputed}

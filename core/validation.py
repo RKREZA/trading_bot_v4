@@ -39,15 +39,17 @@ class ValidationSuite:
 
     def _spread_sensitivity_test(self, symbol, h4, h1, m30, m5, d1):
         cfg = copy.deepcopy(self.config)
-        cfg.setdefault("symbols_config", {}).setdefault(symbol, {})["base_spread"] = \
-            cfg.get("symbols_config", {}).get(symbol, {}).get("base_spread", 25) * 2.0
+        # Fix: Target the correct spread key in backtester config
+        current_spread = cfg.get("backtest", {}).get("spread_pips", {}).get(symbol, 25)
+        cfg.setdefault("backtest", {}).setdefault("spread_pips", {})[symbol] = current_spread * 2.0
         tester = BacktestEngine(cfg, self.strategy)
         return tester.run(symbol, h4, h1, m30, m5, d1, quiet=True)
 
     def _slippage_stress_test(self, symbol, h4, h1, m30, m5, d1):
         cfg = copy.deepcopy(self.config)
-        cfg.setdefault("symbols_config", {}).setdefault(symbol, {})["max_slippage"] = \
-            cfg.get("symbols_config", {}).get(symbol, {}).get("max_slippage", 1.0) * 5.0
+        # Fix: Target the correct slippage key in backtester config
+        current_slip = cfg.get("backtest", {}).get("slippage_points", {}).get(symbol, 2.0)
+        cfg.setdefault("backtest", {}).setdefault("slippage_points", {})[symbol] = current_slip * 5.0
         tester = BacktestEngine(cfg, self.strategy)
         return tester.run(symbol, h4, h1, m30, m5, d1, quiet=True)
 

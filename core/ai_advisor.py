@@ -198,22 +198,27 @@ class AIAdvisor:
             s = self._context.get("session") or {}
             return float(s.get("recommended_sl_buffer_add", 0.0))
 
-    def is_high_impact_news(self) -> bool:
-        """Returns True if the current UTC time is near a high-impact event."""
+    def is_news_blocked(self) -> bool:
+        """Returns True if the current UTC time is near a high-impact event (30 min window)."""
+        if not self._enabled:
+            return False
         with self._lock:
             s = self._context.get("session")
             if not s:
                 return False
-            now_str = datetime.now(timezone.utc).strftime("%H:%M")
+            now = datetime.now(timezone.utc)
+            now_mins = now.hour * 60 + now.minute
+            
             for t in s.get("high_impact_times_utc", []):
                 try:
-                    h, m = map(int, t.split(":"))
-                    now_mins = int(now_str[:2]) * 60 + int(now_str[3:])
+                    # Handle both "HH:MM" and "HH:MM - Event Name" formats
+                    time_str = t.split("-")[0].strip()
+                    h, m = map(int, time_str.split(":"))
                     event_mins = h * 60 + m
-                    if abs(now_mins - event_mins) <= 15:  # within 15 min of event
+                    if abs(now_mins - event_mins) <= 30:  # 30 min window from ai_filter.py
                         return True
                 except Exception:
-                    pass
+                    continue
             return False
 
     # ------------------------------------------------------------------

@@ -7,11 +7,13 @@ import logging
 import time
 import datetime
 from typing import Dict, List, Optional
+from core.types import CandleArray
 
 try:
     import MetaTrader5 as mt5
 except ImportError:
     mt5 = None
+
 
 from .connection import MT5Connection
 logger = logging.getLogger("trading_bot.data")
@@ -44,9 +46,9 @@ class DataFetcher:
     def __init__(self):
         self._cache: Dict[str, dict] = {}  # key -> {data, timestamp}
 
-    def _cache_key(self, symbol: str, timeframe: str, count: int) -> str:
+    def _cache_key(self, symbol: str, timeframe: str) -> str:
         """Generate a unique cache key."""
-        return f"{symbol}_{timeframe}_{count}"
+        return f"{symbol}_{timeframe}"
 
     def _merge_candles(self, existing: List[dict], new: List[dict], max_len: int) -> List[dict]:
         """Merge new candles into existing cache, deduplicating by timestamp."""
@@ -63,15 +65,15 @@ class DataFetcher:
         sorted_times = sorted(combined.keys())
         return [combined[t] for t in sorted_times[-max_len:]]
 
-    def fetch_candles(self, symbol: str, timeframe: str, count: int = 500, force_refresh: bool = False) -> List[dict]:
+    def fetch_candles(self, symbol: str, timeframe: str, count: int = 500, force_refresh: bool = False) -> CandleArray:
         """
-        Fetch candle data, returning cached data or incrementally updating it.
+        Fetch candle data, returning cached CandleArray or incrementally updating it.
         """
         if timeframe not in TIMEFRAME_MAP or TIMEFRAME_MAP[timeframe] is None:
             logger.warning("Invalid timeframe: %s", timeframe)
-            return []
+            return CandleArray.from_dicts([])
 
-        key = self._cache_key(symbol, timeframe, count)
+        key = self._cache_key(symbol, timeframe)
         ttl = CACHE_TTL.get(timeframe, 60)
         now = time.time()
 
@@ -79,7 +81,7 @@ class DataFetcher:
         
         # 1. Light Cache Check (Return if extremely fresh)
         if not force_refresh and cached and (now - cached["timestamp"]) < (ttl / 2):
-            return cached["data"]
+            return cached["array"]
 
         # 2. Incremental Fetch Decision
         fetch_count = count
@@ -121,7 +123,7 @@ class DataFetcher:
                         temp_count //= 2
             
             if rates is None or len(rates) == 0:
-                return cached["data"] if cached else []
+                return cached["array"] if cached else CandleArray.from_dicts([])
 
             # Convert to dicts
             df = pd.DataFrame(rates)
@@ -134,19 +136,20 @@ class DataFetcher:
                 candles = new_candles
 
             # Update cache
-            self._cache[key] = {"data": candles, "timestamp": now}
-            return candles
+            array = CandleArray.from_dicts(candles)
+            self._cache[key] = {"data": candles, "array": array, "timestamp": now}
+            return array
 
         except Exception as e:
             logger.exception("Error fetching candles for %s %s: %s", symbol, timeframe, e)
-            return cached["data"] if cached else []
+            return cached["array"] if cached else CandleArray.from_dicts([])
 
-    def fetch_candles_range(self, symbol: str, timeframe: str, date_from: datetime.datetime, date_to: datetime.datetime) -> List[dict]:
+    def fetch_candles_range(self, symbol: str, timeframe: str, date_from: datetime.datetime, date_to: datetime.datetime) -> CandleArray:
         """
         Fetch OHLC data for a specific date range.
         """
         if timeframe not in TIMEFRAME_MAP or TIMEFRAME_MAP[timeframe] is None:
-            return []
+            return CandleArray.from_dicts([])
 
         try:
             with MT5Connection.MT5_LOCK:

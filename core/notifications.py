@@ -29,6 +29,11 @@ class NotificationManager:
         except Exception as e:
             logger.error(f"Telegram Notification Error: {e}")
 
+    def notify_critical(self, event: str, details: str):
+        """For events that need immediate human attention."""
+        msg = f"🚨 *CRITICAL ALERT*\n{event}\n\n{details}"
+        self.send_telegram(msg)
+
     def notify_trade_open(self, symbol: str, direction: str, entry: float, lot: float, sl: float, tp: float):
         msg = (
             f"🚀 *TRADE OPENED*\n"
