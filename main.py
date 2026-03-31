@@ -333,23 +333,8 @@ class TradingBot:
                 d1 = self.data_fetcher.fetch_candles(symbol, "D1", count)
                 
             # Backtest Strategy Setup
-            # Ensure TOKYO session is allowed during backtests unless explicitly forbidden
-            if hasattr(self.strategy.tradeable_sessions, 'add'):
-                self.strategy.tradeable_sessions.add("TOKYO")
-                self.strategy.tradeable_sessions.add("LONDON")
-                self.strategy.tradeable_sessions.add("NEW_YORK")
-                self.strategy.tradeable_sessions.add("LONDON/NY")
-            elif isinstance(self.strategy.tradeable_sessions, list):
-                if "TOKYO" not in self.strategy.tradeable_sessions:
-                    self.strategy.tradeable_sessions.append("TOKYO")
-                if "LONDON" not in self.strategy.tradeable_sessions:
-                    self.strategy.tradeable_sessions.append("LONDON")
-                if "NEW_YORK" not in self.strategy.tradeable_sessions:
-                    self.strategy.tradeable_sessions.append("NEW_YORK")
-                if "LONDON/NY" not in self.strategy.tradeable_sessions:
-                    self.strategy.tradeable_sessions.append("LONDON/NY")
-                
             engine = BacktestEngine(self.config, self.strategy)
+
             
             # Use dedicated AIFilter (with backtest mode) instead of live AIAdvisor
             bt_ai_filter = AIFilter(self.config)

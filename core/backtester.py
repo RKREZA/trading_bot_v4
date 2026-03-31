@@ -237,9 +237,10 @@ class BacktestEngine:
                 current_session = self.strategy.get_session_from_hour(candle_dt.hour, utc_offset)
                 
                 # Fetch slices for strategy (O(logN) with searchsorted)
-                h4_idx = np.searchsorted(h4_times, current_candle['time'], side='right') - 1
-                h1_idx = np.searchsorted(h1_times, current_candle['time'], side='right') - 1
-                m30_idx = np.searchsorted(m30_times, current_candle['time'], side='right') - 1
+                # [FIX]: Subtract timeframe duration to prevent Look-ahead Bias
+                h4_idx = np.searchsorted(h4_times, current_candle['time'] - 14400, side='right') - 1
+                h1_idx = np.searchsorted(h1_times, current_candle['time'] - 3600, side='right') - 1
+                m30_idx = np.searchsorted(m30_times, current_candle['time'] - 1800, side='right') - 1
                 
                 h4_slice = h4_arr[:max(0, h4_idx + 1)]
                 h1_slice = h1_arr[:max(0, h1_idx + 1)]
@@ -368,15 +369,25 @@ class BacktestEngine:
                         ask_h, ask_l = bid_h + spread_val, bid_l + spread_val
                         
                         if open_trade.signal.direction == "BUY":
-                            if bid_l <= open_trade.sl:
+                            if current_candle['open'] <= open_trade.sl:
+                                exit_price, result_type, closed = current_candle['open'], "SL", True
+                            elif bid_l <= open_trade.sl:
                                 exit_price, result_type, closed = open_trade.sl, "SL", True
+                            elif current_candle['open'] >= open_trade.tp:
+                                exit_price, result_type, closed = current_candle['open'], "TP", True
                             elif bid_h >= open_trade.tp:
                                 exit_price, result_type, closed = open_trade.tp, "TP", True
                         else:
-                            if ask_h >= open_trade.sl:
+                            ask_open = current_candle['open'] + spread_val
+                            if ask_open >= open_trade.sl:
+                                exit_price, result_type, closed = ask_open, "SL", True
+                            elif ask_h >= open_trade.sl:
                                 exit_price, result_type, closed = open_trade.sl, "SL", True
+                            elif ask_open <= open_trade.tp:
+                                exit_price, result_type, closed = ask_open, "TP", True
                             elif ask_l <= open_trade.tp:
                                 exit_price, result_type, closed = open_trade.tp, "TP", True
+
                     
                         # --- Advanced Partial Profit Taking (PPT) ---
                         # Only run if enabled in strategy_defaults and trade is not closed
@@ -422,46 +433,50 @@ class BacktestEngine:
                             # --- Optimized MFE Trailing ---
                             ts_cfg = self.config.get("trailing_stop", {})
                             if ts_cfg.get("enabled", True):
-                                # 1. Base Trail: 50% give-back
-                                give_back_pct = ts_cfg.get("mfe_trail_base", 0.5)
-                            
-                                # 2. Volatility Adjustment
-                                # If current ATR is much higher than average, widen trail (give more back)
-                                if i > 20:
-                                    prev_atr_slice = m5_atr_series[i-21:i-1]
-                                    if len(prev_atr_slice) > 0:
-                                        avg_atr = np.mean(prev_atr_slice)
-                                        if avg_atr > 0:
-                                            atr_ratio = m5_atr_series[i-1] / avg_atr
-                                            if atr_ratio > 1.3: give_back_pct += 0.2
-                                            elif atr_ratio < 0.7: give_back_pct -= 0.1
-                            
-                                # 3. Profit-Dependent (Tighten as profit increases)
                                 excursion = (open_trade.best_price - open_trade.entry_price) if open_trade.signal.direction == "BUY" else (open_trade.entry_price - open_trade.best_price)
                                 risk = abs(open_trade.entry_price - open_trade.signal.stop_loss)
-                                if risk > 0:
-                                    rr_reached = excursion / risk
+                                
+                                # [NEW FIX]: Only activate trailing stop if activation_rr is reached
+                                activation_rr = ts_cfg.get("activation_rr", 1.0)
+                                rr_reached = (excursion / risk) if risk > 0 else 0
+                                
+                                if risk > 0 and rr_reached >= activation_rr:
+                                    # 1. Base Trail: 50% give-back default
+                                    give_back_pct = ts_cfg.get("mfe_trail_base", 0.5)
+                                
+                                    # 2. Volatility Adjustment
+                                    if i > 20:
+                                        prev_atr_slice = m5_atr_series[i-21:i-1]
+                                        if len(prev_atr_slice) > 0:
+                                            avg_atr = np.mean(prev_atr_slice)
+                                            if avg_atr > 0:
+                                                atr_ratio = m5_atr_series[i-1] / avg_atr
+                                                if atr_ratio > 1.3: give_back_pct += 0.2
+                                                elif atr_ratio < 0.7: give_back_pct -= 0.1
+                                
+                                    # 3. Profit-Dependent (Tighten as profit increases)
                                     if rr_reached >= 3.0:
                                         give_back_pct = 0.3 # Tighten to 30% give-back
                                     elif rr_reached >= 2.0:
                                         give_back_pct = 0.4
-                            
-                                # 4. Time-Based (Tighten after many candles)
-                                candles_in_trade = i - bisect.bisect_left(m5_times, open_trade.entry_time)
-                                if candles_in_trade > 100: # ~8 hours on M5
-                                    give_back_pct = min(give_back_pct, 0.4)
-        
-                                give_back_pct = max(0.1, min(give_back_pct, 0.9))
-                            
-                                # 5. Apply Trail
-                                if open_trade.signal.direction == "BUY":
-                                    new_sl = open_trade.best_price - (excursion * give_back_pct)
-                                    if new_sl > open_trade.sl:
-                                        open_trade.sl = new_sl
-                                else:
-                                    new_sl = open_trade.best_price + (excursion * give_back_pct)
-                                    if new_sl < open_trade.sl:
-                                        open_trade.sl = new_sl
+                                
+                                    # 4. Time-Based (Tighten after many candles)
+                                    candles_in_trade = i - bisect.bisect_left(m5_times, open_trade.entry_time)
+                                    if candles_in_trade > 100: # ~8 hours on M5
+                                        give_back_pct = min(give_back_pct, 0.4)
+            
+                                    give_back_pct = max(0.1, min(give_back_pct, 0.9))
+                                
+                                    # 5. Apply Trail
+                                    if open_trade.signal.direction == "BUY":
+                                        new_sl = open_trade.best_price - (excursion * give_back_pct)
+                                        if new_sl > open_trade.sl:
+                                            open_trade.sl = new_sl
+                                    else:
+                                        new_sl = open_trade.best_price + (excursion * give_back_pct)
+                                        if new_sl < open_trade.sl:
+                                            open_trade.sl = new_sl
+
                             
                                 # 6. CRITICAL: Intra-candle look-ahead bias protection
                                 # The candle's HIGH updated MFE and moved SL tighter, but the LOW
@@ -479,15 +494,7 @@ class BacktestEngine:
                                         result_type = "SL"
                                         closed = True
                                         open_trade.sl = sl_before_trail
-                                    # Also check if candle violated the NEW tighter SL
-                                    elif open_trade.signal.direction == "BUY" and bid_l <= open_trade.sl:
-                                        exit_price = open_trade.sl
-                                        result_type = "SL"
-                                        closed = True
-                                    elif open_trade.signal.direction == "SELL" and ask_h >= open_trade.sl:
-                                        exit_price = open_trade.sl
-                                        result_type = "SL"
-                                        closed = True
+
                     
                     if closed:
                         # Add trailing stop slippage penalty if not using ticks
@@ -681,6 +688,25 @@ class BacktestEngine:
         ]
         
         print("\n" + tabulate(summary_data, headers="firstrow", tablefmt="fancy_grid"))
+
+        if session_stats:
+            session_data = [["Session", "Trades", "Win Rate", "Net PnL"]]
+            # Sort sessions logically: TOKYO, LONDON, LONDON/NY, NEW_YORK
+            session_order = ["TOKYO", "LONDON", "LONDON/NY", "NEW_YORK"]
+            sorted_sessions = sorted(session_stats.keys(), key=lambda x: session_order.index(x) if x in session_order else 99)
+            
+            for s_name in sorted_sessions:
+                stats = session_stats[s_name]
+                wr = (stats["wins"] / stats["count"] * 100) if stats["count"] > 0 else 0
+                session_data.append([
+                    s_name,
+                    stats["count"],
+                    f"{wr:.2f}%",
+                    f"${stats['pnl']:,.2f}"
+                ])
+            print("\nSession Performance:")
+            print(tabulate(session_data, headers="firstrow", tablefmt="fancy_grid"))
+
 
         return performance
 

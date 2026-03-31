@@ -6,8 +6,11 @@ Refined for XAUUSDm M5 with MTF Alignment, Weighted Confluence (70%+), and High 
 import logging
 import numpy as np
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any, TYPE_CHECKING
 from dataclasses import dataclass, field
+
+if TYPE_CHECKING:
+    from .types import CandleArray
 
 # Relative imports from core package
 from .regime import MarketRegime
@@ -90,8 +93,6 @@ class StrategyEngine:
         Determines session from candle hour.
         Adjusts for UTC offset (MT5 time -> UTC time) before classification.
         """
-        # Convert local/server hour to UTC
-        # If server is UTC+2 (10 AM), UTC is 8 AM. So 10 - 2 = 8.
         utc_hour = (hour - utc_offset) % 24
         
         if 8 <= utc_hour < 14: return "LONDON"
@@ -113,23 +114,20 @@ class StrategyEngine:
         ups = np.where(deltas > 0, deltas, 0)
         downs = np.where(deltas < 0, -deltas, 0)
 
-        # Alpha for Wilder's Smoothing is 1/period
         n = len(prices)
         avg_up = np.zeros(n)
         avg_down = np.zeros(n)
 
-        # Initialize with SMA for the first 'period'
         avg_up[period] = np.mean(ups[:period])
         avg_down[period] = np.mean(downs[:period])
 
-        # Recursive Wilder's Smoothing
         for i in range(period + 1, n):
             avg_up[i] = (avg_up[i-1] * (period - 1) + ups[i-1]) / period
             avg_down[i] = (avg_down[i-1] * (period - 1) + downs[i-1]) / period
 
         rs = np.divide(avg_up, avg_down, out=np.zeros_like(avg_up), where=avg_down != 0)
         rsi = 100 - (100 / (1 + rs))
-        rsi[:period] = 50.0  # Seed period
+        rsi[:period] = 50.0 
         return rsi
 
     def _calculate_rsi(self, prices: np.ndarray, period: int = 14) -> float:
@@ -156,7 +154,7 @@ class StrategyEngine:
         series = self._calculate_ema_series(prices, period)
         return series[-1] if len(series) > 0 else 0.0
 
-    def _calculate_atr(self, candles: List[dict], period: Optional[int] = None) -> float:
+    def _calculate_atr(self, candles: 'CandleArray', period: Optional[int] = None) -> float:
         if period is None:
             period = self.atr_period
             
@@ -173,14 +171,13 @@ class StrategyEngine:
         if len(tr) == 0: return 0.1
         return np.mean(tr[-period:]) if len(tr) >= period else np.mean(tr)
 
-    def analyze(self, symbol: str, h4_candles: List[dict], h1_candles: List[dict], m30_candles: List[dict],
-                m5_candles: List[dict], current_price: float,
-                d1_candles: Optional[List[dict]] = None, session: Optional[str] = None,
+    def analyze(self, symbol: str, h4_candles: 'CandleArray', h1_candles: 'CandleArray', m30_candles: 'CandleArray',
+                m5_candles: 'CandleArray', current_price: float,
+                d1_candles: Optional['CandleArray'] = None, session: Optional[str] = None,
                 preprocessed: Optional[dict] = None) -> Tuple[Optional[TradeSignal], str, str]:
         
         if preprocessed:
             # High-Performance Path for Backtesting
-            # 'preprocessed' contains all pre-computed trends and regimes for current tick index
             effective_trend = preprocessed["h4_trend"]
             h4_strength = preprocessed["h4_strength"]
             regime = preprocessed["regime"]
@@ -191,34 +188,29 @@ class StrategyEngine:
             vol_scaling_flag = preprocessed["vol_scaling"]
             m5_atr = preprocessed["m5_atr"]
             
-            # Skip heavy checks if untradeable session
             if session and session not in self.tradeable_sessions:
                 return None, effective_trend, str(regime)
                 
-            # M5 trade counters / cooldowns handled here
             self.m5_trade_counter += 1
             if self.m5_trade_counter - self.last_m5_stop_index < self.cooldown_candles:
                 return None, "COOLDOWN", "NEUTRAL"
                 
-            # Execute Entry Logic
-            m30_closes = m30_candles.close[-10:] # Small slice for logic
+            # Passing full arrays directly (inner methods safely index the ends)
             signal = None
             if effective_trend == "BULLISH":
                 if current_price > m30_ema_val and 25 < h1_rsi < 95:
-                    signal = self._check_breakout_entry(m30_candles[-50:], m5_candles[-50:], "BULLISH", current_price)
+                    signal = self._check_breakout_entry(m30_candles, m5_candles, "BULLISH", current_price)
             elif effective_trend == "BEARISH":
                 if current_price < m30_ema_val and 5 < h1_rsi < 75:
-                    signal = self._check_breakout_entry(m30_candles[-50:], m5_candles[-50:], "BEARISH", current_price)
+                    signal = self._check_breakout_entry(m30_candles, m5_candles, "BEARISH", current_price)
             
             if signal:
                 signal.confluence_score, signal.reasons = self._calculate_confluence(
-                    effective_trend, h4_strength, regime, signal, m30_candles[-50:], m5_candles[-50:], m30_atr, m5_atr, session
+                    effective_trend, h4_strength, regime, signal, m30_candles, m5_candles, m30_atr, m5_atr, session
                 )
                 if signal.confluence_score < self.min_confluence_score: return None, effective_trend, str(regime)
                 
-                # CRITICAL: Calculate Exit Levels (SL/TP) as absolute prices
-                signal = self._set_sl_tp(signal, m30_atr, m30_candles[-50:], h4_strength, session, signal.confluence_score)
-                
+                signal = self._set_sl_tp(signal, m30_atr, m30_candles, h4_strength, session, signal.confluence_score)
                 signal.confidence = self._calculate_confidence(signal.confluence_score, h4_strength, signal)
             
             return signal, effective_trend, str(regime)
@@ -226,12 +218,11 @@ class StrategyEngine:
         if not h4_candles or not h1_candles or not m30_candles or not m5_candles:
             return None, "RANGING", "NEUTRAL"
         
-        # Performance: Truncate slices to reasonable lookback for indicator stability
-        # O(N^2) Mitigation: 200 candles is enough for EMA50/RSI14 to stabilize.
+        # Slicing via `__getitem__` logic 
         h4_candles = h4_candles[-200:]
         h1_candles = h1_candles[-200:]
         m30_candles = m30_candles[-200:]
-        m5_candles = m5_candles[-400:] # M5 needs a bit more for breakout lookbacks
+        m5_candles = m5_candles[-400:] 
         
         if len(h4_candles) < 20 or len(h1_candles) < 20 or len(m30_candles) < 20 or len(m5_candles) < 20:
             return None, "RANGING", "NEUTRAL"
@@ -239,12 +230,10 @@ class StrategyEngine:
         if session and session not in self.tradeable_sessions:
             return None, "RANGING", "NEUTRAL"
 
-        # Reset to base parameters before applying session-specific settings
         for param, value in self.strategy_config.items():
             if not isinstance(value, dict) and hasattr(self, param):
                 setattr(self, param, value)
         
-        # Apply Session-Specific Strategy individually
         session_data = self.session_cfg.get(session, {})
         overrides = session_data.get("strategy", {})
         for param, value in overrides.items():
@@ -252,23 +241,22 @@ class StrategyEngine:
                 setattr(self, param, value)
 
         # 0. Choppy Mitigation Guards
-        raw_ts = m5_candles[-1]['time']
-        if isinstance(raw_ts, (int, float)):
-            timestamp = datetime.fromtimestamp(raw_ts, tz=timezone.utc)
+        raw_ts = m5_candles.time[-1]
+        if isinstance(raw_ts, (int, float, np.integer, np.floating)):
+            timestamp = datetime.fromtimestamp(float(raw_ts), tz=timezone.utc)
         elif isinstance(raw_ts, str):
             try:
                 timestamp = datetime.fromisoformat(raw_ts)
             except ValueError:
-                timestamp = datetime.fromtimestamp(int(raw_ts), tz=timezone.utc)
+                timestamp = datetime.fromtimestamp(float(raw_ts), tz=timezone.utc)
         else:
-            timestamp = raw_ts # Assume datetime object
+            timestamp = raw_ts 
             
         current_date = timestamp.date()
         
         if self.last_loss_date != current_date:
             self.daily_losses = 0
             self.last_loss_date = current_date
-            # Reset Session Cooldowns at start of day
             for s in self.consecutive_losses:
                 self.consecutive_losses[s] = 0
                 self.session_cooldown_active[s] = False
@@ -276,7 +264,6 @@ class StrategyEngine:
         if self.daily_losses >= self.max_daily_losses:
             return None, "DAILY_LOSS_LIMIT", "NEUTRAL"
             
-        # Session Cooldown Check
         if session and self.session_cooldown_active.get(session, False):
             return None, "SESSION_COOLDOWN", "NEUTRAL"
 
@@ -288,10 +275,6 @@ class StrategyEngine:
         m30_atr = self._calculate_atr(m30_candles)
         m5_atr = self._calculate_atr(m5_candles)
         
-        # Calculate SMA of ATR(20) - Optimization: Use a simple rolling mean if needed, 
-        # but for now we just avoid the triple-redundant full ATR calls.
-        atr_history = []
-        # Optimization: instead of recomputing full ATR in a loop, we just use the last 20 TRs
         highs = m30_candles.high
         lows = m30_candles.low
         closes = m30_candles.close
@@ -308,30 +291,25 @@ class StrategyEngine:
         
         vol_scaling_flag = False
         if atr_ratio < 0.6 or atr_ratio > 2.5:
-            vol_scaling_flag = True # Reduce lot size by 50% for extreme or dead volatility
+            vol_scaling_flag = True 
+            
         h4_trend, h4_strength = self._get_h4_trend(h4_candles)
         h1_closes = h1_candles.close
         h1_ema20 = self._calculate_ema(h1_closes, 14)
         h1_trend = "BULLISH" if h1_closes[-1] > h1_ema20 else "BEARISH"
         h1_rsi = self._calculate_rsi(h1_closes, 14)
         
-        # High Frequency Push: Allow H1 trend if H4 is Ranging
         effective_trend = h4_trend
         if h4_trend == "RANGING":
             effective_trend = h1_trend
-            h4_strength = 20 # Minimum strength floor
+            h4_strength = 20
 
-        # 2. Regime Integration (must be before volatility check which references it)
         regime = MarketRegime.classify(m30_candles)
 
-        # 3. Volatility Check
         if self.vol_enabled:
-            # Optimization: Use the already computed m30_atr instead of recomputing
             if m30_atr > sma_atr_20 * (self.vol_mult_high + 2.0) or m30_atr < sma_atr_20 * (self.vol_mult_low - 0.5):
                 return None, h4_trend, str(regime)
 
-        # Pullback/Breakout logic: Allow both in Trending/Ranging to catch turns.
-        # Only hard skip on Low Liquidity (High Vol is lot-scaled).
         if regime == MarketRegime.LOW_LIQUIDITY:
             return None, "LOW_LIQUIDITY", str(regime)
             
@@ -339,16 +317,15 @@ class StrategyEngine:
         m30_ema_val = self._calculate_ema(m30_closes, 10) 
 
         signal = None
-        # Try Breakout first (High priority)
         if effective_trend == "BULLISH":
             if current_price > m30_ema_val and 25 < h1_rsi < 95:
                 signal = self._check_breakout_entry(m30_candles, m5_candles, "BULLISH", current_price)
-            if not signal: # Fallback to Pullback
+            if not signal:
                 signal = self._check_pullback_entry(m30_candles, m5_candles, "BULLISH", current_price)
         elif effective_trend == "BEARISH":
             if current_price < m30_ema_val and 5 < h1_rsi < 75:
                 signal = self._check_breakout_entry(m30_candles, m5_candles, "BEARISH", current_price)
-            if not signal: # Fallback to Pullback
+            if not signal:
                 signal = self._check_pullback_entry(m30_candles, m5_candles, "BEARISH", current_price)
 
         if signal:
@@ -357,7 +334,6 @@ class StrategyEngine:
             signal.confluence_score = confluence
             signal.reasons = reasons
             
-            # AI Bias from context (passed through or read from config if available)
             ai_bias = self.config.get("ai_advisor", {}).get("bias", 0.0)
             
             signal = self._set_sl_tp(signal, m30_atr, m30_candles, h4_strength, session, confluence, ai_bias)
@@ -375,15 +351,14 @@ class StrategyEngine:
             if signal.confidence < self.min_confidence:
                 return None, h4_trend, str(regime)
             
-            # Attach Vol Scaling Flag
             if vol_scaling_flag:
-                signal.rejection_type = "VOL_SCALING" # Use this to trigger lot reduction in risk manager
+                signal.rejection_type = "VOL_SCALING" 
             
             self._log(f"PHASE 7 SIGNAL: {signal.direction} | Conf: {signal.confidence:.0f}% | PF Goal: 2.0+")
             
         return signal, h4_trend, str(regime)
 
-    def _get_h4_trend(self, h4_candles: List[dict]) -> Tuple[str, int]:
+    def _get_h4_trend(self, h4_candles: 'CandleArray') -> Tuple[str, int]:
         if not h4_candles or len(h4_candles) < 5: return "RANGING", 50
         closes = h4_candles.close
         ema20 = self._calculate_ema_series(closes, self.ema_fast)
@@ -404,55 +379,53 @@ class StrategyEngine:
         if score < 45: return "BEARISH", (100 - score)
         return "RANGING", 50
 
-    def _check_breakout_entry(self, m30_candles: List[dict], m5_candles: List[dict], trend: str, current_price: float) -> Optional[TradeSignal]:
+    def _check_breakout_entry(self, m30_candles: 'CandleArray', m5_candles: 'CandleArray', trend: str, current_price: float) -> Optional[TradeSignal]:
         # 1. Higher Timeframe (M30) Breakout
         lookback = self.swing_lookback
-        recent_m30 = m30_candles[-lookback:]
         if trend == "BULLISH":
-            res_m30 = max(c["high"] for c in recent_m30[:-1])
+            res_m30 = np.max(m30_candles.high[-lookback:-1])
             if current_price > res_m30:
                 return TradeSignal("BUY", current_price, 0, 0, reasons=["M30 Breakout"])
         else:
-            sup_m30 = min(c["low"] for c in recent_m30[:-1])
+            sup_m30 = np.min(m30_candles.low[-lookback:-1])
             if current_price < sup_m30:
                 return TradeSignal("SELL", current_price, 0, 0, reasons=["M30 Breakout"])
                 
         # 2. Lower Timeframe (M5) Breakout (Hyper Frequency)
-        m5_lookback = 3 # More aggressive than swing_lookback
-        recent_m5 = m5_candles[-m5_lookback:]
+        m5_lookback = 5 # [FIX]: Increased from 3 to 5 to filter out micro-fakeouts
         if trend == "BULLISH":
-            res_m5 = max(c["high"] for c in recent_m5[:-1])
+            res_m5 = np.max(m5_candles.high[-m5_lookback:-1])
             if current_price > res_m5:
                 m5_closes = m5_candles.close
                 m5_ema = self._calculate_ema(m5_closes, self.ema_fast)
                 if current_price > m5_ema:
                     return TradeSignal("BUY", current_price, 0, 0, reasons=["M5 Breakout"])
         else:
-            sup_m5 = min(c["low"] for c in recent_m5[:-1])
+            sup_m5 = np.min(m5_candles.low[-m5_lookback:-1])
             if current_price < sup_m5:
                 m5_closes = m5_candles.close
                 m5_ema = self._calculate_ema(m5_closes, self.ema_fast)
                 if current_price < m5_ema:
                     return TradeSignal("SELL", current_price, 0, 0, reasons=["M5 Breakout"])
+
                 
         return None
 
-    def _check_pullback_entry(self, m30_candles: List[dict], m5_candles: List[dict], trend: str, current_price: float) -> Optional[TradeSignal]:
+    def _check_pullback_entry(self, m30_candles: 'CandleArray', m5_candles: 'CandleArray', trend: str, current_price: float) -> Optional[TradeSignal]:
         closes = m30_candles.close
         ema20 = self._calculate_ema(closes, 20)
         buffer = self.pullback_distance_pct / 100
         
         if trend == "BULLISH" and current_price > ema20 * 0.99:
-            if m30_candles[-2]["low"] <= ema20 * (1 + buffer):
+            if m30_candles.low[-2] <= ema20 * (1 + buffer):
                 return TradeSignal("BUY", current_price, 0, 0, rejection_type="PULLBACK")
         elif trend == "BEARISH" and current_price < ema20 * 1.01:
-            if m30_candles[-2]["high"] >= ema20 * (1 - buffer):
+            if m30_candles.high[-2] >= ema20 * (1 - buffer):
                 return TradeSignal("SELL", current_price, 0, 0, rejection_type="PULLBACK")
         return None
 
-    def _set_sl_tp(self, signal: TradeSignal, atr: float, m30_candles: List[dict], 
+    def _set_sl_tp(self, signal: TradeSignal, atr: float, m30_candles: 'CandleArray', 
                    h4_strength: int, session: str, confluence_score: int, ai_bias: float = 0.0) -> TradeSignal:
-        recent = m30_candles[-3:]
         
         # 1. Base RR from Trend Strength
         if h4_strength > 70:
@@ -468,36 +441,35 @@ class StrategyEngine:
         atr_avg = np.mean(m30_candles.high[-20:] - m30_candles.low[-20:])
         vol_factor = atr / atr_avg if atr_avg > 0 else 1.0
         if vol_factor > 1.2:
-            rr *= 1.2 # Widen in high vol
+            rr *= 1.2 
         elif vol_factor < 0.8:
-            rr *= 0.8 # Narrow in low vol
+            rr *= 0.8 
 
         # 3. Session Adjustment
         if session == "LONDON/NY":
-            rr += 0.5 # Higher potential during overlap
+            rr += 0.5 
         elif session == "TOKYO":
-            rr -= 0.3 # Lower potential in Tokyo
+            rr -= 0.3 
             
         # 4. AI Bias Adjustment
-        rr += ai_bias # Direct adjustment from AI sentiment
+        rr += ai_bias
         
         # 5. Confluence Adjustment
         if confluence_score >= 6:
             rr += 0.3
             
-        rr = max(1.5, min(rr, 5.0)) # Clamp to reasonable bounds
-            
+        rr = max(1.5, min(rr, 5.0))
         buffer = self.sl_atr_buffer * atr
         
         if signal.direction == "BUY":
-            signal.stop_loss = min(c["low"] for c in recent) - buffer
+            signal.stop_loss = np.min(m30_candles.low[-3:]) - buffer
             risk = signal.entry_price - signal.stop_loss
             signal.take_profit = signal.entry_price + (risk * rr)
             signal.tp1_price = signal.entry_price + (risk * 1.0)
             signal.tp2_price = signal.entry_price + (risk * 2.0)
             signal.tp3_price = signal.take_profit
         else:
-            signal.stop_loss = max(c["high"] for c in recent) + buffer
+            signal.stop_loss = np.max(m30_candles.high[-3:]) + buffer
             risk = signal.stop_loss - signal.entry_price
             signal.take_profit = signal.entry_price - (risk * rr)
             signal.tp1_price = signal.entry_price - (risk * 1.0)
@@ -508,7 +480,7 @@ class StrategyEngine:
         return signal
 
     def _calculate_confluence(self, h4_trend: str, h4_strength: int, regime: str, signal: TradeSignal,
-                              m30_candles: List[dict], m5_candles: List[dict],
+                              m30_candles: 'CandleArray', m5_candles: 'CandleArray',
                               m30_atr: float, m5_atr: float, session: str) -> Tuple[int, List[str]]:
         reasons = []
         score = 0
@@ -520,7 +492,6 @@ class StrategyEngine:
         if (signal.direction == "BUY" and h1_rsi > 50) or (signal.direction == "SELL" and h1_rsi < 50):
             score += 1; reasons.append("H1 Momentum")
             
-        # Use explicit passed session variable
         if session and session in ["LONDON", "LONDON/NY", "NEW_YORK"]:
             score += 1; reasons.append(f"{session} Session")
             
@@ -538,7 +509,7 @@ class StrategyEngine:
         return score, reasons
 
     def _calculate_confidence(self, confluence: int, h4_strength: int, signal: TradeSignal) -> float:
-        base = 50.0  # Lowered base for more sensitivity in min_confidence (65-85)
+        base = 50.0 
         conf_bonus = confluence * 5.0
         strength_bonus = (h4_strength / 100) * 10
         return min(95.0, base + conf_bonus + strength_bonus)
@@ -560,7 +531,7 @@ class StrategyEngine:
                     self.consecutive_losses[session] = 0
                     self.session_cooldown_active[session] = False
 
-    def preprocess_history(self, h4: List[dict], h1: List[dict], m30: List[dict], m5: List[dict]) -> dict:
+    def preprocess_history(self, h4: 'CandleArray', h1: 'CandleArray', m30: 'CandleArray', m5: 'CandleArray') -> dict:
         """
         Pre-calculates all technical indicators and trends for full history speed.
         Returns a dictionary of mapped states for each M5 candle.
@@ -588,7 +559,6 @@ class StrategyEngine:
         h1_times = h1.time
         m30_times = m30.time
         
-        # Pre-compute H4 Trend for each H4 candle
         h4_trend_data = []
         for i in range(len(h4)):
             slice_h4 = h4[:i+1]
@@ -597,7 +567,6 @@ class StrategyEngine:
             else:
                 h4_trend_data.append(self._get_h4_trend(slice_h4))
         
-        # Pre-compute M30 Regime and ATRs
         m30_regime_data = []
         m30_atr_data = []
         sma_atr_20_data = []
@@ -610,7 +579,6 @@ class StrategyEngine:
                               np.maximum(np.abs(h30[1:] - c30[:-1]), 
                                          np.abs(l30[1:] - c30[:-1])))
         
-        # Pre-compute M5 ATR for slippage modeling
         h5 = m5.high
         l5 = m5.low
         c5 = m5.close
@@ -636,12 +604,11 @@ class StrategyEngine:
         for i in range(len(m5)):
             t = m5_times[i]
             
-            # Find last closed candles
-            h4_idx = np.searchsorted(h4_times, t, side='right') - 1
-            h1_idx = np.searchsorted(h1_times, t, side='right') - 1
-            m30_idx = np.searchsorted(m30_times, t, side='right') - 1
+            # [FIX]: Subtract timeframe duration to prevent Look-ahead Bias
+            h4_idx = np.searchsorted(h4_times, t - 14400, side='right') - 1
+            h1_idx = np.searchsorted(h1_times, t - 3600, side='right') - 1
+            m30_idx = np.searchsorted(m30_times, t - 1800, side='right') - 1
             
-            # Boundary check
             h4_idx = max(0, h4_idx)
             h1_idx = max(0, h1_idx)
             m30_idx = max(0, m30_idx)
