@@ -31,3 +31,5 @@ logs/
 # OS
 Thumbs.db
 .DS_Store
+ai_context.json
+/backtest_results
