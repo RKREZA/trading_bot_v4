@@ -344,26 +344,30 @@ class BacktestEngine:
                         # --- Advanced Partial Profit Taking (PPT) ---
                         # Only run if enabled in strategy_defaults and trade is not closed
                         if not closed and self.config.get("strategy_defaults", {}).get("partial_profit_enabled", True):
+                            ppt_cfg = self.config.get("strategy_defaults", {}).get("partial_profit_config", {"level1_pct": 0.25, "level2_pct": 0.33})
+                            level1_pct = ppt_cfg.get("level1_pct", 0.25)
+                            level2_pct = ppt_cfg.get("level2_pct", 0.33)
+                            
                             if open_trade.signal.direction == "BUY":
                                 # Level 1
                                 if open_trade.partial_closed_count == 0 and bid_h >= open_trade.tp_partial_1:
-                                    success, pnl, comm = self._handle_partial_tp(open_trade, 0.25, open_trade.tp_partial_1, symbol, contract_size, lot_step, min_lot)
+                                    success, pnl, comm = self._handle_partial_tp(open_trade, level1_pct, open_trade.tp_partial_1, symbol, contract_size, lot_step, min_lot)
                                     open_trade.partial_closed_count = 1
         
                                 # Level 2
                                 elif open_trade.partial_closed_count == 1 and bid_h >= open_trade.tp_partial_2:
-                                    success, pnl, comm = self._handle_partial_tp(open_trade, 0.33, open_trade.tp_partial_2, symbol, contract_size, lot_step, min_lot)
+                                    success, pnl, comm = self._handle_partial_tp(open_trade, level2_pct, open_trade.tp_partial_2, symbol, contract_size, lot_step, min_lot)
                                     open_trade.partial_closed_count = 2
         
                             else: # SELL
                                 # Level 1
                                 if open_trade.partial_closed_count == 0 and ask_l <= open_trade.tp_partial_1:
-                                    success, pnl, comm = self._handle_partial_tp(open_trade, 0.25, open_trade.tp_partial_1, symbol, contract_size, lot_step, min_lot)
+                                    success, pnl, comm = self._handle_partial_tp(open_trade, level1_pct, open_trade.tp_partial_1, symbol, contract_size, lot_step, min_lot)
                                     open_trade.partial_closed_count = 1
         
                                 # Level 2
                                 elif open_trade.partial_closed_count == 1 and ask_l <= open_trade.tp_partial_2:
-                                    success, pnl, comm = self._handle_partial_tp(open_trade, 0.33, open_trade.tp_partial_2, symbol, contract_size, lot_step, min_lot)
+                                    success, pnl, comm = self._handle_partial_tp(open_trade, level2_pct, open_trade.tp_partial_2, symbol, contract_size, lot_step, min_lot)
                                     open_trade.partial_closed_count = 2
     
                         if not closed:

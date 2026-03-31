@@ -405,14 +405,21 @@ class PositionManager:
         self.connection = connection
 
     def get_open_positions(self, symbol: str = None) -> List:
-        """Return list of open positions, optionally filtered by symbol."""
+        """Return list of open positions, optionally filtered by symbol and magic number."""
         if not self.connection.ensure_connected():
             return []
         try:
             # Reusing the connection's lock for PositionManager
             with self.connection.MT5_LOCK:
                 positions = mt5.positions_get(symbol=symbol)
-            return positions if positions else []
+            
+            if not positions:
+                return []
+            
+            # Filter by Magic Number to avoid "Rogue Positions" (manual trades)
+            magic = self.connection.config.get("magic_number", BOT_MAGIC_NUMBER)
+            return [p for p in positions if p.magic == magic]
+            
         except Exception as e:
             logger.error("Error fetching positions: %s", e)
             return []
