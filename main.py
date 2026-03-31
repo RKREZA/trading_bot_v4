@@ -300,7 +300,21 @@ class TradingBot:
         if not self.connection.connect():
             logger.error("Failed to connect to MT5 for backtesting.")
             return None
-            
+        
+        # Inject live symbol info for accurate backtest lot sizing
+        sym_info = self.data_fetcher.get_symbol_info(symbol)
+        if sym_info:
+            self.config.setdefault("symbols_config", {}).setdefault(symbol, {})
+            s_cfg = self.config["symbols_config"][symbol]
+            s_cfg["tick_size"] = sym_info["point"]
+            # Adjusted: use contract_size * point as fallback for tick_value
+            s_cfg["tick_value"] = sym_info.get("trade_tick_value", sym_info["contract_size"] * sym_info["point"])
+            s_cfg["point"] = sym_info["point"]
+            s_cfg["contract_size"] = sym_info["contract_size"]
+            s_cfg["lot_step"] = sym_info["lot_step"]
+            s_cfg["min_lot"] = sym_info["min_lot"]
+            logger.info(f"[Backtest] Injected live symbol info for {symbol}")
+
         try:
             if start_date and end_date:
                 # Use UTC for backtest date range to match candles

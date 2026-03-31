@@ -160,6 +160,16 @@ class BacktestEngine:
         session_stats = {} # session -> {trades, wins, pnl}
         utc_offset = self.config.get("strategy_defaults", {}).get("utc_offset_hours", 0)
         open_trade: Optional[_OpenTrade] = None
+
+        # --- Compatibility Patch: Unpack CandleArray back into standard lists of dictionaries ---
+        # We keep references to the original CandleArray objects for high-performance preprocessing
+        h4_arr, h1_arr, m30_arr, m5_arr = h4_candles, h1_candles, m30_candles, m5_candles
+        
+        h4_candles = [{"time": t, "open": o, "high": h, "low": l, "close": c, "tick_volume": v} for t, o, h, l, c, v in zip(h4_arr.time, h4_arr.open, h4_arr.high, h4_arr.low, h4_arr.close, h4_arr.tick_volume)]
+        h1_candles = [{"time": t, "open": o, "high": h, "low": l, "close": c, "tick_volume": v} for t, o, h, l, c, v in zip(h1_arr.time, h1_arr.open, h1_arr.high, h1_arr.low, h1_arr.close, h1_arr.tick_volume)]
+        m30_candles = [{"time": t, "open": o, "high": h, "low": l, "close": c, "tick_volume": v} for t, o, h, l, c, v in zip(m30_arr.time, m30_arr.open, m30_arr.high, m30_arr.low, m30_arr.close, m30_arr.tick_volume)]
+        m5_candles = [{"time": t, "open": o, "high": h, "low": l, "close": c, "tick_volume": v} for t, o, h, l, c, v in zip(m5_arr.time, m5_arr.open, m5_arr.high, m5_arr.low, m5_arr.close, m5_arr.tick_volume)]
+        d1_candles = [{"time": t, "open": o, "high": h, "low": l, "close": c, "tick_volume": v} for t, o, h, l, c, v in zip(d1_candles.time, d1_candles.open, d1_candles.high, d1_candles.low, d1_candles.close, d1_candles.tick_volume)]
         
         logger.debug("BacktestEngine.run started for %s. M5 candles: %d", symbol, len(m5_candles))
         if not m5_candles:
@@ -187,10 +197,10 @@ class BacktestEngine:
         else:
             m5_atr_series[:] = 0.1
         
-        h4_times = [datetime.fromtimestamp(c['time'], tz=timezone.utc) for c in h4_candles]
-        h1_times = [datetime.fromtimestamp(c['time'], tz=timezone.utc) for c in h1_candles]
-        m30_times = [datetime.fromtimestamp(c['time'], tz=timezone.utc) for c in m30_candles]
-        m5_times = [datetime.fromtimestamp(c['time'], tz=timezone.utc) for c in m5_candles]
+        h4_times = h4_arr.time
+        h1_times = h1_arr.time
+        m30_times = m30_arr.time
+        m5_times = m5_arr.time
         
         # Define m5_avg_atr (SMA 100 of ATR) for volatility-scaled spreads
         m5_avg_atr = pd.Series(m5_atr_series).rolling(window=100, min_periods=1).mean().values
@@ -208,7 +218,7 @@ class BacktestEngine:
             logger.info("[Backtest] Processed %d ticks into structured Numpy array.", len(ticks))
             
         # --- Optimization: Pre-calculate all Strategy/Regime Data (Vectorized) ---
-        pre_ctx = self.strategy.preprocess_history(h4_candles, h1_candles, m30_candles, m5_candles)
+        pre_ctx = self.strategy.preprocess_history(h4_arr, h1_arr, m30_arr, m5_arr)
         m5_precomputed = pre_ctx["m5"]
         
         pending_signal = None  # Next-candle entry: stores signal for delayed execution
@@ -219,21 +229,22 @@ class BacktestEngine:
                   dynamic_ncols=True, leave=True, colour="cyan") as pbar:
             for i in pbar:
                 current_candle = m5_candles[i]
-                candle_time = m5_times[i]
+                candle_time = m5_times[i] # int64
+                candle_dt = datetime.fromtimestamp(candle_time, tz=timezone.utc)
                 
                 # --- High-Performance Signal Inputs ---
                 bid = current_candle['close']
-                current_session = self.strategy.get_session_from_hour(candle_time.hour, utc_offset)
+                current_session = self.strategy.get_session_from_hour(candle_dt.hour, utc_offset)
                 
                 # Fetch slices for strategy (O(logN) with searchsorted)
-                h4_idx = np.searchsorted(h4_times, candle_time, side='right') - 1
-                h1_idx = np.searchsorted(h1_times, candle_time, side='right') - 1
-                m30_idx = np.searchsorted(m30_times, candle_time, side='right') - 1
+                h4_idx = np.searchsorted(h4_times, current_candle['time'], side='right') - 1
+                h1_idx = np.searchsorted(h1_times, current_candle['time'], side='right') - 1
+                m30_idx = np.searchsorted(m30_times, current_candle['time'], side='right') - 1
                 
-                h4_slice = h4_candles[:max(0, h4_idx + 1)]
-                h1_slice = h1_candles[:max(0, h1_idx + 1)]
-                m30_slice = m30_candles[:max(0, m30_idx + 1)]
-                m5_slice = m5_candles[:i + 1]
+                h4_slice = h4_arr[:max(0, h4_idx + 1)]
+                h1_slice = h1_arr[:max(0, h1_idx + 1)]
+                m30_slice = m30_arr[:max(0, m30_idx + 1)]
+                m5_slice = m5_arr[:i + 1]
                 
                 # --- High-Performance Core Metrics ---
                 current_atr = m5_atr_series[i-1]
@@ -253,9 +264,9 @@ class BacktestEngine:
                         pnl = (exit_price - open_trade.entry_price) * (1 if open_trade.signal.direction == "BUY" else -1) * contract_size * open_trade.lot
                         comm_exit = self._get_commission(symbol, open_trade.lot) * 0.5
                         final_pnl = pnl - comm_exit
-                        self.strategy.report_trade_result("SL", candle_time, session=open_trade.session)
+                        self.strategy.report_trade_result("SL", candle_dt, session=open_trade.session)
                         entry_dt = open_trade.entry_time if isinstance(open_trade.entry_time, datetime) else datetime.fromtimestamp(open_trade.entry_time, tz=timezone.utc)
-                        exit_dt = candle_time if isinstance(candle_time, datetime) else datetime.fromtimestamp(candle_time, tz=timezone.utc)
+                        exit_dt = candle_dt
                         trade_record = {
                             "time": entry_dt, "exit_time": exit_dt,
                             "direction": open_trade.signal.direction,
@@ -490,7 +501,7 @@ class BacktestEngine:
                         final_exit = exit_price - exit_slippage if open_trade.signal.direction == "BUY" else exit_price + exit_slippage
                         
                         # Notify strategy with session context
-                        self.strategy.report_trade_result(result_type, candle_time, session=open_trade.session)
+                        self.strategy.report_trade_result(result_type, candle_dt, session=open_trade.session)
                         
                         pnl = (final_exit - open_trade.entry_price) * (1 if open_trade.signal.direction == "BUY" else -1) * contract_size * open_trade.lot
                         # Exit commission (remaining 50% of round-turn for the current lot)
@@ -502,7 +513,7 @@ class BacktestEngine:
                         
                         # Ensure datetime objects for pandas/metrics
                         entry_dt = open_trade.entry_time if isinstance(open_trade.entry_time, datetime) else datetime.fromtimestamp(open_trade.entry_time, tz=timezone.utc)
-                        exit_dt = candle_time if isinstance(candle_time, datetime) else datetime.fromtimestamp(candle_time, tz=timezone.utc)
+                        exit_dt = candle_dt
     
                         trade_record = {
                             "time": entry_dt,
@@ -548,7 +559,7 @@ class BacktestEngine:
                     sl_count = sum(1 for t in trades if t['result'] == 'SL')
                     tp_count = sum(1 for t in trades if t['result'] == 'TP')
                     postfix = {
-                        "date": candle_time.strftime('%d-%m-%y'),
+                        "date": candle_dt.strftime('%d-%m-%y'),
                         "balance": f"${self.balance:.0f}",
                         "trade": f"{len(trades)} [sl: {sl_count}, tp: {tp_count}]",
                         "status": "OPEN" if open_trade else "IDLE"
@@ -571,7 +582,7 @@ class BacktestEngine:
                             "confidence": signal.confidence,
                             "atr": current_atr,
                             "regime": regime_str,
-                            "timestamp": candle_time
+                            "timestamp": candle_dt
                         }
                         # Handle AI Decision (Fallback if filter not set)
                         ai_decision = True

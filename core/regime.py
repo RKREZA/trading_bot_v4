@@ -12,10 +12,10 @@ class MarketRegime:
         if len(candles) < lookback:
             return MarketRegime.RANGING
 
-        closes = np.array([c['close'] for c in candles[-lookback:]])
-        highs = np.array([c['high'] for c in candles[-lookback:]])
-        lows = np.array([c['low'] for c in candles[-lookback:]])
-        volumes = np.array([c.get('tick_volume', 1) for c in candles[-lookback:]])
+        closes = candles.close[-lookback:]
+        highs = candles.high[-lookback:]
+        lows = candles.low[-lookback:]
+        volumes = candles.tick_volume[-lookback:]
 
         # 1. Volatility: ATR as % of price (normalized)
         # Using vectorized TR calculation for speed

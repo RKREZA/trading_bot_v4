@@ -154,14 +154,14 @@ class DataFetcher:
         try:
             with MT5Connection.MT5_LOCK:
                 if not mt5.symbol_select(symbol, True):
-                    return []
+                    return CandleArray.from_dicts([])
 
                 logger.debug("MT5 Range Fetch: %s %s (%s to %s)...", symbol, timeframe, date_from, date_to)
                 rates = mt5.copy_rates_range(symbol, TIMEFRAME_MAP[timeframe], date_from, date_to)
             
             if rates is None or len(rates) == 0:
                 logger.warning("No range data for %s %s", symbol, timeframe)
-                return []
+                return CandleArray.from_dicts([])
 
             candles = []
             for r in rates:
@@ -173,10 +173,10 @@ class DataFetcher:
                     "close": float(r["close"]),
                     "tick_volume": int(r["tick_volume"]),
                 })
-            return candles
+            return CandleArray.from_dicts(candles)
         except Exception as e:
             logger.error("Error in fetch_candles_range: %s", e)
-            return []
+            return CandleArray.from_dicts([])
 
     def fetch_ticks_range(self, symbol: str, date_from: datetime.datetime, date_to: datetime.datetime) -> List[dict]:
         """

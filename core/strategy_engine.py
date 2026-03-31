@@ -161,9 +161,9 @@ class StrategyEngine:
             period = self.atr_period
             
         if not candles or len(candles) < 2: return 0.1
-        highs = np.array([c['high'] for c in candles])
-        lows = np.array([c['low'] for c in candles])
-        closes = np.array([c['close'] for c in candles])
+        highs = candles.high
+        lows = candles.low
+        closes = candles.close
         
         if len(highs) < 2: return 0.1
 
@@ -201,7 +201,7 @@ class StrategyEngine:
                 return None, "COOLDOWN", "NEUTRAL"
                 
             # Execute Entry Logic
-            m30_closes = np.array([c['close'] for c in m30_candles[-10:]]) # Small slice for logic
+            m30_closes = m30_candles.close[-10:] # Small slice for logic
             signal = None
             if effective_trend == "BULLISH":
                 if current_price > m30_ema_val and 25 < h1_rsi < 95:
@@ -292,9 +292,9 @@ class StrategyEngine:
         # but for now we just avoid the triple-redundant full ATR calls.
         atr_history = []
         # Optimization: instead of recomputing full ATR in a loop, we just use the last 20 TRs
-        highs = np.array([c['high'] for c in m30_candles])
-        lows = np.array([c['low'] for c in m30_candles])
-        closes = np.array([c['close'] for c in m30_candles])
+        highs = m30_candles.high
+        lows = m30_candles.low
+        closes = m30_candles.close
         tr = np.maximum(highs[1:] - lows[1:], 
                         np.maximum(np.abs(highs[1:] - closes[:-1]), 
                                    np.abs(lows[1:] - closes[:-1])))
@@ -310,7 +310,7 @@ class StrategyEngine:
         if atr_ratio < 0.6 or atr_ratio > 2.5:
             vol_scaling_flag = True # Reduce lot size by 50% for extreme or dead volatility
         h4_trend, h4_strength = self._get_h4_trend(h4_candles)
-        h1_closes = np.array([c["close"] for c in h1_candles])
+        h1_closes = h1_candles.close
         h1_ema20 = self._calculate_ema(h1_closes, 14)
         h1_trend = "BULLISH" if h1_closes[-1] > h1_ema20 else "BEARISH"
         h1_rsi = self._calculate_rsi(h1_closes, 14)
@@ -335,7 +335,7 @@ class StrategyEngine:
         if regime == MarketRegime.LOW_LIQUIDITY:
             return None, "LOW_LIQUIDITY", str(regime)
             
-        m30_closes = np.array([c['close'] for c in m30_candles])
+        m30_closes = m30_candles.close
         m30_ema_val = self._calculate_ema(m30_closes, 10) 
 
         signal = None
@@ -385,7 +385,7 @@ class StrategyEngine:
 
     def _get_h4_trend(self, h4_candles: List[dict]) -> Tuple[str, int]:
         if not h4_candles or len(h4_candles) < 5: return "RANGING", 50
-        closes = np.array([c["close"] for c in h4_candles])
+        closes = h4_candles.close
         ema20 = self._calculate_ema_series(closes, self.ema_fast)
         ema50 = self._calculate_ema_series(closes, self.ema_slow)
         
@@ -423,14 +423,14 @@ class StrategyEngine:
         if trend == "BULLISH":
             res_m5 = max(c["high"] for c in recent_m5[:-1])
             if current_price > res_m5:
-                m5_closes = np.array([c["close"] for c in m5_candles])
+                m5_closes = m5_candles.close
                 m5_ema = self._calculate_ema(m5_closes, self.ema_fast)
                 if current_price > m5_ema:
                     return TradeSignal("BUY", current_price, 0, 0, reasons=["M5 Breakout"])
         else:
             sup_m5 = min(c["low"] for c in recent_m5[:-1])
             if current_price < sup_m5:
-                m5_closes = np.array([c["close"] for c in m5_candles])
+                m5_closes = m5_candles.close
                 m5_ema = self._calculate_ema(m5_closes, self.ema_fast)
                 if current_price < m5_ema:
                     return TradeSignal("SELL", current_price, 0, 0, reasons=["M5 Breakout"])
@@ -438,7 +438,7 @@ class StrategyEngine:
         return None
 
     def _check_pullback_entry(self, m30_candles: List[dict], m5_candles: List[dict], trend: str, current_price: float) -> Optional[TradeSignal]:
-        closes = np.array([c["close"] for c in m30_candles])
+        closes = m30_candles.close
         ema20 = self._calculate_ema(closes, 20)
         buffer = self.pullback_distance_pct / 100
         
@@ -465,7 +465,7 @@ class StrategyEngine:
             rr = 2.0
             
         # 2. Volatility Adjustment (ATR Ratio)
-        atr_avg = np.mean([abs(c['high'] - c['low']) for c in m30_candles[-20:]])
+        atr_avg = np.mean(m30_candles.high[-20:] - m30_candles.low[-20:])
         vol_factor = atr / atr_avg if atr_avg > 0 else 1.0
         if vol_factor > 1.2:
             rr *= 1.2 # Widen in high vol
@@ -515,7 +515,7 @@ class StrategyEngine:
         if (signal.direction == "BUY" and h4_trend == "BULLISH") or (signal.direction == "SELL" and h4_trend == "BEARISH"):
             score += 2; reasons.append("H4 Alignment")
         
-        closes = np.array([c["close"] for c in m30_candles])
+        closes = m30_candles.close
         h1_rsi = self._calculate_rsi(closes, 14)
         if (signal.direction == "BUY" and h1_rsi > 50) or (signal.direction == "SELL" and h1_rsi < 50):
             score += 1; reasons.append("H1 Momentum")
@@ -527,7 +527,7 @@ class StrategyEngine:
         if m5_atr > m30_atr * 0.1:
             score += 1; reasons.append("Volatility Exp")
             
-        m5_closes = np.array([c["close"] for c in m5_candles])
+        m5_closes = m5_candles.close
         m5_ema20 = self._calculate_ema_series(m5_closes, 20)
         if len(m5_ema20) > 2:
             if signal.direction == "BUY" and m5_ema20[-1] > m5_ema20[-2]:
@@ -573,20 +573,20 @@ class StrategyEngine:
         logger.info("[Strategy] Vectorized Preprocessing started...")
 
         # 1. Indicator Pre-calculations
-        h4_closes = np.array([c['close'] for c in h4])
-        h1_closes = np.array([c['close'] for c in h1])
-        m30_closes = np.array([c['close'] for c in m30])
-        m5_closes = np.array([c['close'] for c in m5])
+        h4_closes = h4.close
+        h1_closes = h1.close
+        m30_closes = m30.close
+        m5_closes = m5.close
         
         m30_ema = self._calculate_ema_series(m30_closes, 10)
         h1_ema20 = self._calculate_ema_series(h1_closes, 14)
         h1_rsi = self._calculate_rsi_series(h1_closes, 14)
         
         # 2. Time-based Mappings
-        m5_times = np.array([c['time'] for c in m5])
-        h4_times = np.array([c['time'] for c in h4])
-        h1_times = np.array([c['time'] for c in h1])
-        m30_times = np.array([c['time'] for c in m30])
+        m5_times = m5.time
+        h4_times = h4.time
+        h1_times = h1.time
+        m30_times = m30.time
         
         # Pre-compute H4 Trend for each H4 candle
         h4_trend_data = []
@@ -602,18 +602,18 @@ class StrategyEngine:
         m30_atr_data = []
         sma_atr_20_data = []
         
-        h30 = np.array([c['high'] for c in m30])
-        l30 = np.array([c['low'] for c in m30])
-        c30 = np.array([c['close'] for c in m30])
+        h30 = m30.high
+        l30 = m30.low
+        c30 = m30.close
         tr30 = np.zeros_like(c30)
         tr30[1:] = np.maximum(h30[1:] - l30[1:], 
                               np.maximum(np.abs(h30[1:] - c30[:-1]), 
                                          np.abs(l30[1:] - c30[:-1])))
         
         # Pre-compute M5 ATR for slippage modeling
-        h5 = np.array([c['high'] for c in m5])
-        l5 = np.array([c['low'] for c in m5])
-        c5 = np.array([c['close'] for c in m5])
+        h5 = m5.high
+        l5 = m5.low
+        c5 = m5.close
         tr5 = np.zeros_like(c5)
         tr5[1:] = np.maximum(h5[1:] - l5[1:], 
                              np.maximum(np.abs(h5[1:] - c5[:-1]), 
