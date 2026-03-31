@@ -215,6 +215,10 @@ class StrategyEngine:
                     effective_trend, h4_strength, regime, signal, m30_candles[-50:], m5_candles[-50:], m30_atr, m5_atr, session
                 )
                 if signal.confluence_score < self.min_confluence_score: return None, effective_trend, str(regime)
+                
+                # CRITICAL: Calculate Exit Levels (SL/TP) as absolute prices
+                signal = self._set_sl_tp(signal, m30_atr, m30_candles[-50:], h4_strength, session, signal.confluence_score)
+                
                 signal.confidence = self._calculate_confidence(signal.confluence_score, h4_strength, signal)
             
             return signal, effective_trend, str(regime)
@@ -359,7 +363,7 @@ class StrategyEngine:
             signal = self._set_sl_tp(signal, m30_atr, m30_candles, h4_strength, session, confluence, ai_bias)
             
             sl_dist = abs(signal.entry_price - signal.stop_loss)
-            max_sl = 8.0 if "XAUUSD" in symbol else 0
+            max_sl = 8.0 if "XAUUSDm" in symbol else 0
             if max_sl > 0 and sl_dist > max_sl:
                 return None, h4_trend, str(regime)
                 
@@ -516,8 +520,8 @@ class StrategyEngine:
         if (signal.direction == "BUY" and h1_rsi > 50) or (signal.direction == "SELL" and h1_rsi < 50):
             score += 1; reasons.append("H1 Momentum")
             
-        # Use already determined session from analyze() call
-        if session in ["LONDON", "LONDON/NY", "NEW_YORK"]:
+        # Use explicit passed session variable
+        if session and session in ["LONDON", "LONDON/NY", "NEW_YORK"]:
             score += 1; reasons.append(f"{session} Session")
             
         if m5_atr > m30_atr * 0.1:
@@ -606,6 +610,18 @@ class StrategyEngine:
                               np.maximum(np.abs(h30[1:] - c30[:-1]), 
                                          np.abs(l30[1:] - c30[:-1])))
         
+        # Pre-compute M5 ATR for slippage modeling
+        h5 = np.array([c['high'] for c in m5])
+        l5 = np.array([c['low'] for c in m5])
+        c5 = np.array([c['close'] for c in m5])
+        tr5 = np.zeros_like(c5)
+        tr5[1:] = np.maximum(h5[1:] - l5[1:], 
+                             np.maximum(np.abs(h5[1:] - c5[:-1]), 
+                                        np.abs(l5[1:] - c5[:-1])))
+        m5_atrs = np.zeros_like(c5)
+        for i in range(len(m5)):
+            m5_atrs[i] = np.mean(tr5[max(0, i-13):i+1]) if i > 0 else 0.1
+        
         for i in range(len(m30)):
             slice_m30 = m30[:i+1]
             reg = MarketRegime.classify(slice_m30)
@@ -649,7 +665,7 @@ class StrategyEngine:
                 "m30_atr": m30_atr_data[m30_idx],
                 "sma_atr_20": sma_atr_20_data[m30_idx],
                 "vol_scaling": (atr_ratio < 0.6 or atr_ratio > 2.5),
-                "m5_atr": 0.1
+                "m5_atr": m5_atrs[i]
             })
             
         logger.info("[Strategy] Preprocessing complete in %.2fs", timer.time() - start)

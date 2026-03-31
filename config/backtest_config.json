@@ -1,24 +1,10 @@
 {
   "symbol_defaults": {
-    "XAUUSD": {
-      "base_spread": 0.5,
-      "max_slippage": 0.2,
-      "contract_size": 100,
-      "point": 0.01,
-      "digits": 2
-    },
     "XAUUSDm": {
       "base_spread": 25,
       "max_slippage": 1.0,
       "commission": 7.0,
       "contract_size": 100,
-      "point": 0.01,
-      "digits": 2
-    },
-    "BTCUSD": {
-      "base_spread": 50.0,
-      "max_slippage": 10.0,
-      "contract_size": 1,
       "point": 0.01,
       "digits": 2
     }

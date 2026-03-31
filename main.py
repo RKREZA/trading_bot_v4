@@ -33,6 +33,7 @@ from core.data_fetcher import DataFetcher
 from core.backtester import BacktestEngine
 from core.strategy_engine import StrategyEngine, TradeSignal
 from core.ai_advisor import AIAdvisor
+from core.ai_filter import AIFilter
 from core.risk_manager import RiskManager
 from core.notifications import NotificationManager
 from core.regime import MarketRegime
@@ -65,6 +66,7 @@ class TradingBot:
         self.data_fetcher = DataFetcher()
         self.risk_manager = RiskManager(self.config)
         self.notification_manager = NotificationManager(self.config)
+        self.state_manager = SecureStateManager()
 
         self.daily_pnl = 0.0
         self.daily_trades = 0
@@ -251,17 +253,68 @@ class TradingBot:
             self.connection.disconnect()
             logger.info("Shutdown complete.")
 
-    def run_backtest(self, symbol="XAUUSDm"):
+    def run_backtest(self, symbol="XAUUSDm", start_date=None, end_date=None, count=10000):
         print(f"Project 10/10 Final Validation: {symbol}")
-        h4 = self.data_fetcher.fetch_candles(symbol, "H4", 100)
-        h1 = self.data_fetcher.fetch_candles(symbol, "H1", 100)
-        m30 = self.data_fetcher.fetch_candles(symbol, "M30", 100)
-        m5 = self.data_fetcher.fetch_candles(symbol, "M5", 100)
-        d1 = self.data_fetcher.fetch_candles(symbol, "D1", 100)
-        engine = BacktestEngine(self.config, self.strategy)
-        return engine.run(symbol, h4, h1, m30, m5, d1)
+        if not self.connection.connect():
+            logger.error("Failed to connect to MT5 for backtesting.")
+            return None
+            
+        try:
+            if start_date and end_date:
+                # Use UTC for backtest date range to match candles
+                dt_from = datetime.fromisoformat(start_date).replace(tzinfo=timezone.utc)
+                dt_to = datetime.fromisoformat(end_date).replace(tzinfo=timezone.utc)
+                h4 = self.data_fetcher.fetch_candles_range(symbol, "H4", dt_from, dt_to)
+                h1 = self.data_fetcher.fetch_candles_range(symbol, "H1", dt_from, dt_to)
+                m30 = self.data_fetcher.fetch_candles_range(symbol, "M30", dt_from, dt_to)
+                m5 = self.data_fetcher.fetch_candles_range(symbol, "M5", dt_from, dt_to)
+                d1 = self.data_fetcher.fetch_candles_range(symbol, "D1", dt_from, dt_to)
+            else:
+                h4 = self.data_fetcher.fetch_candles(symbol, "H4", count)
+                h1 = self.data_fetcher.fetch_candles(symbol, "H1", count)
+                m30 = self.data_fetcher.fetch_candles(symbol, "M30", count)
+                m5 = self.data_fetcher.fetch_candles(symbol, "M5", count)
+                d1 = self.data_fetcher.fetch_candles(symbol, "D1", count)
+                
+            # Backtest Strategy Setup
+            # Ensure TOKYO session is allowed during backtests unless explicitly forbidden
+            if hasattr(self.strategy.tradeable_sessions, 'add'):
+                self.strategy.tradeable_sessions.add("TOKYO")
+                self.strategy.tradeable_sessions.add("LONDON")
+                self.strategy.tradeable_sessions.add("NEW_YORK")
+                self.strategy.tradeable_sessions.add("LONDON/NY")
+            elif isinstance(self.strategy.tradeable_sessions, list):
+                if "TOKYO" not in self.strategy.tradeable_sessions:
+                    self.strategy.tradeable_sessions.append("TOKYO")
+                if "LONDON" not in self.strategy.tradeable_sessions:
+                    self.strategy.tradeable_sessions.append("LONDON")
+                if "NEW_YORK" not in self.strategy.tradeable_sessions:
+                    self.strategy.tradeable_sessions.append("NEW_YORK")
+                if "LONDON/NY" not in self.strategy.tradeable_sessions:
+                    self.strategy.tradeable_sessions.append("LONDON/NY")
+                
+            engine = BacktestEngine(self.config, self.strategy)
+            
+            # Use dedicated AIFilter (with backtest mode) instead of live AIAdvisor
+            bt_ai_filter = AIFilter(self.config)
+            bt_ai_filter.backtest_mode = True
+            engine.ai_filter = bt_ai_filter
+            
+            return engine.run(symbol, h4, h1, m30, m5, d1)
+        finally:
+            self.connection.disconnect()
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--backtest", action="store_true")
+    parser.add_argument("--symbol", type=str, default="XAUUSDm")
+    parser.add_argument("--from", dest="start_date", type=str, help="YYYY-MM-DD", default=None)
+    parser.add_argument("--to", dest="end_date", type=str, help="YYYY-MM-DD", default=None)
+    parser.add_argument("--count", type=int, default=10000)
+    args = parser.parse_args()
+
     bot = TradingBot()
-    if "--backtest" in sys.argv: bot.run_backtest()
-    else: bot.run_live()
+    if args.backtest:
+        bot.run_backtest(args.symbol, args.start_date, args.end_date, args.count)
+    else:
+        bot.run_live()

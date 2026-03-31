@@ -104,16 +104,16 @@ class BacktestEngine:
         vol_ratio = max(0.5, min(5.0, current_atr / avg_atr)) if avg_atr > 0 else 1.0
         return base_slip * vol_ratio * random.uniform(0.5, 1.5) * point
 
-    def _calc_lot_size(self, balance: float, entry: float, sl: float, point: float, contract_size: float, risk_pct: Optional[float] = None) -> float:
+    def _calc_lot_size(self, symbol: str, balance: float, entry: float, sl: float, point: float, contract_size: float, risk_pct: Optional[float] = None) -> float:
         if risk_pct is None:
             risk_pct = self.config.get("risk", {}).get("risk_per_trade", 1.0)
         risk_amount = balance * (risk_pct / 100.0)
         risk_dist_price = abs(entry - sl)
         
-        # Use unified LotCalculator
-        # In backtest mode, tick_size = point, and tick_value = contract_size * point
-        tick_size = point
-        tick_value = contract_size * point # Dollar value of 1 lot moving 1 point
+        # Unify Backtest Lot Sizing
+        symbol_cfg = self.config.get("symbols_config", {}).get(symbol, {})
+        tick_size = symbol_cfg.get("tick_size", point)
+        tick_value = symbol_cfg.get("tick_value", contract_size * point)
         
         lot = LotCalculator.calculate(
             risk_amount=risk_amount,
@@ -191,6 +191,10 @@ class BacktestEngine:
         h1_times = [datetime.fromtimestamp(c['time'], tz=timezone.utc) for c in h1_candles]
         m30_times = [datetime.fromtimestamp(c['time'], tz=timezone.utc) for c in m30_candles]
         m5_times = [datetime.fromtimestamp(c['time'], tz=timezone.utc) for c in m5_candles]
+        
+        # Define m5_avg_atr (SMA 100 of ATR) for volatility-scaled spreads
+        m5_avg_atr = pd.Series(m5_atr_series).rolling(window=100, min_periods=1).mean().values
+        
         logger.debug("All times extracted.")
         
         # --- Optimization: Convert ticks to structured Numpy array ---
@@ -216,6 +220,24 @@ class BacktestEngine:
             for i in pbar:
                 current_candle = m5_candles[i]
                 candle_time = m5_times[i]
+                
+                # --- High-Performance Signal Inputs ---
+                bid = current_candle['close']
+                current_session = self.strategy.get_session_from_hour(candle_time.hour, utc_offset)
+                
+                # Fetch slices for strategy (O(logN) with searchsorted)
+                h4_idx = np.searchsorted(h4_times, candle_time, side='right') - 1
+                h1_idx = np.searchsorted(h1_times, candle_time, side='right') - 1
+                m30_idx = np.searchsorted(m30_times, candle_time, side='right') - 1
+                
+                h4_slice = h4_candles[:max(0, h4_idx + 1)]
+                h1_slice = h1_candles[:max(0, h1_idx + 1)]
+                m30_slice = m30_candles[:max(0, m30_idx + 1)]
+                m5_slice = m5_candles[:i + 1]
+                
+                # --- High-Performance Core Metrics ---
+                current_atr = m5_atr_series[i-1]
+                avg_atr_here = m5_avg_atr[i-1]
                 
                 # --- Gap Risk: Weekend/Holiday Detection ---
                 if open_trade and i > 200:
@@ -268,7 +290,7 @@ class BacktestEngine:
                     open_trade = self._handle_entry(
                         symbol, ps["signal"], current_candle, candle_time,
                         point, contract_size, ps["session"], ps["regime"],
-                        ps["ai_score"], m5_avg_atr[i-1], m5_atr_series[i-1]
+                        ps["ai_score"], avg_atr_here, current_atr
                     )
                     self.notification_manager.notify_trade_open(symbol, open_trade.signal.direction, open_trade.entry_price, open_trade.lot, open_trade.sl, open_trade.tp)
 
@@ -281,8 +303,6 @@ class BacktestEngine:
                         open_trade.total_commission_paid += comm_entry
                     
                     # Fix Look-ahead Bias: use ATR from [i-1] for decisions at start of candle i
-                    current_atr = m5_atr_series[i-1]
-                    avg_atr_here = m5_avg_atr[i-1]
                     spread_val = self._get_spread(symbol, current_atr, avg_atr_here, point, open_trade.session) * point
                     
                     bid_h, bid_l, bid_c = current_candle['high'], current_candle['low'], current_candle['close']
@@ -553,7 +573,13 @@ class BacktestEngine:
                             "regime": regime_str,
                             "timestamp": candle_time
                         }
-                        ai_decision, ai_score, ai_sl_buffer = self.ai_filter.filter_signal(ai_features)
+                        # Handle AI Decision (Fallback if filter not set)
+                        ai_decision = True
+                        ai_score = 0.5
+                        ai_sl_buffer = 0.0
+                        
+                        if self.ai_filter and hasattr(self.ai_filter, 'filter_signal'):
+                            ai_decision, ai_score, ai_sl_buffer = self.ai_filter.filter_signal(ai_features)
                         
                         if ai_decision:
                             # Apply AI SL Buffer at signal time
@@ -663,7 +689,7 @@ class BacktestEngine:
             entry = ref_price - slippage
             
         risk_pct = self.risk_manager.calculate_scaled_risk(self.balance, session=session)
-        lot = self._calc_lot_size(self.balance, entry, signal.stop_loss, point, contract_size, risk_pct)
+        lot = self._calc_lot_size(symbol, self.balance, entry, signal.stop_loss, point, contract_size, risk_pct)
         
         if signal.rejection_type == "VOL_SCALING":
             lot = max(0.01, round(lot * 0.5, 2))

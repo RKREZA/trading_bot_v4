@@ -38,19 +38,31 @@ class ValidationSuite:
         return self._generate_report(results)
 
     def _spread_sensitivity_test(self, symbol, h4, h1, m30, m5, d1):
-        cfg = copy.deepcopy(self.config)
-        # Fix: Target the correct spread key in backtester config
-        current_spread = cfg.get("backtest", {}).get("spread_pips", {}).get(symbol, 25)
-        cfg.setdefault("backtest", {}).setdefault("spread_pips", {})[symbol] = current_spread * 2.0
-        tester = BacktestEngine(cfg, self.strategy)
+        stress_config = copy.deepcopy(self.config)
+        
+        if "backtest" not in stress_config:
+            stress_config["backtest"] = {}
+        if "spread_pips" not in stress_config["backtest"]:
+            stress_config["backtest"]["spread_pips"] = {}
+
+        current_spread = stress_config["backtest"]["spread_pips"].get(symbol, 25)
+        stress_config["backtest"]["spread_pips"][symbol] = current_spread * 2.0
+        
+        tester = BacktestEngine(stress_config, self.strategy)
         return tester.run(symbol, h4, h1, m30, m5, d1, quiet=True)
 
     def _slippage_stress_test(self, symbol, h4, h1, m30, m5, d1):
-        cfg = copy.deepcopy(self.config)
-        # Fix: Target the correct slippage key in backtester config
-        current_slip = cfg.get("backtest", {}).get("slippage_points", {}).get(symbol, 2.0)
-        cfg.setdefault("backtest", {}).setdefault("slippage_points", {})[symbol] = current_slip * 5.0
-        tester = BacktestEngine(cfg, self.strategy)
+        stress_config = copy.deepcopy(self.config)
+        
+        if "backtest" not in stress_config:
+            stress_config["backtest"] = {}
+        if "slippage_points" not in stress_config["backtest"]:
+            stress_config["backtest"]["slippage_points"] = {}
+            
+        current_slip = stress_config["backtest"]["slippage_points"].get(symbol, 2.0)
+        stress_config["backtest"]["slippage_points"][symbol] = current_slip * 5.0
+        
+        tester = BacktestEngine(stress_config, self.strategy)
         return tester.run(symbol, h4, h1, m30, m5, d1, quiet=True)
 
     def _random_entry_test(self, symbol, h4, h1, m30, m5, d1):

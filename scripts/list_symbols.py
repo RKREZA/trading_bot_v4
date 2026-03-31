@@ -44,7 +44,7 @@ print("RECOMMENDED SYMBOLS FOR BACKTEST")
 print("=" * 50)
 print("\nUse these exact names:")
 for s in found:
-    if 'm' in s['name'] or any(x == s['name'] for x in ['XAUUSD', 'BTCUSD']):
+    if 'm' in s['name'] or any(x == s['name'] for x in ['XAUUSDm', 'BTCUSDm']):
         print(f"  - {s['name']}")
 
 mt5.shutdown()

@@ -23,19 +23,19 @@ class MarketRegime:
                         np.maximum(np.abs(highs[1:] - closes[:-1]),
                                    np.abs(lows[1:] - closes[:-1])))
         atr = np.mean(tr[-14:])
-        atr_pct = (atr / closes[-1]) * 100  # ATR as percentage of price
+        atr_pct = (atr / closes[-1]) * 100
 
         # Relative Volatility: Use 75th percentile of recent ATR% as baseline
         atr_series = (tr / closes[1:]) * 100
         atr_baseline = np.percentile(atr_series, 75)
 
-        if atr_pct > atr_baseline * 2.0:
+        if atr_pct > atr_baseline:
             return MarketRegime.HIGH_VOLATILITY
 
-        # 2. Low Liquidity: Volume collapse (relative to average)
+        # 2. Low Liquidity: Compare recent volume (last 5 bars) to average volume (last 50 bars)
         avg_vol = np.mean(volumes)
         recent_vol = np.mean(volumes[-5:])
-        if avg_vol > 0 and recent_vol < avg_vol * 0.15:
+        if avg_vol > 0 and recent_vol < avg_vol * 0.5:
             return MarketRegime.LOW_LIQUIDITY
 
         # 3. Trend: Kaufman's Efficiency Ratio (ER)
@@ -44,7 +44,7 @@ class MarketRegime:
         sum_abs_changes = np.sum(np.abs(np.diff(closes)))
         efficiency_ratio = net_change / sum_abs_changes if sum_abs_changes > 0 else 0
 
-        # ER > 0.3 is generally considered a strong trend
+        # If ER > 0.3, it is trending
         if efficiency_ratio > 0.3:
             return MarketRegime.TRENDING
 
