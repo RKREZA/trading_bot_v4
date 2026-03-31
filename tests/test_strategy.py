@@ -62,9 +62,9 @@ def config():
             "sl_atr_buffer": 0.8
         },
         "session_config": {
-            "LONDON": {"enabled": true},
-            "NEW_YORK": {"enabled": true},
-            "TOKYO": {"enabled": true}
+            "LONDON": {"enabled": True},
+            "NEW_YORK": {"enabled": True},
+            "TOKYO": {"enabled": True}
         },
         "ai_advisor": {"bias": 0.0}
     }

@@ -36,6 +36,9 @@ from core.ai_advisor import AIAdvisor
 from core.risk_manager import RiskManager
 from core.notifications import NotificationManager
 from core.regime import MarketRegime
+from core.state_manager import SecureStateManager
+from core.execution_pipeline import ExecutionPipeline
+from core.trailing_stop import TrailingStopManager
 from dashboard import Dashboard, AnalysisLogger
 
 # Load .env file if it exists
@@ -76,6 +79,23 @@ class TradingBot:
         self.state_file = "bot_state.json"
         self.state_lock = threading.Lock()
         self.execution_queue = queue.Queue()
+        self._shutdown_event = threading.Event()
+        
+        self.execution_pipeline = ExecutionPipeline(
+            config=self.config,
+            connection=self.connection,
+            position_manager=self.position_manager,
+            strategy=self.strategy,
+            ai_advisor=self.ai_advisor,
+            risk_manager=self.risk_manager,
+            notification_manager=self.notification_manager
+        )
+        self.trailing_stop_manager = TrailingStopManager(
+            config=self.config,
+            connection=self.connection,
+            position_meta=self.position_meta,
+            state_lock=self.state_lock
+        )
         
         self._load_state()
 
@@ -100,29 +120,23 @@ class TradingBot:
                 },
                 "max_drawdown": self.max_drawdown_reached
             }
-        try:
-            with open(self.state_file, "w") as f:
-                json.dump(state, f)
-        except Exception as e:
-            logger.error("Failed to save state: %s", e)
+        self.state_manager.save(state, self.state_file)
 
     def _load_state(self):
-        if not os.path.exists(self.state_file): return
-        try:
-            with open(self.state_file, "r") as f:
-                state = json.load(f)
-                with self.state_lock:
-                    self.position_meta = {int(k): v for k, v in state.get("position_meta", {}).items()}
-                    self.notified_deals = set(state.get("notified_deals", []))
-                    stats = state.get("daily_stats", {})
-                    self.daily_pnl = stats.get("pnl", 0.0)
-                    self.daily_trades = stats.get("trades", 0)
-                    self.win_count = stats.get("win_count", 0)
-                    self.loss_count = stats.get("loss_count", 0)
-                    self.last_reset_day = date.fromisoformat(stats.get("last_reset", date.today().isoformat()))
-                    self.max_drawdown_reached = state.get("max_drawdown", 0.0)
-        except Exception as e:
-            logger.error("Failed to load state: %s", e)
+        state = self.state_manager.load(self.state_file)
+        if not state:
+            return
+            
+        with self.state_lock:
+            self.position_meta = {int(k): v for k, v in state.get("position_meta", {}).items()}
+            self.notified_deals = set(state.get("notified_deals", []))
+            stats = state.get("daily_stats", {})
+            self.daily_pnl = stats.get("pnl", 0.0)
+            self.daily_trades = stats.get("trades", 0)
+            self.win_count = stats.get("win_count", 0)
+            self.loss_count = stats.get("loss_count", 0)
+            self.last_reset_day = date.fromisoformat(stats.get("last_reset", date.today().isoformat()))
+            self.max_drawdown_reached = state.get("max_drawdown", 0.0)
 
     def _reconcile_positions(self) -> None:
         if mt5 is None: return
@@ -165,22 +179,8 @@ class TradingBot:
                 self.daily_pnl = 0.0; self.daily_trades = 0; self.win_count = 0; self.loss_count = 0; self.last_reset_day = today
             self._save_state()
 
-    def _manage_trailing_stops(self, symbol: str, m30_candles: list) -> None:
-        if mt5 is None: return
-        positions = mt5.positions_get(symbol=symbol)
-        if not positions: return
-        for pos in positions:
-            if pos.magic != int(self.config.get("magic_number", 234000)): continue
-            # Trailing/Partial Profit logic...
-            pass
-
-    def _execute_partial_close(self, ticket, symbol, pos_type, volume, magic, comment):
-        req = {"action": mt5.TRADE_ACTION_DEAL, "symbol": symbol, "volume": volume, "type": mt5.ORDER_TYPE_SELL if pos_type == 0 else mt5.ORDER_TYPE_BUY, "position": ticket, "price": mt5.symbol_info_tick(symbol).bid if pos_type == 0 else mt5.symbol_info_tick(symbol).ask, "deviation": 20, "magic": magic, "comment": comment, "type_time": mt5.ORDER_TIME_GTC, "type_filling": self.connection.get_filling_mode(symbol)}
-        mt5.order_send(req)
-
-    def _modify_sl_tp(self, ticket, symbol, sl, tp):
-        req = {"action": mt5.TRADE_ACTION_SLTP, "symbol": symbol, "position": ticket, "sl": round(float(sl), 2), "tp": round(float(tp), 2)}
-        mt5.order_send(req)
+    def _manage_trailing_stops(self, symbol: str, current_bid: float, current_ask: float) -> None:
+        self.trailing_stop_manager.manage_positions(symbol, current_bid, current_ask)
 
     def _startup_checks(self) -> bool:
         """Run before entering the main loop."""
@@ -206,12 +206,50 @@ class TradingBot:
 
     def run_live(self):
         if not self.connection.connect(): return
-        self._startup_checks()
+        if not self._startup_checks():
+            logger.critical("Startup checks failed. Exiting.")
+            return
+
+        symbol = self.config.get("symbol", "XAUUSDm")
         start_health_server(self, port=8081)
         self.running = True
-        while self.running:
-            self._reset_daily_stats()
-            time.sleep(1)
+        logger.info("Bot starting LIVE EXECUTIONS")
+        
+        try:
+            while not self._shutdown_event.is_set():
+                self._reset_daily_stats()
+                
+                # Update tick prices for trailing
+                tick = mt5.symbol_info_tick(symbol) if mt5 else None
+                if tick:
+                    self._manage_trailing_stops(symbol, tick.bid, tick.ask)
+
+                # Fetch candles securely
+                d1_candles = self.data_fetcher.fetch_candles(symbol, "D1", 100)
+                h4_candles = self.data_fetcher.fetch_candles(symbol, "H4", 100)
+                h1_candles = self.data_fetcher.fetch_candles(symbol, "H1", 100)
+                m30_candles = self.data_fetcher.fetch_candles(symbol, "M30", 100)
+                m5_candles = self.data_fetcher.fetch_candles(symbol, "M5", 100)
+                
+                if len(m30_candles) > 0:
+                    current_price = m30_candles.close[-1]
+                    session = "NEW_YORK" # simplified fallback if TimeManager missing
+                    if hasattr(self.strategy, 'get_session_from_hour'):
+                        session = self.strategy.get_session_from_hour(datetime.now(timezone.utc).hour)
+                        
+                    self.execution_pipeline.execute_cycle(
+                        symbol, m30_candles, h1_candles, h4_candles, m5_candles, d1_candles, current_price, session
+                    )
+                
+                self._shutdown_event.wait(5.0)  # Sleep 5 seconds between signal checks
+        except KeyboardInterrupt:
+            logger.info("Ctrl+C received — shutting down gracefully")
+        finally:
+            self._shutdown_event.set()
+            self.running = False
+            self._save_state()
+            self.connection.disconnect()
+            logger.info("Shutdown complete.")
 
     def run_backtest(self, symbol="XAUUSDm"):
         print(f"Project 10/10 Final Validation: {symbol}")

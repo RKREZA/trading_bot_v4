@@ -3,7 +3,10 @@ import os
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Tuple, Optional
-import openai
+try:
+    import openai
+except ImportError:
+    openai = None
 
 logger = logging.getLogger("trading_bot.ai_filter")
 
