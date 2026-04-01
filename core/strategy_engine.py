@@ -32,6 +32,7 @@ class TradeSignal:
     entry_price: float
     stop_loss: float
     take_profit: float
+    session: str = "GLOBAL" # [PHASE 7] Tracking for session-specific exits
     tp1_price: float = 0.0
     tp2_price: float = 0.0
     tp3_price: float = 0.0
@@ -209,13 +210,13 @@ class StrategyEngine:
             signal = None
             # --- PHASE 11: MODULE DISPATCHER (REGIME-ADAPTIVE) ---
             if session == "TOKYO":
-                signal = self._tokyo_mean_reversion(m30_candles, m5_candles, current_price, m30_ema_val, h1_rsi)
+                signal = self._tokyo_mean_reversion(m30_candles, m5_candles, current_price, m30_ema_val, h1_rsi, session)
             else:
                 # London/NY Momentum Logic
                 if effective_trend == "BULLISH" and current_price > m30_ema_val and 25 < h1_rsi < 95:
-                    signal = self._check_breakout_entry(m30_candles, m5_candles, "BULLISH", current_price)
+                    signal = self._check_breakout_entry(m30_candles, m5_candles, "BULLISH", current_price, session)
                 elif effective_trend == "BEARISH" and current_price < m30_ema_val and 5 < h1_rsi < 75:
-                    signal = self._check_breakout_entry(m30_candles, m5_candles, "BEARISH", current_price)
+                    signal = self._check_breakout_entry(m30_candles, m5_candles, "BEARISH", current_price, session)
             
             if signal:
                 signal.confluence_score, signal.reasons = self._calculate_confluence(
@@ -313,20 +314,20 @@ class StrategyEngine:
         # LIVE TRADING BRANCH
         if session == "TOKYO":
             # Tokyo session logic
-            signal = self._tokyo_mean_reversion(m30_candles, m5_candles, current_price, m30_ema_val, h1_rsi)
+            signal = self._tokyo_mean_reversion(m30_candles, m5_candles, current_price, m30_ema_val, h1_rsi, session)
         else:
             # London/NY Momentum Logic
             # [NEW] Phase 11 RSI Momentum filter specifically for New York to avoid churn
             if session == "NEW_YORK":
                 if effective_trend == "BULLISH" and h1_rsi > 40:
-                    signal = self._check_breakout_entry(m30_candles, m5_candles, "BULLISH", current_price)
+                    signal = self._check_breakout_entry(m30_candles, m5_candles, "BULLISH", current_price, session)
                 elif effective_trend == "BEARISH" and h1_rsi < 60:
-                    signal = self._check_breakout_entry(m30_candles, m5_candles, "BEARISH", current_price)
+                    signal = self._check_breakout_entry(m30_candles, m5_candles, "BEARISH", current_price, session)
             else:
                 if effective_trend == "BULLISH" and current_price > m30_ema_val and 25 < h1_rsi < 95:
-                    signal = self._check_breakout_entry(m30_candles, m5_candles, "BULLISH", current_price)
+                    signal = self._check_breakout_entry(m30_candles, m5_candles, "BULLISH", current_price, session)
                 elif effective_trend == "BEARISH" and current_price < m30_ema_val and 5 < h1_rsi < 75:
-                    signal = self._check_breakout_entry(m30_candles, m5_candles, "BEARISH", current_price)
+                    signal = self._check_breakout_entry(m30_candles, m5_candles, "BEARISH", current_price, session)
 
         if signal:
             confluence, reasons = self._calculate_confluence(h4_trend, h4_strength, regime, signal, 
@@ -337,7 +338,11 @@ class StrategyEngine:
             ai_bias = self.config.get("ai_advisor", {}).get("bias", 0.0)
             signal = self._set_sl_tp(signal, m30_atr, m30_candles, h4_strength, session, confluence, ai_bias)
             
-            if signal.confluence_score < self.min_confluence_score:
+            # [PHASE 7] Session-aware Confluence Check
+            session_conf = self.config.get("session_config", {}).get(session, {})
+            min_conf = session_conf.get("min_confluence_score", self.min_confluence_score)
+            
+            if signal.confluence_score < min_conf:
                 return None, h4_trend, str(regime)
 
             signal.confidence = self._calculate_confidence(confluence, h4_strength, signal)
@@ -370,7 +375,7 @@ class StrategyEngine:
 
         return True, "OK"
 
-    def _tokyo_mean_reversion(self, m30_candles: 'CandleArray', m5_candles: 'CandleArray', current_price: float, m30_ema: float, h1_rsi: float) -> Optional[TradeSignal]:
+    def _tokyo_mean_reversion(self, m30_candles: 'CandleArray', m5_candles: 'CandleArray', current_price: float, m30_ema: float, h1_rsi: float, session: str) -> Optional[TradeSignal]:
         """
         Specialized Module for Tokyo Liquidity Cycles.
         Focuses on Mean-Reversion during low-volatility hours.
@@ -387,12 +392,12 @@ class StrategyEngine:
         # [RELAXED] RSI from 30/70 to 40/60 for Tokyo quiet hours
         if current_price < lower_band and h1_rsi < 40:
             if m5_candles.close[-1] > m5_candles.open[-1]: # Basic Bullish Confirmation
-                return TradeSignal("BUY", current_price, 0, 0, reasons=["Tokyo Mean-Rev"])
+                return TradeSignal("BUY", current_price, 0, 0, reasons=["Tokyo Mean-Rev"], session=session)
         
         # Sell when overbought and price above upper band returning to EMA
         if current_price > upper_band and h1_rsi > 60:
             if m5_candles.close[-1] < m5_candles.open[-1]: # Basic Bearish Confirmation
-                return TradeSignal("SELL", current_price, 0, 0, reasons=["Tokyo Mean-Rev"])
+                return TradeSignal("SELL", current_price, 0, 0, reasons=["Tokyo Mean-Rev"], session=session)
                 
         return None
 
@@ -417,7 +422,7 @@ class StrategyEngine:
         if score < 45: return "BEARISH", (100 - score)
         return "RANGING", 50
 
-    def _check_breakout_entry(self, m30_candles: 'CandleArray', m5_candles: 'CandleArray', trend: str, current_price: float) -> Optional[TradeSignal]:
+    def _check_breakout_entry(self, m30_candles: 'CandleArray', m5_candles: 'CandleArray', trend: str, current_price: float, session: str) -> Optional[TradeSignal]:
         # 1. Institutional Body Filter (Phase 5)
         # We only trade candles that show "intent" (long bodies, short wicks)
         m30_last_body = abs(m30_candles.close[-1] - m30_candles.open[-1])
@@ -439,11 +444,11 @@ class StrategyEngine:
         if trend == "BULLISH":
             res_m30 = np.max(m30_candles.high[-lookback:-1])
             if current_price > res_m30:
-                return TradeSignal("BUY", current_price, 0, 0, reasons=["M30 Breakout"])
+                return TradeSignal("BUY", current_price, 0, 0, reasons=["M30 Breakout"], session=session)
         else:
             sup_m30 = np.min(m30_candles.low[-lookback:-1])
             if current_price < sup_m30:
-                return TradeSignal("SELL", current_price, 0, 0, reasons=["M30 Breakout"])
+                return TradeSignal("SELL", current_price, 0, 0, reasons=["M30 Breakout"], session=session)
                 
         # 4. Lower Timeframe (M5) Breakout (Hyper Frequency)
         m5_lookback = 5 # [FIX]: Increased from 3 to 5 to filter out micro-fakeouts
@@ -453,14 +458,14 @@ class StrategyEngine:
                 m5_closes = m5_candles.close
                 m5_ema = self._calculate_ema(m5_closes, self.ema_fast)
                 if current_price > m5_ema:
-                    return TradeSignal("BUY", current_price, 0, 0, reasons=["M5 Breakout"])
+                    return TradeSignal("BUY", current_price, 0, 0, reasons=["M5 Breakout"], session=session)
         else:
             sup_m5 = np.min(m5_candles.low[-m5_lookback:-1])
             if current_price < sup_m5:
                 m5_closes = m5_candles.close
                 m5_ema = self._calculate_ema(m5_closes, self.ema_fast)
                 if current_price < m5_ema:
-                    return TradeSignal("SELL", current_price, 0, 0, reasons=["M5 Breakout"])
+                    return TradeSignal("SELL", current_price, 0, 0, reasons=["M5 Breakout"], session=session)
 
                 
         return None
@@ -481,7 +486,10 @@ class StrategyEngine:
     def _set_sl_tp(self, signal: TradeSignal, atr: float, m30_candles: 'CandleArray', 
                    h4_strength: int, session: str, confluence_score: int, ai_bias: float = 0.0) -> TradeSignal:
         
-        # 1. Base RR from Trend Strength
+        # [PHASE 7] Session-aware Override Check
+        session_conf = self.config.get("session_config", {}).get(session, {})
+        
+        # 1. Base RR from Trend Strength (Heuristic Baseline)
         if h4_strength > 70:
             rr = 3.0
         elif h4_strength > 55:
@@ -499,11 +507,14 @@ class StrategyEngine:
         elif vol_factor < 0.8:
             rr *= 0.8 
 
-        # 3. Session Adjustment
-        if session == "LONDON/NY":
-            rr += 0.5 
-        elif session == "TOKYO":
-            rr -= 0.3 
+        # 3. Session Adjustment (Heuristic or Override)
+        if "rr_ratio" in session_conf:
+            rr = session_conf["rr_ratio"]
+        else:
+            if session == "LONDON/NY":
+                rr += 0.5 
+            elif session == "TOKYO":
+                rr -= 0.3 
             
         # 4. AI Bias Adjustment
         rr += ai_bias
@@ -512,8 +523,11 @@ class StrategyEngine:
         if confluence_score >= 6:
             rr += 0.3
             
-        rr = max(1.5, min(rr, 5.0))
-        buffer = self.sl_atr_buffer * atr
+        # 6. Final Clamp and Buffer Lookup
+        rr = max(1.5, min(rr, 6.0))
+        
+        sl_buffer_mult = session_conf.get("sl_atr_buffer", self.sl_atr_buffer)
+        buffer = sl_buffer_mult * atr
         
         if signal.direction == "BUY":
             signal.stop_loss = np.min(m30_candles.low[-3:]) - buffer

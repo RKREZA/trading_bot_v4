@@ -410,41 +410,45 @@ class BacktestEngine:
                             # Save SL before MFE/trail updates for intra-candle bias check
                             sl_before_trail = open_trade.sl
                         
-                            # MFE Tracking
+                            # [PHASE 7] MFE Tracking & Session-aware Trailing
+                            session_conf = self.config.get("session_config", {}).get(open_trade.session, {})
+                            
                             if open_trade.signal.direction == "BUY":
-                                if bid_h > open_trade.best_price:
+                                if bid_h > open_trade.best_price: 
                                     open_trade.best_price = bid_h
                             else:
-                                if ask_l < open_trade.best_price:
+                                if ask_l < open_trade.best_price: 
                                     open_trade.best_price = ask_l
-    
-                                    # 1. Base Trail: [Institutional Chandelier] 3.5x multiplier
-                                    # Modified from config default to match production hardening
-                                    chandelier_multiplier = 3.5
-                                    chandelier_dist = current_atr * chandelier_multiplier
                                     
-                                    if open_trade.signal.direction == "BUY":
-                                        new_sl = open_trade.best_price - chandelier_dist
-                                    else:
-                                        new_sl = open_trade.best_price + chandelier_dist
-                                    
-                                    # One-Way Ratchet
-                                    if open_trade.signal.direction == "BUY":
-                                        if new_sl > open_trade.sl: open_trade.sl = new_sl
-                                    else:
-                                        if open_trade.sl == 0 or new_sl < open_trade.sl: open_trade.sl = new_sl
+                            # 1. Base Trail: [Institutional Chandelier] Adaptive Multiplier
+                            chandelier_multiplier = session_conf.get("trailing_atr_mult", 3.5)
+                            chandelier_dist = current_atr * chandelier_multiplier
+                            
+                            if open_trade.signal.direction == "BUY":
+                                new_sl = open_trade.best_price - chandelier_dist
+                            else:
+                                new_sl = open_trade.best_price + chandelier_dist
+                            
+                            # One-Way Ratchet
+                            if open_trade.signal.direction == "BUY":
+                                if new_sl > open_trade.sl: open_trade.sl = new_sl
+                            else:
+                                if open_trade.sl == 0 or (new_sl < open_trade.sl and new_sl > 0): 
+                                    open_trade.sl = new_sl
 
-                                    # 2. Break-Even Trigger (0.8R reached)
-                                    risk = abs(open_trade.entry_price - open_trade.signal.stop_loss)
-                                    excursion = (open_trade.best_price - open_trade.entry_price) if open_trade.signal.direction == "BUY" else (open_trade.entry_price - open_trade.best_price)
-                                    rr_reached = (excursion / risk) if risk > 0 else 0
-                                    
-                                    if rr_reached >= 0.8:
-                                        be_sl = open_trade.entry_price + (risk * 0.05) if open_trade.signal.direction == "BUY" else open_trade.entry_price - (risk * 0.05)
-                                        if open_trade.signal.direction == "BUY":
-                                            if be_sl > open_trade.sl: open_trade.sl = be_sl
-                                        else:
-                                            if open_trade.sl == 0 or be_sl < open_trade.sl: open_trade.sl = be_sl
+                            # 2. Break-Even Trigger (Adaptive per session)
+                            # Primary shield against 'Too many SL'
+                            risk = abs(open_trade.entry_price - open_trade.signal.stop_loss)
+                            excursion = (open_trade.best_price - open_trade.entry_price) if open_trade.signal.direction == "BUY" else (open_trade.entry_price - open_trade.best_price)
+                            rr_reached = (excursion / risk) if risk > 0 else 0
+                            
+                            be_activation = session_conf.get("activation_rr", 2.0)
+                            if rr_reached >= be_activation:
+                                be_sl = open_trade.entry_price + (risk * 0.1) if open_trade.signal.direction == "BUY" else open_trade.entry_price - (risk * 0.1)
+                                if open_trade.signal.direction == "BUY":
+                                    if be_sl > open_trade.sl: open_trade.sl = be_sl
+                                else:
+                                    if open_trade.sl == 0 or be_sl < open_trade.sl: open_trade.sl = be_sl
                                 
 
                             

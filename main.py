@@ -97,7 +97,9 @@ class TradingBot:
             strategy=self.strategy,
             ai_advisor=self.ai_advisor,
             risk_manager=self.risk_manager,
-            notification_manager=self.notification_manager
+            notification_manager=self.notification_manager,
+            position_meta=self.position_meta,
+            state_lock=self.state_lock
         )
         self.trailing_stop_manager = TrailingStopManager(
             config=self.config,

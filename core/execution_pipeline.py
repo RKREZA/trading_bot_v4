@@ -1,4 +1,5 @@
 import logging
+import threading
 from typing import Dict, Any, Optional
 from core.strategy_engine import StrategyEngine, TradeSignal
 from core.ai_advisor import AIAdvisor
@@ -24,7 +25,9 @@ class ExecutionPipeline:
                  strategy: StrategyEngine, 
                  ai_advisor: AIAdvisor, 
                  risk_manager: RiskManager,
-                 notification_manager: NotificationManager):
+                 notification_manager: NotificationManager,
+                 position_meta: Dict[int, Any],
+                 state_lock: threading.Lock):
         self.config = config
         self.connection = connection
         self.position_manager = position_manager
@@ -32,6 +35,8 @@ class ExecutionPipeline:
         self.ai_advisor = ai_advisor
         self.risk_manager = risk_manager
         self.notification_manager = notification_manager
+        self.position_meta = position_meta
+        self.state_lock = state_lock
         self.spread_history = []
         
     def execute_cycle(self, symbol: str, m30: "CandleArray", h1: "CandleArray", h4: "CandleArray", m5: "CandleArray", d1: "CandleArray", current_price: float, session: str) -> bool:
@@ -170,6 +175,15 @@ class ExecutionPipeline:
         logger.info(f"Execution Latency: {latency_ms:.2f}ms")
         
         if ticket:
+            with self.state_lock:
+                self.position_meta[ticket] = {
+                    "ticket": ticket,
+                    "session": session,
+                    "best_price": current_price,
+                    "partial_closed_count": 0,
+                    "entry_time": time.time()
+                }
+                
             self.notification_manager.notify_trade_open(
                 symbol=symbol, direction=signal.direction, entry=current_price, 
                 lot=lot, sl=signal.stop_loss, tp=signal.take_profit
