@@ -1,0 +1,62 @@
+{
+    "symbol": "XAUUSDm",
+    "magic_number": 234000,
+    "risk": {
+        "risk_per_trade": 1.5,
+        "max_daily_trades": 3,
+        "max_daily_loss_percent": 5.0,
+        "max_drawdown_halt_pct": 25.0,
+        "drawdown_scaling": true,
+        "max_consecutive_losses": 3,
+        "max_hourly_trades": 1
+    },
+    "strategy_defaults": {
+        "min_confluence_score": 5,
+        "min_confidence": 56,
+        "cooldown_candles": 36,
+        "min_sl_points": 200,
+        "sl_atr_buffer": 1.0,
+        "rr_ratio": 3.0,
+        "atr_period": 12,
+        "pullback_distance_pct": 0.2
+    },
+    "trailing_stop": {
+        "enabled": true,
+        "mfe_trail_base": 0.4,
+        "activation_rr": 1.0
+    },
+    "session_config": {
+        "LONDON": {
+            "enabled": true,
+            "risk_multiplier": 1.0
+        },
+        "NEW_YORK": {
+            "enabled": true,
+            "risk_multiplier": 1.0
+        },
+        "TOKYO": {
+            "enabled": true,
+            "risk_multiplier": 1.0
+        },
+        "LONDON/NY": {
+            "enabled": true,
+            "risk_multiplier": 1.0
+        }
+    },
+    "symbols_config": {
+        "XAUUSDm": {
+            "point": 0.01,
+            "tick_size": 0.01,
+            "tick_value": 1.0,
+            "volume_min": 0.01,
+            "volume_step": 0.01,
+            "volume_max": 20.0
+        }
+    },
+    "backtest": {
+        "initial_balance": 1000,
+        "spread_pips": {
+            "XAUUSDm": 40
+        }
+    }
+}

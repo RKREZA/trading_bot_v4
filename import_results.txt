@@ -1,9 +1,0 @@
-﻿connection OK
-data_fetcher OK
-lot_calculator OK
-strategy_engine OK
-backtester OK
-ai_advisor OK
-risk_manager OK
-dashboard OK
---- Import test complete ---
