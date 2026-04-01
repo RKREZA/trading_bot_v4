@@ -4,6 +4,7 @@ import logging
 from typing import List, Dict, Tuple
 from core.backtester import BacktestEngine
 from core.strategy_engine import StrategyEngine
+from core.types import CandleArray
 from datetime import datetime, timezone
 import pandas as pd
 
@@ -16,17 +17,18 @@ class WalkForwardValidation:
         self.last_train_perf = {}
 
     def run_validation(self, symbol: str, h4: List[dict], h1: List[dict], m30: List[dict], m5: List[dict], d1: List[dict], 
-                       train_days: int = 90, test_days: int = 30) -> List[Dict]:
+                       train_days: int = 90, test_days: int = 30, mode: str = "anchored") -> List[Dict]:
         """
-        Implementation of rolling window walk-forward validation (3m IS / 1m OOS).
+        Institutional-grade Walk-Forward Optimization (WFO).
+        - Anchored: Training start stays at the beginning.
+        - Rolling: Training window slides with the test window.
         """
         results = []
-        
-        # Use M30 as the anchor for window slicing
         start_date = datetime.fromtimestamp(m30[0]['time'], tz=timezone.utc)
         end_date = datetime.fromtimestamp(m30[-1]['time'], tz=timezone.utc)
         
         current_train_start = start_date
+        param_popularity = {} # Track which params win most windows
         
         while True:
             current_train_end = current_train_start + pd.DateOffset(days=train_days)
@@ -35,35 +37,35 @@ class WalkForwardValidation:
             if current_test_end > end_date:
                 break
                 
-            logger.info(f"WFV Window: Train {current_train_start.date()} -> {current_train_end.date()} | Test {current_train_end.date()} -> {current_test_end.date()}")
+            logger.info(f"--- WFO WINDOW: Train {current_train_start.date()} -> {current_train_end.date()} | Test {current_train_end.date()} -> {current_test_end.date()} ---")
             
-            # Slice all timeframes
             train_data = {
-                "h4": self._filter_by_time(h4, current_train_start, current_train_end),
-                "h1": self._filter_by_time(h1, current_train_start, current_train_end),
-                "m30": self._filter_by_time(m30, current_train_start, current_train_end),
-                "m5": self._filter_by_time(m5, current_train_start, current_train_end),
-                "d1": self._filter_by_time(d1, current_train_start, current_train_end)
+                "h4": CandleArray.from_dicts(self._filter_by_time(h4, current_train_start, current_train_end)),
+                "h1": CandleArray.from_dicts(self._filter_by_time(h1, current_train_start, current_train_end)),
+                "m30": CandleArray.from_dicts(self._filter_by_time(m30, current_train_start, current_train_end)),
+                "m5": CandleArray.from_dicts(self._filter_by_time(m5, current_train_start, current_train_end)),
+                "d1": CandleArray.from_dicts(self._filter_by_time(d1, current_train_start, current_train_end))
             }
             
             test_data = {
-                "h4": self._filter_by_time(h4, current_train_end, current_test_end),
-                "h1": self._filter_by_time(h1, current_train_end, current_test_end),
-                "m30": self._filter_by_time(m30, current_train_end, current_test_end),
-                "m5": self._filter_by_time(m5, current_train_end, current_test_end),
-                "d1": self._filter_by_time(d1, current_train_end, current_test_end)
+                "h4": CandleArray.from_dicts(self._filter_by_time(h4, current_train_end, current_test_end)),
+                "h1": CandleArray.from_dicts(self._filter_by_time(h1, current_train_end, current_test_end)),
+                "m30": CandleArray.from_dicts(self._filter_by_time(m30, current_train_end, current_test_end)),
+                "m5": CandleArray.from_dicts(self._filter_by_time(m5, current_train_end, current_test_end)),
+                "d1": CandleArray.from_dicts(self._filter_by_time(d1, current_train_end, current_test_end))
             }
 
-            if not train_data["m30"] or not test_data["m30"]:
-                current_train_start += pd.DateOffset(days=test_days)
+            if not train_data["m5"] or not test_data["m5"]:
+                if mode == "rolling": current_train_start += pd.DateOffset(days=test_days)
+                else: current_train_start = start_date # Should not change in anchored
                 continue
 
-            # 1. OPTIMIZATION (IS) - Use Optuna or Grid
-            # For simplicity in this first update, we use a small grid
+            # 1. OPTIMIZATION (IS) - Grid Search with Stability Emphasis
             param_grid = {
-                "min_confluence_score": [4, 5],
-                "min_confidence": [65, 75],
-                "sl_atr_buffer": [0.4, 0.6],
+                "min_confluence_score": [3, 4, 5],
+                "min_confidence": [60, 70, 80],
+                "sl_atr_buffer": [0.6, 0.8, 1.0],
+                "swing_lookback": [3, 5, 8]
             }
             
             best_params = self._optimize(symbol, train_data, param_grid)
@@ -74,42 +76,52 @@ class WalkForwardValidation:
             
             test_strategy = StrategyEngine(test_config)
             tester = BacktestEngine(test_config, test_strategy)
+            test_perf = tester.run(symbol, test_data["h4"], test_data["h1"], 
+                                   test_data["m30"], test_data["m5"], test_data["d1"], quiet=True)
             
-            test_perf = tester.run(symbol, 
-                                   test_data["h4"], test_data["h1"], 
-                                   test_data["m30"], test_data["m5"], 
-                                   test_data["d1"], quiet=True)
-            
-            # Check for Overfitting (Decay Ratio)
+            # 3. SCORE & RECORD
             is_sharpe = self.last_train_perf.get("sharpe_ratio", 0)
             oos_sharpe = test_perf.get("sharpe_ratio", 0)
-            decay_ratio = oos_sharpe / is_sharpe if is_sharpe > 0 else 0
+            consistency = max(0.0, min(1.0, oos_sharpe / is_sharpe)) if is_sharpe > 0 else 0
             
-            if decay_ratio < 0.5:
-                logger.warning(f"HIGH OVERFIT RISK: Window {current_train_end.date()} OOS decay ratio: {decay_ratio:.2f}")
+            # Param Popularity (Winner selection)
+            p_key = str(best_params)
+            param_popularity[p_key] = param_popularity.get(p_key, 0) + (1 * consistency)
 
-            # 3. RECORD RESULTS
-            record = {
+            results.append({
                 "window": f"{current_train_end.date()} to {current_test_end.date()}",
                 "best_params": best_params,
                 "is_metrics": self.last_train_perf,
                 "oos_metrics": test_perf,
-                "decay_ratio": round(float(decay_ratio), 4)
-            }
-            results.append(record)
+                "consistency": round(float(consistency), 4)
+            })
             
-            current_train_start += pd.DateOffset(days=test_days) # Slide by test window
-            
-        # Save to file
-        import json
-        def datetime_handler(x):
-            if isinstance(x, datetime):
-                return x.isoformat()
-            raise TypeError("Unknown type")
+            if mode == "rolling":
+                current_train_start += pd.DateOffset(days=test_days)
+            else:
+                # Anchored: Train end moves forward, Train start stays fixed
+                # In our loop, we just need to increment the days for the next iteration's end calculation
+                train_days += test_days 
 
+        # 4. EXPORT OPTIMIZED CONFIG
+        if param_popularity:
+            best_stable_params_str = max(param_popularity, key=param_popularity.get)
+            import ast
+            best_stable_params = ast.literal_eval(best_stable_params_str)
+            
+            final_config = copy.deepcopy(self.config)
+            final_config["strategy_defaults"].update(best_stable_params)
+            
+            with open("config_optimized.json", "w") as f:
+                import json
+                json.dump(final_config, f, indent=4)
+            logger.info("PHASE 11: Optimized parameters saved to config_optimized.json")
+
+        # Save WF Robustness Log
         with open("wf_robustness.json", "w") as f:
-            json.dump(results, f, indent=4, default=datetime_handler)
-        logger.info(f"Walk-forward results saved to wf_robustness.json")
+            import json
+            def dt_h(x): return x.isoformat() if isinstance(x, datetime) else str(x)
+            json.dump(results, f, indent=4, default=dt_h)
             
         return results
 
@@ -134,8 +146,14 @@ class WalkForwardValidation:
             tester = BacktestEngine(tmp_config, strat)
             perf = tester.run(symbol, data["h4"], data["h1"], data["m30"], data["m5"], data["d1"], quiet=True)
             
-            # Score: Sharpe * Profit Factor (basic but effective for IS)
-            score = (perf.get("sharpe_ratio", 0) * perf.get("profit_factor", 0))
+            # Fitness: Sharpe * Profit Factor / |MaxDrawdown|
+            # Penalize high drawdown heavily
+            sharpe = perf.get("sharpe_ratio", 0)
+            pf = perf.get("profit_factor", 0)
+            mdd = perf.get("max_drawdown", 100)
+            
+            score = (sharpe * pf) / (mdd + 0.1)
+            
             if score > best_metric:
                 best_metric = score
                 best_params = params

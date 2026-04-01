@@ -17,6 +17,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timezone, date, timedelta
 from typing import Optional, List, Tuple
+from core.walk_forward import WalkForwardValidation
 from core.health import start_health_server
 from core.types import BotConfig
 
@@ -108,11 +109,19 @@ class TradingBot:
         self._load_state()
 
     def _load_config(self, config_path: str) -> dict:
-        try:
-            with open(config_path, "r") as f:
-                return json.load(f)
-        except Exception:
-            return {"symbol": "XAUUSDm", "magic_number": 234000}
+        # Priority: config_optimized.json > passed config_path > default
+        paths_to_check = ["config_optimized.json", config_path]
+        for path in paths_to_check:
+            if os.path.exists(path):
+                try:
+                    with open(path, "r") as f:
+                        cfg = json.load(f)
+                        logger.info(f"Configuration loaded from {path}")
+                        return cfg
+                except Exception as e:
+                    logger.error(f"Failed to load {path}: {e}")
+                    
+        return {"symbol": "XAUUSDm", "magic_number": 234000}
 
     def _save_state(self):
         with self.state_lock:
@@ -339,12 +348,47 @@ class TradingBot:
             engine = BacktestEngine(self.config, self.strategy)
 
             
-            # Use dedicated AIFilter (with backtest mode) instead of live AIAdvisor
-            bt_ai_filter = AIFilter(self.config)
-            bt_ai_filter.backtest_mode = True
-            engine.ai_filter = bt_ai_filter
-            
             return engine.run(symbol, h4, h1, m30, m5, d1)
+        finally:
+            self.connection.disconnect()
+
+    def run_optimization(self, symbol="XAUUSDm", start_date=None, end_date=None, count=10000, mode="anchored"):
+        """Performs WFO to find the best stable parameters."""
+        logger.info(f"Starting WFO Optimization for {symbol} (Mode: {mode})")
+        if not self.connection.connect(): return
+        
+        try:
+            if start_date and end_date:
+                dt_from = datetime.fromisoformat(start_date).replace(tzinfo=timezone.utc)
+                dt_to = datetime.fromisoformat(end_date).replace(tzinfo=timezone.utc)
+                h4 = self.data_fetcher.fetch_candles_range(symbol, "H4", dt_from, dt_to)
+                h1 = self.data_fetcher.fetch_candles_range(symbol, "H1", dt_from, dt_to)
+                m30 = self.data_fetcher.fetch_candles_range(symbol, "M30", dt_from, dt_to)
+                m5 = self.data_fetcher.fetch_candles_range(symbol, "M5", dt_from, dt_to)
+                d1 = self.data_fetcher.fetch_candles_range(symbol, "D1", dt_from, dt_to)
+            else:
+                h4 = self.data_fetcher.fetch_candles(symbol, "H4", count)
+                h1 = self.data_fetcher.fetch_candles(symbol, "H1", count)
+                m30 = self.data_fetcher.fetch_candles(symbol, "M30", count)
+                m5 = self.data_fetcher.fetch_candles(symbol, "M5", count)
+                d1 = self.data_fetcher.fetch_candles(symbol, "D1", count)
+
+            wfo = WalkForwardValidation(self.config, self.strategy)
+            results = wfo.run_validation(symbol, h4, h1, m30, m5, d1, mode=mode)
+            
+            # Print Summary
+            print("\n" + "="*40)
+            print(" WFO OPTIMIZATION COMPLETE ")
+            print("="*40)
+            print(f"Windows Validated: {len(results)}")
+            avg_cons = sum(r['consistency'] for r in results) / len(results) if results else 0
+            print(f"Aggregate OOS Consistency: {avg_cons:.2f}")
+            if avg_cons >= 0.7:
+                print("[SUCCESS] Institutional Target (>0.7) Reached!")
+            else:
+                print("[WARNING] Robustness below target. Further calibration required.")
+            print("Best parameters saved to config_optimized.json")
+            
         finally:
             self.connection.disconnect()
 
@@ -352,6 +396,8 @@ if __name__ == "__main__":
     setup_logging(console=True)
     parser = argparse.ArgumentParser()
     parser.add_argument("--backtest", action="store_true")
+    parser.add_argument("--optimize", action="store_true", help="Run Walk-Forward Optimization")
+    parser.add_argument("--mode", type=str, choices=["anchored", "rolling"], default="anchored")
     parser.add_argument("--symbol", type=str, default="XAUUSDm")
     parser.add_argument("--from", dest="start_date", type=str, help="YYYY-MM-DD", default=None)
     parser.add_argument("--to", dest="end_date", type=str, help="YYYY-MM-DD", default=None)
@@ -359,7 +405,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     bot = TradingBot()
-    if args.backtest:
+    if args.optimize:
+        bot.run_optimization(args.symbol, args.start_date, args.end_date, args.count, args.mode)
+    elif args.backtest:
         bot.run_backtest(args.symbol, args.start_date, args.end_date, args.count)
     else:
         bot.run_live()

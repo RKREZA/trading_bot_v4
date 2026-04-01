@@ -456,6 +456,52 @@ class MT5Connection:
             logger.warning("SL/TP modification failed for %s: %s", ticket, result.comment if result else "No Result")
             return False
 
+    def close_position_partial(self, ticket: int, volume: float) -> bool:
+        """Scales out of a position by closing a specific volume."""
+        if not self.ensure_connected():
+            return False
+
+        with self.MT5_LOCK:
+            position = mt5.positions_get(ticket=ticket)
+        if not position:
+            logger.error("Partial close failed: Position %s not found.", ticket)
+            return False
+
+        pos = position[0]
+        symbol = pos.symbol
+        order_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
+        
+        with self.MT5_LOCK:
+            tick = mt5.symbol_info_tick(symbol)
+        if not tick:
+            return False
+            
+        price = tick.bid if pos.type == mt5.POSITION_TYPE_BUY else tick.ask
+
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": symbol,
+            "volume": float(volume),
+            "type": order_type,
+            "position": ticket,
+            "price": price,
+            "deviation": 20,
+            "magic": pos.magic,
+            "comment": "Partial Close",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": self.get_filling_mode(symbol),
+        }
+
+        with self.MT5_LOCK:
+            result = mt5.order_send(request)
+        
+        if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+            logger.info("Partial close successful for ticket %s: %s lots closed.", ticket, volume)
+            return True
+        else:
+            logger.warning("Partial close failed for %s: %s", ticket, result.comment if result else "No Result")
+            return False
+
 
 class PositionManager:
     """Manages open positions and risk-based lot sizing."""

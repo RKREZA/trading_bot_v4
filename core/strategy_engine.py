@@ -177,66 +177,55 @@ class StrategyEngine:
                 d1_candles: Optional['CandleArray'] = None, session: Optional[str] = None,
                 preprocessed: Optional[dict] = None, circuit_breaker_safe: bool = True) -> Tuple[Optional[TradeSignal], str, str]:
         
-        # 0. Daily Reset Logic (Must run before circuit breaker checks to allow daily recovery)
+        # 0. Daily Reset Logic
         raw_ts = m5_candles.time[-1]
-        if isinstance(raw_ts, (int, float, np.integer, np.floating)):
-            timestamp = datetime.fromtimestamp(float(raw_ts), tz=timezone.utc)
-        elif isinstance(raw_ts, str):
-            try: timestamp = datetime.fromisoformat(raw_ts)
-            except ValueError: timestamp = datetime.fromtimestamp(float(raw_ts), tz=timezone.utc)
-        else:
-            timestamp = raw_ts 
-            
+        timestamp = datetime.fromtimestamp(float(raw_ts), tz=timezone.utc)
         current_date = timestamp.date()
         if self.last_loss_date != current_date:
-            self.daily_losses = 0
-            self.daily_trades = 0
+            self.reset_daily_stats()
             self.last_loss_date = current_date
-            for s in self.consecutive_losses:
-                self.consecutive_losses[s] = 0
-                self.session_cooldown_active[s] = False
 
-        if preprocessed:
-            # High-Performance Path for Backtesting
-            effective_trend = preprocessed["h4_trend"]
-            h4_strength = preprocessed["h4_strength"]
-            regime = preprocessed["regime"]
-            h1_rsi = preprocessed["h1_rsi"]
-            m30_ema_val = preprocessed["m30_ema"]
-            m30_atr = preprocessed["m30_atr"]
-            sma_atr_20 = preprocessed["sma_atr_20"]
-            vol_scaling_flag = preprocessed["vol_scaling"]
-            m5_atr = preprocessed["m5_atr"]
-            
-            # [FIX]: Prevent disabled sessions from sneaking into the backtest
-            if session and session not in self.tradeable_sessions:
-                return None, effective_trend, str(regime)
-                
-            if not circuit_breaker_safe:
-                return None, effective_trend, str(regime)
-            
-        if session and self.session_cooldown_active.get(session, False):
-            return None, "SESSION_COOLDOWN", "NEUTRAL"
+        # --- PHASE 11: BOOLEAN GATEKEEPERS (LOW-COST CHECKS) ---
+        gate_status, gate_reason = self._check_gatekeepers(session, current_price, preprocessed, circuit_breaker_safe)
+        if not gate_status:
+            return None, gate_reason, "NEUTRAL"
 
+        # Track M5 cooldown
         self.m5_trade_counter += 1
         if self.m5_trade_counter - self.last_m5_stop_index < self.cooldown_candles:
             return None, "COOLDOWN", "NEUTRAL"
             
         if preprocessed:
-            # Passing full arrays directly (inner methods safely index the ends)
+            # High-Performance Backtest Path
+            effective_trend = preprocessed["h4_trend"]
+            h1_rsi = preprocessed["h1_rsi"]
+            m30_ema_val = preprocessed["m30_ema"]
+            m30_atr = preprocessed["m30_atr"]
+            m5_atr = preprocessed["m5_atr"]
+            regime = preprocessed["regime"]
+            h4_strength = preprocessed["h4_strength"]
+            vol_scaling_flag = preprocessed["vol_scaling"]
+
             signal = None
-            if effective_trend == "BULLISH":
-                if current_price > m30_ema_val and 25 < h1_rsi < 95:
+            # --- PHASE 11: MODULE DISPATCHER (REGIME-ADAPTIVE) ---
+            if session == "TOKYO":
+                signal = self._tokyo_mean_reversion(m30_candles, m5_candles, current_price, m30_ema_val, h1_rsi)
+            else:
+                # London/NY Momentum Logic
+                if effective_trend == "BULLISH" and current_price > m30_ema_val and 25 < h1_rsi < 95:
                     signal = self._check_breakout_entry(m30_candles, m5_candles, "BULLISH", current_price)
-            elif effective_trend == "BEARISH":
-                if current_price < m30_ema_val and 5 < h1_rsi < 75:
+                elif effective_trend == "BEARISH" and current_price < m30_ema_val and 5 < h1_rsi < 75:
                     signal = self._check_breakout_entry(m30_candles, m5_candles, "BEARISH", current_price)
             
             if signal:
                 signal.confluence_score, signal.reasons = self._calculate_confluence(
                     effective_trend, h4_strength, regime, signal, m30_candles, m5_candles, m30_atr, m5_atr, session
                 )
-                if signal.confluence_score < self.min_confluence_score: return None, effective_trend, str(regime)
+                
+                # PHASE 11: Session-Aware Confluence Thresholds
+                session_threshold = self.session_cfg.get(session, {}).get("min_confluence_score", self.min_confluence_score)
+                if signal.confluence_score < session_threshold: 
+                    return None, effective_trend, str(regime)
                 
                 signal = self._set_sl_tp(signal, m30_atr, m30_candles, h4_strength, session, signal.confluence_score)
                 signal.confidence = self._calculate_confidence(signal.confluence_score, h4_strength, signal)
@@ -306,30 +295,38 @@ class StrategyEngine:
 
         regime = MarketRegime.classify(m30_candles)
 
-        if self.vol_enabled:
-            if m30_atr > sma_atr_20 * (self.vol_mult_high + 2.0) or m30_atr < sma_atr_20 * (self.vol_mult_low - 0.5):
-                return None, h4_trend, str(regime)
+        # 2. Institutional Volatility Envelope (Phase 4 Harden)
+        # Using 100-period ATR SMA to define the "Normal" volatility regime
+        atr_sma_100 = self._calculate_ema(m30_candles.high - m30_candles.low, 100)
+        if m30_atr > atr_sma_100 * 2.5: # Volatility Spike (News/Chaotic)
+            return None, "VOLATILITY_SPIKE", str(regime)
+        if m30_atr < atr_sma_100 * 0.5: # Stagnation (Low Probability)
+            return None, "STAGNATION", str(regime)
 
-        if regime == MarketRegime.LOW_LIQUIDITY:
+        # 3. LOW_LIQUIDITY Check (Exempt TOKYO as its baseline is low-vol/low-liq)
+        if regime == MarketRegime.LOW_LIQUIDITY and session != "TOKYO":
             return None, "LOW_LIQUIDITY", str(regime)
             
         if not circuit_breaker_safe:
             return None, h4_trend, str(regime)
 
-        m30_closes = m30_candles.close
-        m30_ema_val = self._calculate_ema(m30_closes, 10) 
-
-        signal = None
-        if effective_trend == "BULLISH":
-            if current_price > m30_ema_val and 25 < h1_rsi < 95:
-                signal = self._check_breakout_entry(m30_candles, m5_candles, "BULLISH", current_price)
-            if not signal:
-                signal = self._check_pullback_entry(m30_candles, m5_candles, "BULLISH", current_price)
-        elif effective_trend == "BEARISH":
-            if current_price < m30_ema_val and 5 < h1_rsi < 75:
-                signal = self._check_breakout_entry(m30_candles, m5_candles, "BEARISH", current_price)
-            if not signal:
-                signal = self._check_pullback_entry(m30_candles, m5_candles, "BEARISH", current_price)
+        # LIVE TRADING BRANCH
+        if session == "TOKYO":
+            # Tokyo session logic
+            signal = self._tokyo_mean_reversion(m30_candles, m5_candles, current_price, m30_ema_val, h1_rsi)
+        else:
+            # London/NY Momentum Logic
+            # [NEW] Phase 11 RSI Momentum filter specifically for New York to avoid churn
+            if session == "NEW_YORK":
+                if effective_trend == "BULLISH" and h1_rsi > 40:
+                    signal = self._check_breakout_entry(m30_candles, m5_candles, "BULLISH", current_price)
+                elif effective_trend == "BEARISH" and h1_rsi < 60:
+                    signal = self._check_breakout_entry(m30_candles, m5_candles, "BEARISH", current_price)
+            else:
+                if effective_trend == "BULLISH" and current_price > m30_ema_val and 25 < h1_rsi < 95:
+                    signal = self._check_breakout_entry(m30_candles, m5_candles, "BULLISH", current_price)
+                elif effective_trend == "BEARISH" and current_price < m30_ema_val and 5 < h1_rsi < 75:
+                    signal = self._check_breakout_entry(m30_candles, m5_candles, "BEARISH", current_price)
 
         if signal:
             confluence, reasons = self._calculate_confluence(h4_trend, h4_strength, regime, signal, 
@@ -338,28 +335,66 @@ class StrategyEngine:
             signal.reasons = reasons
             
             ai_bias = self.config.get("ai_advisor", {}).get("bias", 0.0)
-            
             signal = self._set_sl_tp(signal, m30_atr, m30_candles, h4_strength, session, confluence, ai_bias)
             
-            sl_dist = abs(signal.entry_price - signal.stop_loss)
-            max_sl = 8.0 if "XAUUSDm" in symbol else 0
-            if max_sl > 0 and sl_dist > max_sl:
-                return None, h4_trend, str(regime)
-                
             if signal.confluence_score < self.min_confluence_score:
                 return None, h4_trend, str(regime)
 
             signal.confidence = self._calculate_confidence(confluence, h4_strength, signal)
-            
             if signal.confidence < self.min_confidence:
                 return None, h4_trend, str(regime)
             
-            if vol_scaling_flag:
-                signal.rejection_type = "VOL_SCALING" 
-            
-            self._log(f"PHASE 7 SIGNAL: {signal.direction} | Conf: {signal.confidence:.0f}% | PF Goal: 2.0+")
+            self._log(f"PHASE 11 SIGNAL: {signal.direction} | Conf: {signal.confidence:.0f}%")
             
         return signal, h4_trend, str(regime)
+
+    def _check_gatekeepers(self, session: str, current_price: float, preprocessed: Optional[dict] = None, circuit_breaker_safe: bool = True) -> Tuple[bool, str]:
+        """
+        Boolean Gatekeeper System (Ordered by computational cost).
+        Signal must pass 100% of these for further processing.
+        """
+        # 1. MT5 Circuit Breaker Check (Cheapest)
+        if not circuit_breaker_safe:
+            return False, "CIRCUIT_BREAKER_TRIPPED"
+
+        # 2. Session Enablement Check
+        if session and session not in self.tradeable_sessions:
+            return False, "SESSION_DISABLED"
+
+        # 3. Session Cooldown Check
+        if session and self.session_cooldown_active.get(session, False):
+            return False, "SESSION_COOLDOWN"
+
+        # 4. Spread Gatekeeper (Implemented in ExecutionPipeline/Backtester for real-time accuracy)
+        # Note: In StrategyEngine, we assume the pipeline/backtester has already gated high spreads.
+
+        return True, "OK"
+
+    def _tokyo_mean_reversion(self, m30_candles: 'CandleArray', m5_candles: 'CandleArray', current_price: float, m30_ema: float, h1_rsi: float) -> Optional[TradeSignal]:
+        """
+        Specialized Module for Tokyo Liquidity Cycles.
+        Focuses on Mean-Reversion during low-volatility hours.
+        """
+        # Use Bollinger Band style excursion for mean-reversion
+        m30_closes = m30_candles.close
+        if len(m30_closes) < 20: return None
+        
+        m30_std = np.std(m30_closes[-20:])
+        upper_band = m30_ema + (1.5 * m30_std) # [ALPHA-MAX] Relaxed to 1.5 for Tokyo liquidity
+        lower_band = m30_ema - (1.5 * m30_std)
+        
+        # Mean Reversion: Buy when oversold and price below lower band returning to EMA
+        # [RELAXED] RSI from 30/70 to 40/60 for Tokyo quiet hours
+        if current_price < lower_band and h1_rsi < 40:
+            if m5_candles.close[-1] > m5_candles.open[-1]: # Basic Bullish Confirmation
+                return TradeSignal("BUY", current_price, 0, 0, reasons=["Tokyo Mean-Rev"])
+        
+        # Sell when overbought and price above upper band returning to EMA
+        if current_price > upper_band and h1_rsi > 60:
+            if m5_candles.close[-1] < m5_candles.open[-1]: # Basic Bearish Confirmation
+                return TradeSignal("SELL", current_price, 0, 0, reasons=["Tokyo Mean-Rev"])
+                
+        return None
 
     def _get_h4_trend(self, h4_candles: 'CandleArray') -> Tuple[str, int]:
         if not h4_candles or len(h4_candles) < 5: return "RANGING", 50
@@ -383,7 +418,23 @@ class StrategyEngine:
         return "RANGING", 50
 
     def _check_breakout_entry(self, m30_candles: 'CandleArray', m5_candles: 'CandleArray', trend: str, current_price: float) -> Optional[TradeSignal]:
-        # 1. Higher Timeframe (M30) Breakout
+        # 1. Institutional Body Filter (Phase 5)
+        # We only trade candles that show "intent" (long bodies, short wicks)
+        m30_last_body = abs(m30_candles.close[-1] - m30_candles.open[-1])
+        m30_last_range = m30_candles.high[-1] - m30_candles.low[-1]
+        body_pct = (m30_last_body / m30_last_range) if m30_last_range > 0 else 0
+        
+        if body_pct < 0.40: # Reject indecision/doji candles
+            return None
+
+        # 2. Volatility Expansion Filter (Phase 5)
+        # Only enter if current ATR is expanding beyond the 100-period average
+        m30_atr = self._calculate_atr(m30_candles)
+        atr_sma_100 = self._calculate_ema(m30_candles.high - m30_candles.low, 100)
+        if m30_atr < atr_sma_100:
+            return None
+
+        # 3. Higher Timeframe (M30) Breakout
         lookback = self.swing_lookback
         if trend == "BULLISH":
             res_m30 = np.max(m30_candles.high[-lookback:-1])
@@ -394,7 +445,7 @@ class StrategyEngine:
             if current_price < sup_m30:
                 return TradeSignal("SELL", current_price, 0, 0, reasons=["M30 Breakout"])
                 
-        # 2. Lower Timeframe (M5) Breakout (Hyper Frequency)
+        # 4. Lower Timeframe (M5) Breakout (Hyper Frequency)
         m5_lookback = 5 # [FIX]: Increased from 3 to 5 to filter out micro-fakeouts
         if trend == "BULLISH":
             res_m5 = np.max(m5_candles.high[-m5_lookback:-1])
@@ -495,7 +546,7 @@ class StrategyEngine:
         if (signal.direction == "BUY" and h1_rsi > 50) or (signal.direction == "SELL" and h1_rsi < 50):
             score += 1; reasons.append("H1 Momentum")
             
-        if session and session in ["LONDON", "LONDON/NY", "NEW_YORK"]:
+        if session and session in ["LONDON", "LONDON/NY", "NEW_YORK", "TOKYO"]:
             score += 1; reasons.append(f"{session} Session")
             
         if m5_atr > m30_atr * 0.1:

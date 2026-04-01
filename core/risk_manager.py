@@ -45,6 +45,10 @@ class RiskManager:
         self.circuit_breaker = CircuitBreaker(config)
         self.silent = False
         
+        self.max_daily_loss_limit = self.risk_config.get("max_daily_loss_percent", 2.0)
+        self.equity_sma_period = 20
+        self.daily_equity_history = []  # List of daily closing equities
+        
         self.initial_balance = None
         self.day_start_balance = None
         self.current_max_balance = 0.0
@@ -75,7 +79,7 @@ class RiskManager:
 
         # 3. Daily Loss Percent (Equity vs Day Start)
         daily_loss_pct = (self.day_start_balance - current_equity) / self.day_start_balance * 100
-        if daily_loss_pct >= self.risk_config.get("max_daily_loss_percent", 5.0):
+        if daily_loss_pct >= self.max_daily_loss_limit:
             return False, f"CIRCUIT_BREAKER: Daily loss limit hit ({daily_loss_pct:.2f}%)"
 
         # 4. Max Drawdown Halt (Equity vs Current Max Balance)
@@ -115,15 +119,19 @@ class RiskManager:
         
         return max(0.0, kelly)
 
-    def calculate_scaled_risk(self, current_balance: float, session: Optional[str] = None) -> float:
+    def calculate_scaled_risk(self, current_balance: float, current_equity: float = None, session: Optional[str] = None) -> float:
         """
-        Scale risk percentage based on Kelly Fraction, current drawdown and trading session.
+        Scale risk percentage based on Kelly Fraction, current drawdown, 
+        Equity SMA (Asymmetric Risk), and trading session.
         """
         if self.initial_balance is None:
             self.initial_balance = current_balance
             self.day_start_balance = current_balance
             self.current_max_balance = current_balance
+            self.daily_equity_history = [current_balance] * self.equity_sma_period
         
+        equity = current_equity if current_equity is not None else current_balance
+
         # 1. Dynamic Kelly Risk
         kelly = self._calculate_kelly_fraction()
         risk_pct = (kelly * 0.25) * 100.0 # Quarter-Kelly
@@ -131,13 +139,22 @@ class RiskManager:
         # Clamp between 0.5% and 2.0%
         risk_pct = max(0.5, min(risk_pct, 2.0))
         
-        # 2. Apply Session Multiplier
+        # 2. Asymmetric Risk Scaling (Equity < 20-day SMA)
+        if len(self.daily_equity_history) >= self.equity_sma_period:
+            equity_sma = sum(self.daily_equity_history[-self.equity_sma_period:]) / self.equity_sma_period
+            if equity < equity_sma:
+                old_risk = risk_pct
+                risk_pct *= 0.5
+                if not self.silent:
+                    logger.info(f"Asymmetric Risk Scaling: {old_risk:.2f}% -> {risk_pct:.2f}% (Equity ${equity:.2f} < SMA ${equity_sma:.2f})")
+
+        # 3. Apply Session Multiplier
         if session:
             session_data = self.session_cfg.get(session, {})
             multiplier = session_data.get("risk_multiplier", 1.0)
             risk_pct *= multiplier
             
-        # 3. Handle Drawdown Tracking
+        # 4. Handle Drawdown Tracking
         if current_balance > self.current_max_balance:
             self.current_max_balance = current_balance
             return risk_pct
@@ -151,7 +168,7 @@ class RiskManager:
         if not self.drawdown_scaling_enabled:
             return risk_pct
 
-        # 4. Drawdown Scaling (Reduce risk linearly after 2% drawdown)
+        # 5. Drawdown Scaling (Reduce risk linearly after 2% drawdown)
         if drawdown_pct > 2.0:
             scale = max(0.2, 1.0 - (drawdown_pct - 2.0) / (self.max_drawdown_limit - 2.0))
             scaled_risk = risk_pct * scale
@@ -159,6 +176,12 @@ class RiskManager:
             return scaled_risk
 
         return risk_pct
+
+    def record_daily_close(self, closing_equity: float):
+        """Record the daily closing equity for SMA calculation."""
+        self.daily_equity_history.append(closing_equity)
+        if len(self.daily_equity_history) > 100:
+            self.daily_equity_history = self.daily_equity_history[-100:]
 
     def update_history(self, trade_record: Dict):
         """Update internal trade history for Kelly calculation. Prevents duplicates by ticket."""
@@ -172,9 +195,8 @@ class RiskManager:
             self.trade_history = self.trade_history[-200:]
 
     def check_daily_stop(self, daily_pnl_pct: float) -> bool:
-        """Check if daily loss limit (e.g., -5%) is hit."""
-        limit = self.risk_config.get("max_daily_loss_percent", 5.0)
-        if daily_pnl_pct <= -limit:
+        """Check if daily loss limit (e.g., -2%) is hit."""
+        if daily_pnl_pct <= -self.max_daily_loss_limit:
             if not self.silent: logger.warning(f"Daily Loss Limit Hit: {daily_pnl_pct:.2f}%")
             return True
         return False

@@ -9,6 +9,11 @@ from core.lot_calculator import LotCalculator
 
 logger = logging.getLogger("trading_bot.execution")
 
+try:
+    import MetaTrader5 as mt5
+except ImportError:
+    mt5 = None
+
 class ExecutionPipeline:
     """Orchestrates signal generation, AI vetting, risk checks, and order execution."""
     
@@ -27,6 +32,7 @@ class ExecutionPipeline:
         self.ai_advisor = ai_advisor
         self.risk_manager = risk_manager
         self.notification_manager = notification_manager
+        self.spread_history = []
         
     def execute_cycle(self, symbol: str, m30: "CandleArray", h1: "CandleArray", h4: "CandleArray", m5: "CandleArray", d1: "CandleArray", current_price: float, session: str) -> bool:
         """Runs one full execution cycle for a symbol."""
@@ -58,6 +64,29 @@ class ExecutionPipeline:
         if not allowed:
             logger.warning(f"CIRCUIT BREAKER HALT: {cb_reason}")
             # We still run analyze so it can report trend/regime for dashboard, but it will return None signal
+        
+        # --- PHASE 11: ROLLING SPREAD FILTER ---
+        symbol_info = self.connection.get_symbol_info(symbol)
+        if not symbol_info: return False
+        
+        with self.connection.MT5_LOCK:
+            tick = mt5.symbol_info_tick(symbol)
+        
+        if tick:
+            current_spread = (tick.ask - tick.bid) / symbol_info.get("point", 0.01)
+            self.spread_history.append(current_spread)
+            if len(self.spread_history) > 20:
+                self.spread_history = self.spread_history[-20:]
+            
+            if len(self.spread_history) >= 20:
+                spread_sma = sum(self.spread_history) / 20
+                if current_spread > spread_sma * 1.5:
+                    logger.warning(f"SPREAD FILTER: Aborting trade. Current: {current_spread:.1f} | SMA: {spread_sma:.1f}")
+                    return False
+
+        # Start Latency Tracking
+        import time
+        start_time = time.time()
         
         # 1. Generate Signal
         signal, trend, regime = self.strategy.analyze(
@@ -100,10 +129,11 @@ class ExecutionPipeline:
              signal.confidence = conf
              signal.reasons.append("AI APPROVED")
 
-        # 5. Risk Scaling
+        # 5. Risk Scaling (Passing Equity for SMA Check)
         account = self.connection.get_account_snapshot()
         current_balance = account.get("balance", 0.0)
-        risk_pct = self.risk_manager.calculate_scaled_risk(current_balance, session=session)
+        current_equity = account.get("equity", 0.0)
+        risk_pct = self.risk_manager.calculate_scaled_risk(current_balance, current_equity=current_equity, session=session)
         
         if risk_pct <= 0.0:
             logger.warning("Risk scaling returned 0.0 — Halting trade.")
@@ -135,6 +165,9 @@ class ExecutionPipeline:
             signal=signal,
             lot_size=lot
         )
+        
+        latency_ms = (time.time() - start_time) * 1000
+        logger.info(f"Execution Latency: {latency_ms:.2f}ms")
         
         if ticket:
             self.notification_manager.notify_trade_open(

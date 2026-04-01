@@ -158,7 +158,7 @@ class BacktestEngine:
         
         trades = []
         session_stats = {} # session -> {trades, wins, pnl}
-        utc_offset = self.config.get("strategy_defaults", {}).get("utc_offset_hours", 0)
+        utc_offset = self.config.get("backtest", {}).get("utc_offset", 0)
         open_trade: Optional[_OpenTrade] = None
 
         # --- Compatibility Patch: Unpack CandleArray back into standard lists of dictionaries ---
@@ -389,34 +389,22 @@ class BacktestEngine:
                                 exit_price, result_type, closed = open_trade.tp, "TP", True
 
                     
-                        # --- Advanced Partial Profit Taking (PPT) ---
-                        # Only run if enabled in strategy_defaults and trade is not closed
-                        if not closed and self.config.get("strategy_defaults", {}).get("partial_profit_enabled", True):
-                            ppt_cfg = self.config.get("strategy_defaults", {}).get("partial_profit_config", {"level1_pct": 0.25, "level2_pct": 0.33})
-                            level1_pct = ppt_cfg.get("level1_pct", 0.25)
-                            level2_pct = ppt_cfg.get("level2_pct", 0.33)
+                        # --- Institutional Partial Profit Taking (PPT) ---
+                        if not closed:
+                            risk = abs(open_trade.entry_price - open_trade.signal.stop_loss)
+                            excursion = (bid_h - open_trade.entry_price) if open_trade.signal.direction == "BUY" else (open_trade.entry_price - ask_l)
                             
-                            if open_trade.signal.direction == "BUY":
-                                # Level 1
-                                if open_trade.partial_closed_count == 0 and bid_h >= open_trade.tp_partial_1:
-                                    success, pnl, comm = self._handle_partial_tp(open_trade, level1_pct, open_trade.tp_partial_1, symbol, contract_size, lot_step, min_lot)
-                                    open_trade.partial_closed_count = 1
-        
-                                # Level 2
-                                elif open_trade.partial_closed_count == 1 and bid_h >= open_trade.tp_partial_2:
-                                    success, pnl, comm = self._handle_partial_tp(open_trade, level2_pct, open_trade.tp_partial_2, symbol, contract_size, lot_step, min_lot)
-                                    open_trade.partial_closed_count = 2
-        
-                            else: # SELL
-                                # Level 1
-                                if open_trade.partial_closed_count == 0 and ask_l <= open_trade.tp_partial_1:
-                                    success, pnl, comm = self._handle_partial_tp(open_trade, level1_pct, open_trade.tp_partial_1, symbol, contract_size, lot_step, min_lot)
-                                    open_trade.partial_closed_count = 1
-        
-                                # Level 2
-                                elif open_trade.partial_closed_count == 1 and ask_l <= open_trade.tp_partial_2:
-                                    success, pnl, comm = self._handle_partial_tp(open_trade, level2_pct, open_trade.tp_partial_2, symbol, contract_size, lot_step, min_lot)
-                                    open_trade.partial_closed_count = 2
+                            # 1. Level 0: [NEW] Cost-Recovery (25% @ 0.5R)
+                            if excursion >= (risk * 0.5) and open_trade.partial_closed_count == 0:
+                                res_price = open_trade.entry_price + (risk * 0.5) if open_trade.signal.direction == "BUY" else open_trade.entry_price - (risk * 0.5)
+                                success, pnl, comm = self._handle_partial_tp(open_trade, 0.25, res_price, symbol, contract_size, lot_step, min_lot)
+                                if success: open_trade.partial_closed_count = 1
+                                
+                            # 2. Level 1: Standard Scale-out (50% @ 1.0R)
+                            elif excursion >= risk and open_trade.partial_closed_count == 1:
+                                tp1_price = open_trade.entry_price + risk if open_trade.signal.direction == "BUY" else open_trade.entry_price - risk
+                                success, pnl, comm = self._handle_partial_tp(open_trade, 0.5, tp1_price, symbol, contract_size, lot_step, min_lot)
+                                if success: open_trade.partial_closed_count = 2
     
                         if not closed:
                             # Save SL before MFE/trail updates for intra-candle bias check
@@ -430,52 +418,34 @@ class BacktestEngine:
                                 if ask_l < open_trade.best_price:
                                     open_trade.best_price = ask_l
     
-                            # --- Optimized MFE Trailing ---
-                            ts_cfg = self.config.get("trailing_stop", {})
-                            if ts_cfg.get("enabled", True):
-                                excursion = (open_trade.best_price - open_trade.entry_price) if open_trade.signal.direction == "BUY" else (open_trade.entry_price - open_trade.best_price)
-                                risk = abs(open_trade.entry_price - open_trade.signal.stop_loss)
-                                
-                                # [NEW FIX]: Only activate trailing stop if activation_rr is reached
-                                activation_rr = ts_cfg.get("activation_rr", 1.0)
-                                rr_reached = (excursion / risk) if risk > 0 else 0
-                                
-                                if risk > 0 and rr_reached >= activation_rr:
-                                    # 1. Base Trail: 50% give-back default
-                                    give_back_pct = ts_cfg.get("mfe_trail_base", 0.5)
-                                
-                                    # 2. Volatility Adjustment
-                                    if i > 20:
-                                        prev_atr_slice = m5_atr_series[i-21:i-1]
-                                        if len(prev_atr_slice) > 0:
-                                            avg_atr = np.mean(prev_atr_slice)
-                                            if avg_atr > 0:
-                                                atr_ratio = m5_atr_series[i-1] / avg_atr
-                                                if atr_ratio > 1.3: give_back_pct += 0.2
-                                                elif atr_ratio < 0.7: give_back_pct -= 0.1
-                                
-                                    # 3. Profit-Dependent (Tighten as profit increases)
-                                    if rr_reached >= 3.0:
-                                        give_back_pct = 0.3 # Tighten to 30% give-back
-                                    elif rr_reached >= 2.0:
-                                        give_back_pct = 0.4
-                                
-                                    # 4. Time-Based (Tighten after many candles)
-                                    candles_in_trade = i - bisect.bisect_left(m5_times, open_trade.entry_time)
-                                    if candles_in_trade > 100: # ~8 hours on M5
-                                        give_back_pct = min(give_back_pct, 0.4)
-            
-                                    give_back_pct = max(0.1, min(give_back_pct, 0.9))
-                                
-                                    # 5. Apply Trail
+                                    # 1. Base Trail: [Institutional Chandelier] 3.5x multiplier
+                                    # Modified from config default to match production hardening
+                                    chandelier_multiplier = 3.5
+                                    chandelier_dist = current_atr * chandelier_multiplier
+                                    
                                     if open_trade.signal.direction == "BUY":
-                                        new_sl = open_trade.best_price - (excursion * give_back_pct)
-                                        if new_sl > open_trade.sl:
-                                            open_trade.sl = new_sl
+                                        new_sl = open_trade.best_price - chandelier_dist
                                     else:
-                                        new_sl = open_trade.best_price + (excursion * give_back_pct)
-                                        if new_sl < open_trade.sl:
-                                            open_trade.sl = new_sl
+                                        new_sl = open_trade.best_price + chandelier_dist
+                                    
+                                    # One-Way Ratchet
+                                    if open_trade.signal.direction == "BUY":
+                                        if new_sl > open_trade.sl: open_trade.sl = new_sl
+                                    else:
+                                        if open_trade.sl == 0 or new_sl < open_trade.sl: open_trade.sl = new_sl
+
+                                    # 2. Break-Even Trigger (0.8R reached)
+                                    risk = abs(open_trade.entry_price - open_trade.signal.stop_loss)
+                                    excursion = (open_trade.best_price - open_trade.entry_price) if open_trade.signal.direction == "BUY" else (open_trade.entry_price - open_trade.best_price)
+                                    rr_reached = (excursion / risk) if risk > 0 else 0
+                                    
+                                    if rr_reached >= 0.8:
+                                        be_sl = open_trade.entry_price + (risk * 0.05) if open_trade.signal.direction == "BUY" else open_trade.entry_price - (risk * 0.05)
+                                        if open_trade.signal.direction == "BUY":
+                                            if be_sl > open_trade.sl: open_trade.sl = be_sl
+                                        else:
+                                            if open_trade.sl == 0 or be_sl < open_trade.sl: open_trade.sl = be_sl
+                                
 
                             
                                 # 6. CRITICAL: Intra-candle look-ahead bias protection
@@ -578,8 +548,12 @@ class BacktestEngine:
                     # High-Performance Signal Check
                     pre_at_i = m5_precomputed[i]
                     
-                    # [NEW] Circuit Breaker Sync for Backtest
+                    # [NEW] Circuit Breaker & Equity SMA Sync for Backtest
                     if i == 200 or candle_dt.date() != datetime.fromtimestamp(float(m5_times[i-1]), tz=timezone.utc).date(): 
+                        # Before resetting daily stats, record the closing equity of the previous day
+                        if i > 200:
+                            self.risk_manager.record_daily_close(self.balance)
+                        
                         self.risk_manager.reset_daily_stats(self.balance)
                         if hasattr(self.strategy, 'reset_daily_stats'):
                             self.strategy.reset_daily_stats()
@@ -739,11 +713,15 @@ class BacktestEngine:
         ref_price = force_price if force_price is not None else current_candle['open']
         
         if signal.direction == "BUY":
-            entry = ref_price + (spread_val * point) + slippage
+            # --- PHASE 11: 200ms Latency Simulation (Slippage-on-entry) ---
+            # 200ms is approx 0.1% of a 5m candle's ATR on average, but we scale it by current_atr
+            latency_slippage = current_atr * 0.05 
+            entry = ref_price + (spread_val * point) + slippage + latency_slippage
         else:
-            entry = ref_price - slippage
+            latency_slippage = current_atr * 0.05
+            entry = ref_price - slippage - latency_slippage
             
-        risk_pct = self.risk_manager.calculate_scaled_risk(self.balance, session=session)
+        risk_pct = self.risk_manager.calculate_scaled_risk(self.balance, current_equity=self.balance, session=session)
         lot = self._calc_lot_size(symbol, self.balance, entry, signal.stop_loss, point, contract_size, risk_pct)
         
         if signal.rejection_type == "VOL_SCALING":
