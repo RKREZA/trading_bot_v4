@@ -368,7 +368,7 @@ class StrategyEngine:
             return None, "LOW_VOL_CONVICTION", str(regime)
 
         # 4. Execution & Trigger Layer
-        signal = self._check_liquidity_sweep(m15_candles, m5_candles, h4_trend, current_price, session, h4_atr)
+        signal = self._check_breakout_entry(m30_candles, m15_candles, m5_candles, h4_trend, current_price, session, h4_atr)
         
         # [PHASE 12] Dual-Trigger System: If no breakout, check for pullback
         if not signal:
@@ -425,7 +425,7 @@ class StrategyEngine:
         if m30_er < 0.35: return None, "LOW_EFFICIENCY", str(regime)
         
         # 3. Execution Layer
-        signal = self._check_liquidity_sweep(m15_candles, m5_candles, h4_trend, current_price, session, h4_atr)
+        signal = self._check_breakout_entry(m30_candles, m15_candles, m5_candles, h4_trend, current_price, session, h4_atr)
         if not signal:
             signal = self._check_pullback_entry(m15_candles, m5_candles, h4_trend, current_price, session)
 
@@ -607,71 +607,85 @@ class StrategyEngine:
         current_raw_ts = float(times[-1])
         curr_dt = datetime.fromtimestamp(current_raw_ts, tz=timezone.utc)
         
-        # 1. Asian Session (00:00 - 08:00 UTC)
-        asian_start = curr_dt.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
-        asian_end = asian_start + (8 * 3600)
-        asian_mask = (times >= asian_start) & (times < asian_end)
-        if np.any(asian_mask):
-            zones["asian_high"] = float(np.max(m5_candles.high[asian_mask]))
-            zones["asian_low"] = float(np.min(m5_candles.low[asian_mask]))
-            
-        # 2. Previous NY Session (15:00 - 22:00 UTC of PREVIOUS DAY)
-        # Find the start of the previous day
-        from datetime import timedelta
-        prev_dt = curr_dt - timedelta(days=1)
-        ny_start = prev_dt.replace(hour=15, minute=0, second=0, microsecond=0).timestamp()
-        ny_end = ny_start + (7 * 3600)
-        ny_mask = (times >= ny_start) & (times < ny_end)
-        if np.any(ny_mask):
-            zones["ny_high"] = float(np.max(m5_candles.high[ny_mask]))
-            zones["ny_low"] = float(np.min(m5_candles.low[ny_mask]))
-            
-        # 3. Previous 3h Rolling H/L (36 candles)
+        # 1. Previous 3h Rolling H/L (36 candles)
         zones["3h_high"] = float(np.max(m5_candles.high[-37:-1]))
         zones["3h_low"] = float(np.min(m5_candles.low[-37:-1]))
+            
+        # 2. Today's Tokyo Extremums (00:00 - 08:00 UTC)
+        tokyo_start = curr_dt.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        tokyo_end = tokyo_start + (8 * 3600)
+        tokyo_mask = (times >= tokyo_start) & (times < tokyo_end)
+        if np.any(tokyo_mask):
+            zones["tokyo_high"] = float(np.max(m5_candles.high[tokyo_mask]))
+            zones["tokyo_low"] = float(np.min(m5_candles.low[tokyo_mask]))
+            
+        # 3. Initial 30-min Opening Range
+        session_start_hour = 8 if session == "LONDON" else 14 if session in ["NEW_YORK", "LONDON/NY"] else None
+        if session_start_hour is not None:
+            open_start = curr_dt.replace(hour=session_start_hour, minute=0, second=0, microsecond=0).timestamp()
+            open_end = open_start + (30 * 60)
+            open_mask = (times >= open_start) & (times < open_end)
+            if np.any(open_mask):
+                zones["session_open_high"] = float(np.max(m5_candles.high[open_mask]))
+                zones["session_open_low"] = float(np.min(m5_candles.low[open_mask]))
                 
         return zones
 
-    def _check_liquidity_sweep(self, m15_candles: 'CandleArray', m5_candles: 'CandleArray', 
+    def _check_breakout_entry(self, m30_candles: 'CandleArray', m15_candles: 'CandleArray', m5_candles: 'CandleArray', 
                               trend: str, current_price: float, session: str, h4_atr: float) -> Optional[TradeSignal]:
         """
         [PHASE 14] Institutional Liquidity-Sweep Redesign.
-        Replaces breakout logic with Sweep Rejections and Mandatory Confluence.
+        Implements 1-2 candle return windows and session-specific archetypes.
         """
-        raw_ts = m5_candles.time[-1]
-        dt = datetime.fromtimestamp(float(raw_ts), tz=timezone.utc)
-        
-        # 1. Volatility Gate: Skip first 15 mins of London/NY
-        if session == "LONDON" and (8, 0) <= (dt.hour, dt.minute) < (8, 15):
-            return None
-        if session in ["NEW_YORK", "LONDON/NY"] and (14, 0) <= (dt.hour, dt.minute) < (14, 15):
+        # --- TOKYO: Mean Reversion ONLY ---
+        if session == "TOKYO":
+            if len(m30_candles.close) < 20: return None
+            m30_closes = m30_candles.close
+            m30_sma = np.mean(m30_closes[-20:])
+            m30_std = np.std(m30_closes[-20:])
+            upper_bb = m30_sma + (2.0 * m30_std) # [INSTITUTIONAL] 2.0 SD
+            lower_bb = m30_sma - (2.0 * m30_std)
+            
+            if current_price > upper_bb:
+                # Rejection: previous candle pierced, current closes back inside
+                if m5_candles.high[-1] > upper_bb and m5_candles.close[-1] < upper_bb:
+                    return TradeSignal("SELL", current_price, 0, 0, reasons=["Tokyo BB Reject"], session=session)
+            elif current_price < lower_bb:
+                if m5_candles.low[-1] < lower_bb and m5_candles.close[-1] > lower_bb:
+                    return TradeSignal("BUY", current_price, 0, 0, reasons=["Tokyo BB Reject"], session=session)
             return None
 
-        # 2. Filter: Volume Spike & Fuel Check
+        # --- LONDON / NY: Liquidity Grab Scalping ---
+        zones = self._get_liquidity_zones(m5_candles, session)
+        
+        # Confluence Filters: Displacement & Volume
         m5_vols = m5_candles.tick_volume
         m5_vol_sma20 = np.mean(m5_vols[-21:-1])
-        if m5_vols[-1] < (m5_vol_sma20 * 1.5): # [FUEL CHECK] Mandatory 1.5x Volume Spike
-            return None
-            
-        # 3. Filter: Displacement (Trigger Candle Quality)
+        fuel_ok = m5_vols[-1] > (m5_vol_sma20 * 1.5)
+        
         m5_body = abs(m5_candles.close[-1] - m5_candles.open[-1])
         m5_range = m5_candles.high[-1] - m5_candles.low[-1]
-        if m5_range > 0 and (m5_body / m5_range) < 0.70: # [DISPLACEMENT] Body > 70%
+        displacement_ok = (m5_body / m5_range) > 0.70 if m5_range > 0 else False # Body > 70% of total candle
+        
+        if not (fuel_ok and displacement_ok):
             return None
-
-        # 4. Detect Sweep
-        zones = self._get_liquidity_zones(m5_candles, session)
-        liquidity_highs = [zones.get("asian_high"), zones.get("ny_high"), zones.get("3h_high")]
-        liquidity_lows = [zones.get("asian_low"), zones.get("ny_low"), zones.get("3h_low")]
+            
+        # [SWEEP-AND-RETURN] Check 1-2 candle window
+        # We check sweep of: Opening Range, Tokyo Extremums, and 3h H/L
+        liquidity_highs = [zones.get("session_open_high"), zones.get("tokyo_high"), zones.get("3h_high")]
+        liquidity_lows = [zones.get("session_open_low"), zones.get("tokyo_low"), zones.get("3h_low")]
         
         signal = None
         
         # SELL: Sweep of High
         for l_high in liquidity_highs:
             if l_high is None: continue
-            # Pierce: high[-1] or high[-2] was above zone
-            # Rejection: close[-1] is back inside zone
-            if (m5_candles.high[-1] > l_high or m5_candles.high[-2] > l_high) and m5_candles.close[-1] < l_high:
+            # 1-2 candle sweep check:
+            # high[-1] swept or high[-2] swept, AND close[-1] is back inside
+            swept = (m5_candles.high[-1] > l_high) or (m5_candles.high[-2] > l_high)
+            returned = (m5_candles.close[-1] < l_high)
+            
+            if swept and returned:
                 signal = TradeSignal("SELL", current_price, 0, 0, reasons=[f"Sweep:{l_high}"], session=session)
                 signal.rejection_type = "Sweep"
                 break
@@ -680,7 +694,10 @@ class StrategyEngine:
         if not signal:
             for l_low in liquidity_lows:
                 if l_low is None: continue
-                if (m5_candles.low[-1] < l_low or m5_candles.low[-2] < l_low) and m5_candles.close[-1] > l_low:
+                swept = (m5_candles.low[-1] < l_low) or (m5_candles.low[-2] < l_low)
+                returned = (m5_candles.close[-1] > l_low)
+                
+                if swept and returned:
                     signal = TradeSignal("BUY", current_price, 0, 0, reasons=[f"Sweep:{l_low}"], session=session)
                     signal.rejection_type = "Sweep"
                     break
@@ -718,8 +735,8 @@ class StrategyEngine:
                    h4_strength: int, session: str, confluence_score: int, ai_bias: float = 0.0, 
                    m5_candles: Optional['CandleArray'] = None) -> TradeSignal:
         """
-        [PHASE 14] Institutional Micro-Stop replacement.
-        SL = max(1.5 * M15_ATR, dist_to_sweep_wick).
+        [PHASE 14] Institutional Order-Flow Stop-Loss.
+        SL = max(Swing Extremum + 20 points, 1.5 * M15_ATR).
         """
         session_conf = self.config.get("session_config", {}).get(session, {})
         base_rr = session_conf.get("rr_ratio", self.rr_ratio)
@@ -727,21 +744,24 @@ class StrategyEngine:
         rr = max(1.5, min(rr + ai_bias, 6.0))
         
         point = self.config.get("symbols_config", {}).get(self.config.get("symbol", "XAUUSDm"), {}).get("point", 0.01)
+        # Requirement: 20 points safety floor
+        safety_buffer = 20 * point
         
-        # 1. Safety Floor (1.5x M15 ATR)
+        # 1. Base ATR Stop (Requirement: 1.5x ATR)
         atr_sl_dist = 1.5 * atr 
         
-        # 2. Sweep Wick Stop (High-High or Low-Low of trigger window)
+        # 2. Swing Extremum Stop (from Sweep window)
         extremum_sl_dist = 0.0
         if m5_candles is not None:
+            # We look back 3 candles (sweep window) for the actual extremum
             if signal.direction == "BUY":
                 sweep_low = float(np.min(m5_candles.low[-3:]))
-                extremum_sl_dist = signal.entry_price - sweep_low + (5 * point)
+                extremum_sl_dist = signal.entry_price - (sweep_low - safety_buffer)
             else:
                 sweep_high = float(np.max(m5_candles.high[-3:]))
-                extremum_sl_dist = sweep_high - signal.entry_price + (5 * point)
+                extremum_sl_dist = (sweep_high + safety_buffer) - signal.entry_price
                 
-        # 3. Dynamic Selection
+        # 3. Dynamic Selection (Requirement: New SL formula)
         final_sl_dist = max(atr_sl_dist, extremum_sl_dist)
         
         if signal.direction == "BUY":

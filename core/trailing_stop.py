@@ -72,21 +72,13 @@ class TrailingStopManager:
                             meta["partial_closed_count"] = 1
                             logger.info(f"Position {ticket} Partial Close (1.0R): {lot_to_close} lots closed.")
                     
-                # 4. Break-Even Check (Institutional: 1.0 RR + Spread)
-                # We move to BE once 1.0R is achieved to protect capital
-                be_activation = 1.0 # [INSTITUTIONAL] 1.0R
+                # 4. Break-Even Check (Adaptive)
+                be_activation = session_conf.get("activation_rr", 2.0)
                 if risk > 0 and profit_points > (risk * be_activation):
-                    # Fetch current spread to add as buffer
-                    with self.connection.MT5_LOCK:
-                        tick = self.connection.mt5.symbol_info_tick(symbol) if hasattr(self.connection, 'mt5') else None
-                    spread = (tick.ask - tick.bid) if tick else (atr * 0.2) # Fallback to 0.2 ATR if tick fails
-                    
-                    # BE + Spread to ensure "Break-even is not a loss"
-                    new_sl = pos.price_open + spread if is_buy else pos.price_open - spread
-                    
+                    new_sl = pos.price_open + (risk * 0.1) if is_buy else pos.price_open - (risk * 0.1)
                     if (is_buy and new_sl > pos.sl) or (not is_buy and (pos.sl == 0.0 or new_sl < pos.sl)):
                         self.connection.modify_sl_tp(ticket, symbol, new_sl, pos.tp)
-                        logger.info(f"Position {ticket} moved to BE+Spread (1.0R achieved): {new_sl}")
+                        logger.info(f"Position {ticket} moved to BE ({be_activation}R achieved): {new_sl}")
 
                 # 5. Chandelier Exit (ATR-based Trailing)
                 # Multiplier varies by session to handle noise
