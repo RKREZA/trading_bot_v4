@@ -10,6 +10,7 @@ from tqdm import tqdm
 
 from .trailing_stop import TrailingStopManager
 from .lot_calculator import LotCalculator
+from .risk_manager import RiskManager
 
 logger = logging.getLogger("trading_bot.backtester")
 
@@ -39,6 +40,8 @@ class BacktestEngine:
         self.balance = self.initial_balance
         self.equity = self.initial_balance
         self.trades = []
+        self.risk_manager = RiskManager(config)
+        self.risk_manager.silent = True  # Keep BT logs clean
         
         # Performance logging (CSV)
         self.results_dir = "backtest_results"
@@ -66,6 +69,13 @@ class BacktestEngine:
         
         utc_offset = self.config.get("backtest", {}).get("utc_offset", 0)
         open_trade: Optional[_OpenTrade] = None
+        
+        # Reset Risk Manager for fresh BT run
+        self.risk_manager.reset_daily_stats(self.balance)
+        last_date = None
+        daily_trades = 0
+        consecutive_losses = 0 # Simple track for CB
+        notified_halts = set() # Track daily warnings to avoid spam
         
         # M5 is now the primary loop timeframe
         m5_arr = m5_candles
@@ -110,6 +120,20 @@ class BacktestEngine:
             pbar.update(1)
             t = m5_times[i]
             candle_dt = datetime.fromtimestamp(t, tz=timezone.utc)
+            day_str = candle_dt.strftime("%Y-%m-%d")
+            
+            # --- Daily Boundary Logic ---
+            current_date = candle_dt.date()
+            if last_date is None: last_date = current_date
+            
+            if current_date != last_date:
+                # Midnight reset (simplified)
+                self.risk_manager.record_daily_close(self.balance)
+                self.risk_manager.reset_daily_stats(self.balance)
+                daily_trades = 0
+                consecutive_losses = 0
+                last_date = current_date
+
             session = self.strategy.get_session_from_hour(candle_dt.hour)
             
             # --- Dynamic Session Spread (P1 Fix) ---
@@ -140,11 +164,20 @@ class BacktestEngine:
                     # For purity, we just use the hit price level.
                     pnl = (exit_price - open_trade.entry_price) * (1 if open_trade.direction == "BUY" else -1) * contract_size * open_trade.lot
                     self.balance += pnl
-                    trades_list.append({
+                    
+                    trade_record = {
+                        "ticket": open_trade.ticket,
                         "time": open_trade.entry_time, "exit_time": candle_dt, "direction": open_trade.direction,
                         "entry": open_trade.entry_price, "exit": exit_price, "lot": open_trade.lot,
                         "pnl": round(pnl, 2), "result": result, "session": open_trade.session
-                    })
+                    }
+                    trades_list.append(trade_record)
+                    
+                    # Update Risk Manager stats
+                    self.risk_manager.update_history(trade_record)
+                    if pnl < 0: consecutive_losses += 1
+                    else: consecutive_losses = 0
+                    
                     open_trade = None
                 else:
                     # Update best price for trailing
@@ -184,10 +217,40 @@ class BacktestEngine:
                                                         session=session, preprocessed=m5_meta[i])
                 
                 if signal:
-                    # Risk calculation (simplified for BT)
-                    risk_pct = 1.0; risk_val = self.balance * (risk_pct / 100.0)
+                    # Check Circuit Breakers (Bypassed in Research Mode)
+                    research_mode = self.config.get("research_mode", False)
+                    allowed, reason = self.risk_manager.check_circuit_breakers(
+                        current_balance=self.balance,
+                        current_equity=self.balance,
+                        daily_trades=daily_trades,
+                        daily_losses=0, # Simplified for BT
+                        consecutive_losses=consecutive_losses
+                    )
+                    
+                    if not allowed and not research_mode:
+                        # Log the halt only once per day to avoid terminal noise
+                        if day_str not in notified_halts:
+                            from rich.console import Console
+                            console = Console()
+                            console.print(f"[bold yellow][{day_str}] {reason}. Skipping trades for remainder of day.[/bold yellow]")
+                            notified_halts.add(day_str)
+                        continue
+
+                    # Risk calculation (Dynamic from RiskManager)
+                    risk_pct = self.risk_manager.calculate_scaled_risk(self.balance, session=session)
+                    if risk_pct <= 0: continue
+                    
+                    risk_val = self.balance * (risk_pct / 100.0)
                     sl_dist = abs(signal.entry_price - signal.stop_loss)
-                    lot = LotCalculator.calculate(risk_val, sl_dist, point, 1.0, min_lot)
+                    
+                    # Use limits from symbol config
+                    lot = LotCalculator.calculate(
+                        risk_val, sl_dist, point, 1.0, 
+                        volume_min=symbol_cfg.get("min_lot", 0.01),
+                        volume_max=symbol_cfg.get("max_lot", 100.0)
+                    )
+                    
+                    daily_trades += 1
                     
                     # --- Slippage Simulation (P1 Fix) ---
                     # Add slippage points from config

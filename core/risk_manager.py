@@ -25,6 +25,10 @@ class CircuitBreaker:
         """Increments the trade counter for the current hour."""
         hour = datetime.now(timezone.utc).hour
         self.hourly_trades[hour] = self.hourly_trades.get(hour, 0) + 1
+    
+    def reset(self):
+        """Clears all trade counters for a fresh day/session."""
+        self.hourly_trades = {}
 
     def check_all(self, context: dict) -> Tuple[bool, str]:
         """
@@ -71,13 +75,13 @@ class RiskManager:
         """
         self.full_config = config
         self.risk_config = config.get("risk", {})
-        self.base_risk_pct = self.risk_config.get("risk_per_trade", 1.0)
+        self.base_risk_pct = self.risk_config.get("risk_per_trade_pct", 1.0)
         self.max_drawdown_limit = self.risk_config.get("max_drawdown_halt_pct", 10.0)
         self.drawdown_scaling_enabled = self.risk_config.get("drawdown_scaling", True)
         self.circuit_breaker = CircuitBreaker(config)
         self.silent = False
         
-        self.max_daily_loss_limit = self.risk_config.get("max_daily_loss_percent", 2.0)
+        self.max_daily_loss_limit = self.risk_config.get("max_daily_loss_pct", 2.0)
         self.equity_sma_period = 20
         self.daily_equity_history = []  # List of daily closing equities
         
@@ -90,6 +94,8 @@ class RiskManager:
     def reset_daily_stats(self, balance: float):
         """Reset daily tracking for circuit breakers."""
         self.day_start_balance = balance
+        self.current_max_balance = balance # Reset drawdown peak daily for BT consistency
+        self.circuit_breaker.reset()
         if not self.silent: logger.info(f"Daily Risk Stats Reset. Day Start Balance: ${balance:.2f}")
 
     def check_circuit_breakers(self, current_balance: float, current_equity: float, daily_trades: int, daily_losses: int, consecutive_losses: int) -> Tuple[bool, str]:
@@ -193,11 +199,16 @@ class RiskManager:
         kelly = self._calculate_kelly_fraction()
         risk_pct = (kelly * 0.25) * 100.0 # Quarter-Kelly
         
-        # Clamp between 0.5% and 2.0%
-        risk_pct = max(0.5, min(risk_pct, 2.0))
+        # [MOD] Use user setting as baseline if Kelly is low or during startup
+        if risk_pct < self.base_risk_pct:
+            risk_pct = self.base_risk_pct
+            
+        # Clamp based on user's sanity limits if any (defaulting to a wider range than before)
+        risk_pct = max(0.1, min(risk_pct, 10.0)) 
         
         # 2. Asymmetric Risk Scaling (Equity < 20-day SMA)
-        if len(self.daily_equity_history) >= self.equity_sma_period:
+        scaling_enabled = self.risk_config.get("asymmetric_risk_scaling", True)
+        if scaling_enabled and len(self.daily_equity_history) >= self.equity_sma_period:
             equity_sma = sum(self.daily_equity_history[-self.equity_sma_period:]) / self.equity_sma_period
             if equity < equity_sma:
                 old_risk = risk_pct

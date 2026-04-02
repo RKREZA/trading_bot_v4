@@ -5,6 +5,7 @@ Orchestrates MT5 connection, data fetching, strategy analysis, and dashboard.
 
 import argparse
 import json
+import re
 import logging
 import os
 import sys
@@ -131,7 +132,10 @@ class TradingBot:
             if os.path.exists(path):
                 try:
                     with open(path, "r") as f:
-                        cfg = json.load(f)
+                        content = f.read()
+                        # Remove # comments for user-friendliness
+                        cleaned_content = re.sub(r'#.*$', '', content, flags=re.MULTILINE)
+                        cfg = json.loads(cleaned_content)
                         logger.info(f"Configuration loaded from {path}")
                         return cfg
                 except Exception as e:
@@ -381,19 +385,31 @@ class TradingBot:
             s_table.add_column("Session")
             s_table.add_column("Trades", justify="right")
             s_table.add_column("Wins (TP)", justify="right", style="green")
-            s_table.add_column("Losses (SL)", justify="right", style="red")
+            s_table.add_column("Hard Loss", justify="right", style="red")
+            s_table.add_column("Profitable SL", justify="right", style="yellow")
             s_table.add_column("Win Rate", justify="right")
             s_table.add_column("Net PnL", justify="right")
             
             for session in ["TOKYO", "LONDON", "LONDON/NY", "NEW_YORK"]:
                 s_df = df[df['session'] == session]
                 if s_df.empty: continue
-                wins = len(s_df[s_df['pnl'] > 0])
-                losses = len(s_df[s_df['pnl'] < 0])
-                s_wr = (wins / len(s_df) * 100)
+                
+                tp_hits = len(s_df[s_df['result'] == "TP"])
+                hard_losses = len(s_df[(s_df['result'] == "SL") & (s_df['pnl'] < 0)])
+                profitable_sl = len(s_df[(s_df['result'] == "SL") & (s_df['pnl'] >= 0)])
+                
+                # Win Rate is technically any trade with PnL > 0
+                actual_wins = len(s_df[s_df['pnl'] > 0])
+                s_wr = (actual_wins / len(s_df) * 100)
                 s_pnl = s_df['pnl'].sum()
+                
                 s_table.add_row(
-                    session, str(len(s_df)), str(wins), str(losses), f"{s_wr:.1f}%", 
+                    session, 
+                    str(len(s_df)), 
+                    str(tp_hits), 
+                    str(hard_losses),
+                    str(profitable_sl),
+                    f"{s_wr:.1f}%", 
                     f"[{'green' if s_pnl >= 0 else 'red'}]${s_pnl:.2f}[/]"
                 )
             console.print(s_table)
