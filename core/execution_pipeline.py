@@ -39,12 +39,8 @@ class ExecutionPipeline:
         self.state_lock = state_lock
         self.spread_history = []
         
-    def execute_cycle(self, symbol: str, h4: "CandleArray", m30: "CandleArray", m15: "CandleArray", 
-                      m5: "CandleArray", d1: "CandleArray", current_price: float, session: str) -> bool:
-        """
-        [PHASE 11] Institutional Execution Cycle.
-        Orchestrates 4-tier timeframe analysis and dynamic risk execution.
-        """
+    def execute_cycle(self, symbol: str, m30: "CandleArray", h1: "CandleArray", h4: "CandleArray", m5: "CandleArray", d1: "CandleArray", current_price: float, session: str) -> bool:
+        """Runs one full execution cycle for a symbol."""
         # 0. Risk Context & Circuit Breakers
         acc_info = self.connection.get_account_snapshot()
         current_balance = acc_info.get("balance", 0.0)
@@ -59,6 +55,7 @@ class ExecutionPipeline:
         
         daily_trades = self.strategy.daily_trades
         daily_losses = self.strategy.daily_losses
+        # Use session-specific consecutive losses if available, otherwise 0
         con_losses = self.strategy.consecutive_losses.get(session, 0)
         
         allowed, cb_reason = self.risk_manager.check_circuit_breakers(
@@ -71,6 +68,7 @@ class ExecutionPipeline:
         
         if not allowed:
             logger.warning(f"CIRCUIT BREAKER HALT: {cb_reason}")
+            # We still run analyze so it can report trend/regime for dashboard, but it will return None signal
         
         # --- PHASE 11: ROLLING SPREAD FILTER ---
         symbol_info = self.connection.get_symbol_info(symbol)
@@ -98,9 +96,9 @@ class ExecutionPipeline:
         # 1. Generate Signal
         signal, trend, regime = self.strategy.analyze(
             symbol=symbol,
-            h4_candles=h4,
             m30_candles=m30,
-            m15_candles=m15,
+            h1_candles=h1,
+            h4_candles=h4,
             m5_candles=m5,
             d1_candles=d1,
             current_price=current_price,
@@ -128,6 +126,7 @@ class ExecutionPipeline:
                  "session": session
              }
              logger.info("Requesting AI Advisory veto check...")
+             # Unify backtest/live into filter_signal
              approved, prob, conf = self.ai_advisor.filter_signal_backtest(signal_data_for_ai)
              if not approved:
                  logger.info("Signal VETOED by AI. Confidence: %s", conf)
@@ -135,7 +134,10 @@ class ExecutionPipeline:
              signal.confidence = conf
              signal.reasons.append("AI APPROVED")
 
-        # 5. Risk Scaling
+        # 5. Risk Scaling (Passing Equity for SMA Check)
+        account = self.connection.get_account_snapshot()
+        current_balance = account.get("balance", 0.0)
+        current_equity = account.get("equity", 0.0)
         risk_pct = self.risk_manager.calculate_scaled_risk(current_balance, current_equity=current_equity, session=session)
         
         if risk_pct <= 0.0:
@@ -159,11 +161,6 @@ class ExecutionPipeline:
             volume_max=sym_info.get("volume_max", 100.0),
             volume_step=sym_info.get("volume_step", 0.01)
         )
-        
-        # [PHASE 11] Volatility Spike Scaling (50% reduction)
-        if getattr(signal, 'volatility_spike', False):
-            logger.info("VOLATILITY SPIKE DETECTED: Reducing lot size by 50%%")
-            lot = max(sym_info.get("volume_min", 0.01), round(lot * 0.5, 2))
         
         # 7. Order Execution
         logger.info("Executing %s %s | Lot: %s | SL: %s | TP: %s", signal.direction, symbol, lot, signal.stop_loss, signal.take_profit)

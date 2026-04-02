@@ -42,7 +42,6 @@ class TradeSignal:
     rejection_type: str = ""
     timestamp: datetime = field(default_factory=datetime.now)
     rr_ratio: float = 2.0
-    volatility_spike: bool = False
 
 class StrategyEngine:
     def __init__(self, config: dict, analysis_logger=None, silent: bool = False):
@@ -59,7 +58,7 @@ class StrategyEngine:
         self.ema_fast = self.strategy_config.get("ema_fast", 20)
         self.ema_slow = self.strategy_config.get("ema_slow", 50)
         self.min_candle_body_pct = self.strategy_config.get("min_candle_body_pct", 20)
-        self.sl_atr_buffer = self.strategy_config.get("sl_atr_buffer", 1.5) # [ALPHA-EXPANSION] 0.8 -> 1.5
+        self.sl_atr_buffer = self.strategy_config.get("sl_atr_buffer", 0.8)
 
         self.vol_cfg = self.strategy_config.get("volatility_filter", {})
         self.vol_enabled = self.vol_cfg.get("enabled", False)
@@ -157,114 +156,6 @@ class StrategyEngine:
         series = self._calculate_ema_series(prices, period)
         return series[-1] if len(series) > 0 else 0.0
 
-    def _calculate_sma_series(self, prices: np.ndarray, period: int) -> np.ndarray:
-        """Vectorized SMA series."""
-        n = len(prices)
-        if n < period:
-            return np.full(n, np.mean(prices) if n > 0 else 0.0)
-        ret = np.cumsum(prices, dtype=float)
-        ret[period:] = ret[period:] - ret[:-period]
-        res = np.zeros(n)
-        res[period-1:] = ret[period-1:] / period
-        res[:period-1] = res[period-1] # Pad start
-        return res
-
-    def _calculate_macd_series(self, prices: np.ndarray, fast: int = 12, slow: int = 26, signal: int = 9) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Vectorized MACD calculation (MACD, Signal, Histogram)."""
-        n = len(prices)
-        if n < slow + signal:
-            return np.zeros(n), np.zeros(n), np.zeros(n)
-        
-        ema_fast = self._calculate_ema_series(prices, fast)
-        ema_slow = self._calculate_ema_series(prices, slow)
-        macd = ema_fast - ema_slow
-        macd_signal = self._calculate_ema_series(macd, signal)
-        histogram = macd - macd_signal
-        return macd, macd_signal, histogram
-
-    def _calculate_vw_rsi_series(self, prices: np.ndarray, volumes: np.ndarray, period: int = 14) -> np.ndarray:
-        """Volume-Weighted RSI (using PriceChange * Volume)."""
-        n = len(prices)
-        if n < period + 1:
-            return np.full(n, 50.0)
-            
-        deltas = np.diff(prices)
-        # Use common length for volumes and deltas
-        v_deltas = deltas * volumes[1:] 
-        
-        ups = np.where(v_deltas > 0, v_deltas, 0)
-        downs = np.where(v_deltas < 0, -v_deltas, 0)
-        
-        avg_up = np.zeros(n)
-        avg_down = np.zeros(n)
-        
-        avg_up[period] = np.mean(ups[:period])
-        avg_down[period] = np.mean(downs[:period])
-        
-        for i in range(period + 1, n):
-            avg_up[i] = (avg_up[i-1] * (period - 1) + ups[i-1]) / period
-            avg_down[i] = (avg_down[i-1] * (period - 1) + downs[i-1]) / period
-            
-        rs = np.divide(avg_up, avg_down, out=np.zeros_like(avg_up), where=avg_down != 0)
-        vwrsi = 100 - (100 / (1 + rs))
-        vwrsi[:period] = 50.0
-        return vwrsi
-
-    def _calculate_efficiency_ratio_series(self, prices: np.ndarray, period: int = 14) -> np.ndarray:
-        """Kaufman's Efficiency Ratio series."""
-        n = len(prices)
-        er = np.zeros(n)
-        if n <= period: return er
-        
-        # Net change over 'period' bars
-        net_change = np.abs(prices[period:] - prices[:-period])
-        # Sum of absolute 1-bar changes over 'period' bars
-        abs_diff = np.abs(np.diff(prices))
-        sum_abs_diff = np.zeros(n)
-        # Rolling sum of abs_diff
-        window_sum = np.convolve(abs_diff, np.ones(period), mode='valid')
-        sum_abs_diff[period:] = window_sum
-        
-        er[period:] = np.divide(net_change, sum_abs_diff[period:], out=np.zeros_like(net_change), where=sum_abs_diff[period:] > 0)
-        return er
-
-    def _calculate_adx_series(self, high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
-        """Vectorized ADX series using Wilder's smoothing."""
-        n = len(high)
-        if n < period * 2: return np.zeros(n)
-        
-        tr = np.maximum(high[1:] - low[1:], 
-                        np.maximum(np.abs(high[1:] - close[:-1]), 
-                                   np.abs(low[1:] - close[:-1])))
-        
-        up_move = high[1:] - high[:-1]
-        down_move = low[:-1] - low[1:]
-        
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-        
-        def wilders_smoothing(vals, p):
-            res = np.zeros(len(vals) + 1)
-            res[p] = np.mean(vals[:p])
-            for i in range(p + 1, len(res)):
-                res[i] = (res[i-1] * (p - 1) + vals[i-1]) / p
-            return res
-            
-        atr = wilders_smoothing(tr, period)
-        p_dm_s = wilders_smoothing(plus_dm, period)
-        m_dm_s = wilders_smoothing(minus_dm, period)
-        
-        plus_di = 100 * p_dm_s / np.maximum(atr, 0.00001)
-        minus_di = 100 * m_dm_s / np.maximum(atr, 0.00001)
-        
-        dx = 100 * np.abs(plus_di - minus_di) / np.maximum(plus_di + minus_di, 0.00001)
-        adx_s = wilders_smoothing(dx[period:], period)
-        
-        final_adx = np.zeros(n)
-        # Offset alignment
-        final_adx[period*2 - 1:] = adx_s[period:]
-        return final_adx
-
     def _calculate_atr(self, candles: 'CandleArray', period: Optional[int] = None) -> float:
         if period is None:
             period = self.atr_period
@@ -282,14 +173,11 @@ class StrategyEngine:
         if len(tr) == 0: return 0.1
         return np.mean(tr[-period:]) if len(tr) >= period else np.mean(tr)
 
-    def analyze(self, symbol: str, h4_candles: 'CandleArray', m30_candles: 'CandleArray', 
-                m15_candles: 'CandleArray', m5_candles: 'CandleArray', current_price: float,
+    def analyze(self, symbol: str, h4_candles: 'CandleArray', h1_candles: 'CandleArray', m30_candles: 'CandleArray',
+                m5_candles: 'CandleArray', current_price: float,
                 d1_candles: Optional['CandleArray'] = None, session: Optional[str] = None,
                 preprocessed: Optional[dict] = None, circuit_breaker_safe: bool = True) -> Tuple[Optional[TradeSignal], str, str]:
-        """
-        [PHASE 11] Institutional Multi-Timeframe Analysis.
-        H4 (Anchor) -> M30 (Momentum) -> M15 (Execution) -> M5 (Trigger).
-        """
+        
         # 0. Daily Reset Logic
         raw_ts = m5_candles.time[-1]
         timestamp = datetime.fromtimestamp(float(raw_ts), tz=timezone.utc)
@@ -297,116 +185,149 @@ class StrategyEngine:
         if self.last_loss_date != current_date:
             self.reset_daily_stats()
             self.last_loss_date = current_date
-            
-        # --- GATEKEEPERS ---
+
+        # --- PHASE 11: BOOLEAN GATEKEEPERS (LOW-COST CHECKS) ---
         gate_status, gate_reason = self._check_gatekeepers(session, current_price, preprocessed, circuit_breaker_safe)
         if not gate_status:
             return None, gate_reason, "NEUTRAL"
 
+        # Track M5 cooldown
         self.m5_trade_counter += 1
         if self.m5_trade_counter - self.last_m5_stop_index < self.cooldown_candles:
             return None, "COOLDOWN", "NEUTRAL"
-
+            
         if preprocessed:
-            # Vectorized Backtest Optimization Path
-            return self._analyze_preprocessed(preprocessed, m30_candles, m15_candles, m5_candles, current_price, session)
+            # High-Performance Backtest Path
+            effective_trend = preprocessed["h4_trend"]
+            h1_rsi = preprocessed["h1_rsi"]
+            m30_ema_val = preprocessed["m30_ema"]
+            m30_atr = preprocessed["m30_atr"]
+            m5_atr = preprocessed["m5_atr"]
+            regime = preprocessed["regime"]
+            h4_strength = preprocessed["h4_strength"]
+            vol_scaling_flag = preprocessed["vol_scaling"]
 
-        # LIVE ANALYSIS PATH
-        if not all([h4_candles, m30_candles, m15_candles, m5_candles]):
-            return None, "MISSING_DATA", "NEUTRAL"
-
-        # 1. H4 Anchor Conviction
-        regime = MarketRegime.classify(m30_candles)
-        h4_trend, h4_conviction = self._get_h4_trend(h4_candles)
-        h4_atr = self._calculate_atr(h4_candles)
-        
-        # 2. Mode Selection (Adaptive)
-        # If H4 is Ranging or Conviction is weak, default to Mean-Reversion
-        is_ranging = (h4_trend == "RANGING" or h4_conviction < 40)
-        
-        if is_ranging:
-            # TOKYO style Mean-Reversion (Adaptive to all sessions if ranging)
-            # Use M30 EMA as the mean
-            m30_ema = self._calculate_ema(m30_candles.close, 10)
-            m30_rsi = self._calculate_rsi(m30_candles.close, 14)
-            signal = self._tokyo_mean_reversion(m30_candles, m5_candles, current_price, m30_ema, m30_rsi, session)
-            return signal, h4_trend, str(regime)
-
-        # 3. M30 Momentum Quality Layer
-        m30_closes = m30_candles.close
-        m30_vols = m30_candles.tick_volume
-        
-        # MACD Velocity (Delta)
-        _, _, hist = self._calculate_macd_series(m30_closes)
-        macd_vel_up = hist[-1] > hist[-2]
-        macd_vel_down = hist[-1] < hist[-2]
-        
-        # Efficiency Ratio (Kaufman's ER)
-        er = self._calculate_efficiency_ratio_series(m30_closes)
-        m30_er = er[-1]
-        
-        # Volume-Weighted RSI
-        vw_rsi = self._calculate_vw_rsi_series(m30_closes, m30_vols)
-        current_vw_rsi = vw_rsi[-1]
-        
-        # Momentum Quality Gate
-        # Only proceed if ER > 0.35 and MACD Delta aligns with trend
-        if m30_er < 0.35:
-            return None, "LOW_EFFICIENCY", str(regime)
+            signal = None
+            # --- PHASE 11: MODULE DISPATCHER (REGIME-ADAPTIVE) ---
+            if session == "TOKYO":
+                signal = self._tokyo_mean_reversion(m30_candles, m5_candles, current_price, m30_ema_val, h1_rsi, session)
+            else:
+                # London/NY Momentum Logic
+                if effective_trend == "BULLISH" and current_price > m30_ema_val and 25 < h1_rsi < 95:
+                    signal = self._check_breakout_entry(m30_candles, m5_candles, "BULLISH", current_price, session)
+                elif effective_trend == "BEARISH" and current_price < m30_ema_val and 5 < h1_rsi < 75:
+                    signal = self._check_breakout_entry(m30_candles, m5_candles, "BEARISH", current_price, session)
             
-        if h4_trend == "BULLISH" and not macd_vel_up:
-            return None, "MOMENTUM_DECAY", str(regime)
-        if h4_trend == "BEARISH" and not macd_vel_down:
-            return None, "MOMENTUM_DECAY", str(regime)
-            
-        # VW-RSI Filter
-        if h4_trend == "BULLISH" and current_vw_rsi < 45: # Requires some conviction
-            return None, "LOW_VOL_CONVICTION", str(regime)
-        if h4_trend == "BEARISH" and current_vw_rsi > 55:
-            return None, "LOW_VOL_CONVICTION", str(regime)
-
-        # 4. Execution & Trigger Layer
-        signal = self._check_breakout_entry(m15_candles, m5_candles, h4_trend, current_price, session, h4_atr)
-        
-        # [PHASE 12] Dual-Trigger System: If no breakout, check for pullback
-        if not signal:
-            signal = self._check_pullback_entry(m15_candles, m5_candles, h4_trend, current_price, session)
-
-        if signal:
-            # 5. Risk & Final Confluence
-            # Weighted Score based on multiple metrics
-            confluence, reasons = self._calculate_confluence(h4_trend, h4_conviction, regime, signal, 
-                                                           m30_candles, m5_candles, 0, 0, session)
-            signal.confluence_score = confluence
-            signal.reasons = reasons
-            
-            # High Conviction RR Boost
-            ai_bias = self.config.get("ai_advisor", {}).get("bias", 0.0)
-            if h4_conviction > 75:
-                ai_bias += 0.5 # Institutional conviction boost
+            if signal:
+                signal.confluence_score, signal.reasons = self._calculate_confluence(
+                    effective_trend, h4_strength, regime, signal, m30_candles, m5_candles, m30_atr, m5_atr, session
+                )
                 
-            signal = self._set_sl_tp(signal, self._calculate_atr(m15_candles), m30_candles, h4_conviction, session, confluence, ai_bias)
+                # PHASE 11: Session-Aware Confluence Thresholds
+                session_threshold = self.session_cfg.get(session, {}).get("min_confluence_score", self.min_confluence_score)
+                if signal.confluence_score < session_threshold: 
+                    return None, effective_trend, str(regime)
+                
+                signal = self._set_sl_tp(signal, m30_atr, m30_candles, h4_strength, session, signal.confluence_score)
+                signal.confidence = self._calculate_confidence(signal.confluence_score, h4_strength, signal)
             
-            # Final confidence mapping
-            signal.confidence = self._calculate_confidence(confluence, h4_conviction, signal)
-            
-            # Gating
-            session_conf = self.config.get("session_config", {}).get(session, {})
-            min_conf = session_conf.get("min_confluence_score", self.min_confluence_score)
-            
-            if signal.confluence_score < min_conf:
-                return None, h4_trend, str(regime)
+            return signal, effective_trend, str(regime)
+        
+        if not h4_candles or not h1_candles or not m30_candles or not m5_candles:
+            return None, "RANGING", "NEUTRAL"
+        
+        # Slicing via `__getitem__` logic 
+        h4_candles = h4_candles[-200:]
+        h1_candles = h1_candles[-200:]
+        m30_candles = m30_candles[-200:]
+        m5_candles = m5_candles[-400:] 
+        
+        if len(h4_candles) < 20 or len(h1_candles) < 20 or len(m30_candles) < 20 or len(m5_candles) < 20:
+            return None, "RANGING", "NEUTRAL"
 
-            self._log(f"PHASE 11 SIGNAL: {signal.direction} | Conv: {h4_conviction} | Conf: {signal.confidence:.0f}%")
-            
-        return signal, h4_trend, str(regime)
+        if session and session not in self.tradeable_sessions:
+            return None, "RANGING", "NEUTRAL"
 
-    def _analyze_preprocessed(self, preprocessed: dict, m30: 'CandleArray', m15: 'CandleArray', 
-                              m5: 'CandleArray', price: float, session: str) -> Tuple[Optional[TradeSignal], str, str]:
-        """Specific logic for preprocessed (backtest) optimization."""
-        # This will be refactored to match the live path during the preprocess_history update.
-        # Placeholder for now until step 5.
-        return None, "BACKTEST_NOT_SYNCED", "NEUTRAL"
+        for param, value in self.strategy_config.items():
+            if not isinstance(value, dict) and hasattr(self, param):
+                setattr(self, param, value)
+        
+        session_data = self.session_cfg.get(session, {})
+        overrides = session_data.get("strategy", {})
+        for param, value in overrides.items():
+            if hasattr(self, param):
+                setattr(self, param, value)
+
+        if self.m5_trade_counter - self.last_m5_stop_index < self.cooldown_candles:
+            return None, "COOLDOWN", "NEUTRAL"
+
+        # 1. Volatility Filter (ATR Ratio)
+        m30_atr = self._calculate_atr(m30_candles)
+        m5_atr = self._calculate_atr(m5_candles)
+        
+        highs = m30_candles.high
+        lows = m30_candles.low
+        closes = m30_candles.close
+        tr = np.maximum(highs[1:] - lows[1:], 
+                        np.maximum(np.abs(highs[1:] - closes[:-1]), 
+                                   np.abs(lows[1:] - closes[:-1])))
+        
+        if len(tr) >= 20:
+            sma_atr_20 = np.mean(tr[-20:])
+        else:
+            sma_atr_20 = m30_atr
+            
+        atr_ratio = m30_atr / sma_atr_20 if sma_atr_20 > 0 else 1.0
+        
+        vol_scaling_flag = False
+        if atr_ratio < 0.6 or atr_ratio > 2.5:
+            vol_scaling_flag = True 
+            
+        h4_trend, h4_strength = self._get_h4_trend(h4_candles)
+        h1_closes = h1_candles.close
+        h1_ema20 = self._calculate_ema(h1_closes, 14)
+        h1_trend = "BULLISH" if h1_closes[-1] > h1_ema20 else "BEARISH"
+        h1_rsi = self._calculate_rsi(h1_closes, 14)
+        
+        effective_trend = h4_trend
+        if h4_trend == "RANGING":
+            effective_trend = h1_trend
+            h4_strength = 20
+
+        regime = MarketRegime.classify(m30_candles)
+
+        # 2. Institutional Volatility Envelope (Phase 4 Harden)
+        # Using 100-period ATR SMA to define the "Normal" volatility regime
+        atr_sma_100 = self._calculate_ema(m30_candles.high - m30_candles.low, 100)
+        if m30_atr > atr_sma_100 * 2.5: # Volatility Spike (News/Chaotic)
+            return None, "VOLATILITY_SPIKE", str(regime)
+        if m30_atr < atr_sma_100 * 0.5: # Stagnation (Low Probability)
+            return None, "STAGNATION", str(regime)
+
+        # 3. LOW_LIQUIDITY Check (Exempt TOKYO as its baseline is low-vol/low-liq)
+        if regime == MarketRegime.LOW_LIQUIDITY and session != "TOKYO":
+            return None, "LOW_LIQUIDITY", str(regime)
+            
+        if not circuit_breaker_safe:
+            return None, h4_trend, str(regime)
+
+        # LIVE TRADING BRANCH
+        if session == "TOKYO":
+            # Tokyo session logic
+            signal = self._tokyo_mean_reversion(m30_candles, m5_candles, current_price, m30_ema_val, h1_rsi, session)
+        else:
+            # London/NY Momentum Logic
+            # [NEW] Phase 11 RSI Momentum filter specifically for New York to avoid churn
+            if session == "NEW_YORK":
+                if effective_trend == "BULLISH" and h1_rsi > 40:
+                    signal = self._check_breakout_entry(m30_candles, m5_candles, "BULLISH", current_price, session)
+                elif effective_trend == "BEARISH" and h1_rsi < 60:
+                    signal = self._check_breakout_entry(m30_candles, m5_candles, "BEARISH", current_price, session)
+            else:
+                if effective_trend == "BULLISH" and current_price > m30_ema_val and 25 < h1_rsi < 95:
+                    signal = self._check_breakout_entry(m30_candles, m5_candles, "BULLISH", current_price, session)
+                elif effective_trend == "BEARISH" and current_price < m30_ema_val and 5 < h1_rsi < 75:
+                    signal = self._check_breakout_entry(m30_candles, m5_candles, "BEARISH", current_price, session)
 
         if signal:
             confluence, reasons = self._calculate_confluence(h4_trend, h4_strength, regime, signal, 
@@ -481,246 +402,142 @@ class StrategyEngine:
         return None
 
     def _get_h4_trend(self, h4_candles: 'CandleArray') -> Tuple[str, int]:
-        """
-        [PHASE 11] Institutional Anchor Logic.
-        Returns (Trend, Conviction Score 0-100).
-        """
-        if not h4_candles or len(h4_candles) < 30: return "RANGING", 0
-        
+        if not h4_candles or len(h4_candles) < 5: return "RANGING", 50
         closes = h4_candles.close
-        highs = h4_candles.high
-        lows = h4_candles.low
-        
         ema20 = self._calculate_ema_series(closes, self.ema_fast)
         ema50 = self._calculate_ema_series(closes, self.ema_slow)
-        adx = self._calculate_adx_series(highs, lows, closes, 14)
         
-        current_adx = adx[-1]
+        if len(ema20) < 2 or len(ema50) < 1: return "RANGING", 50
         
-        # 1. Ranging Check (ADX < 20)
-        if current_adx < 20:
-            return "RANGING", int(current_adx * 2) # Low conviction for trending
-            
-        score = 0
-        trend = "RANGING"
+        score = 50 
+        if closes[-1] > ema20[-1]: score += 15
+        if ema20[-1] > ema50[-1]: score += 15
+        if ema20[-1] > ema20[-2]: score += 10
         
-        # 2. EMA Three-Factor (30 pts)
-        ema_score = 0
-        if ema20[-1] > ema50[-1]: # Alignment
-            ema_score += 10
-        if closes[-1] > ema20[-1] and closes[-1] > ema50[-1]: # Location
-            ema_score += 10
-        if ema50[-1] > ema50[-4]: # Slope (4-candle lookback)
-            ema_score += 10
-            
-        # Bearish version
-        ema_score_bear = 0
-        if ema20[-1] < ema50[-1]:
-            ema_score_bear += 10
-        if closes[-1] < ema20[-1] and closes[-1] < ema50[-1]:
-            ema_score_bear += 10
-        if ema50[-1] < ema50[-4]:
-            ema_score_bear += 10
-            
-        # 3. ADX Intensity (30 pts)
-        adx_score = 0
-        if current_adx > 25:
-            adx_score = 30
-        elif current_adx > 20:
-            adx_score = 15
-            
-        # 4. Structural Market Geometry (40 pts)
-        struct_score = 0
-        # Bullish Structure: Higher Highs
-        recent_highs = highs[-20:]
-        curr_sh = np.max(recent_highs[-5:])
-        prev_sh = np.max(recent_highs[-15:-5])
-        if curr_sh > prev_sh:
-            struct_score = 40
-            
-        # Bearish Structure: Lower Lows
-        recent_lows = lows[-20:]
-        curr_sl = np.min(recent_lows[-5:])
-        prev_sl = np.min(recent_lows[-15:-5])
-        struct_score_bear = 0
-        if curr_sl < prev_sl:
-            struct_score_bear = 40
-            
-        bull_total = ema_score + adx_score + struct_score
-        bear_total = ema_score_bear + adx_score + struct_score_bear
+        if closes[-1] < ema20[-1]: score -= 15
+        if ema20[-1] < ema50[-1]: score -= 15
+        if ema20[-1] < ema20[-2]: score -= 10
         
-        if bull_total > bear_total and bull_total > 30: # [ALPHA-EXPANSION] 40 -> 30
-            return "BULLISH", bull_total
-        elif bear_total > bull_total and bear_total > 30:
-            return "BEARISH", bear_total
-            
+        if score > 55: return "BULLISH", score
+        if score < 45: return "BEARISH", (100 - score)
         return "RANGING", 50
 
-    def _check_breakout_entry(self, m15_candles: 'CandleArray', m5_candles: 'CandleArray', 
-                              trend: str, current_price: float, session: str, h4_atr: float) -> Optional[TradeSignal]:
-        """
-        [PHASE 12] Adaptive Execution Logic.
-        Replaces 'Kill-Filters' with 'Confluence Scoring' to improve trade frequency.
-        """
-        exec_score = 0
-        reasons = []
-
-        # 1. M15 Execution Layer (Weighted)
-        m15_atr = self._calculate_atr(m15_candles)
-        m15_vols = m15_candles.tick_volume
-        m15_adx = self._calculate_adx_series(m15_candles.high, m15_candles.low, m15_candles.close, 14)
+    def _check_breakout_entry(self, m30_candles: 'CandleArray', m5_candles: 'CandleArray', trend: str, current_price: float, session: str) -> Optional[TradeSignal]:
+        # 1. Institutional Body Filter (Phase 5)
+        # We only trade candles that show "intent" (long bodies, short wicks)
+        m30_last_body = abs(m30_candles.close[-1] - m30_candles.open[-1])
+        m30_last_range = m30_candles.high[-1] - m30_candles.low[-1]
+        body_pct = (m30_last_body / m30_last_range) if m30_last_range > 0 else 0
         
-        # M15 RVOL (2 pts)
-        m15_vol_sma20 = np.mean(m15_vols[-20:])
-        if m15_vols[-1] >= m15_vol_sma20:
-            exec_score += 2
-        elif m15_vols[-1] >= m15_vol_sma20 * 0.8:
-            exec_score += 1 # Borderline volume OK
-            
-        # M15 ADX Slope (2 pts)
-        adx_diff = m15_adx[-1] - m15_adx[-2]
-        if adx_diff > 0:
-            exec_score += 2
-        elif abs(adx_diff) < (m15_adx[-1] * 0.05): # Flat ADX is acceptable
-            exec_score += 1
-            
-        vol_spike = m15_atr > (h4_atr * 2.0)
-        
-        # 2. M5 Trigger Layer (Weighted)
-        m5_body = abs(m5_candles.close[-1] - m5_candles.open[-1])
-        m5_range = m5_candles.high[-1] - m5_candles.low[-1]
-        body_ratio = (m5_body / m5_range) if m5_range > 0 else 0
-        
-        if body_ratio >= 0.60:
-            exec_score += 3
-        elif body_ratio >= 0.45:
-            exec_score += 2 # Relaxed ratio for Gold volatility
-        elif body_ratio >= 0.30:
-            exec_score += 1
-            
-        # Spring Effect (1 pt)
-        tr5 = np.maximum(m5_candles.high[1:] - m5_candles.low[1:], 
-                         np.maximum(np.abs(m5_candles.high[1:] - m5_candles.close[:-1]), 
-                                    np.abs(m5_candles.low[1:] - m5_candles.close[:-1])))
-        m5_atr_tight = np.mean(tr5[-3:])
-        m5_atr_baseline = np.mean(tr5[-20:])
-        if m5_atr_tight <= m5_atr_baseline:
-            exec_score += 1
-            
-        # Fuel Check (2 pts)
-        m5_vols = m5_candles.tick_volume
-        m5_vol_sma10 = np.mean(m5_vols[-11:-1])
-        if m5_vols[-1] >= (m5_vol_sma10 * 1.5):
-            exec_score += 2
-        elif m5_vols[-1] >= (m5_vol_sma10 * 1.1):
-            exec_score += 1
+        if body_pct < 0.40: # Reject indecision/doji candles
+            return None
 
-        # GATING: Require at least 5/10 Performance Score for Breakout
-        if exec_score < 5:
-            return None 
+        # 2. Volatility Expansion Filter (Phase 5)
+        # Only enter if current ATR is expanding beyond the 100-period average
+        m30_atr = self._calculate_atr(m30_candles)
+        atr_sma_100 = self._calculate_ema(m30_candles.high - m30_candles.low, 100)
+        if m30_atr < atr_sma_100:
+            return None
 
-        # 3. Final Breakout Structure Logic
-        lookback = self.swing_lookback 
+        # 3. Higher Timeframe (M30) Breakout
+        lookback = self.swing_lookback
         if trend == "BULLISH":
-            res_m15 = np.max(m15_candles.high[-lookback:-1])
-            if current_price > res_m15:
-                m5_ema = self._calculate_ema(m5_candles.close, self.ema_fast)
-                if current_price > m5_ema:
-                    signal = TradeSignal("BUY", current_price, 0, 0, reasons=["Breakout", f"Score:{exec_score}"], session=session)
-                    signal.volatility_spike = vol_spike
-                    return signal
+            res_m30 = np.max(m30_candles.high[-lookback:-1])
+            if current_price > res_m30:
+                return TradeSignal("BUY", current_price, 0, 0, reasons=["M30 Breakout"], session=session)
         else:
-            sup_m15 = np.min(m15_candles.low[-lookback:-1])
-            if current_price < sup_m15:
-                m5_ema = self._calculate_ema(m5_candles.close, self.ema_fast)
+            sup_m30 = np.min(m30_candles.low[-lookback:-1])
+            if current_price < sup_m30:
+                return TradeSignal("SELL", current_price, 0, 0, reasons=["M30 Breakout"], session=session)
+                
+        # 4. Lower Timeframe (M5) Breakout (Hyper Frequency)
+        m5_lookback = 5 # [FIX]: Increased from 3 to 5 to filter out micro-fakeouts
+        if trend == "BULLISH":
+            res_m5 = np.max(m5_candles.high[-m5_lookback:-1])
+            if current_price > res_m5:
+                m5_closes = m5_candles.close
+                m5_ema = self._calculate_ema(m5_closes, self.ema_fast)
+                if current_price > m5_ema:
+                    return TradeSignal("BUY", current_price, 0, 0, reasons=["M5 Breakout"], session=session)
+        else:
+            sup_m5 = np.min(m5_candles.low[-m5_lookback:-1])
+            if current_price < sup_m5:
+                m5_closes = m5_candles.close
+                m5_ema = self._calculate_ema(m5_closes, self.ema_fast)
                 if current_price < m5_ema:
-                    signal = TradeSignal("SELL", current_price, 0, 0, reasons=["Breakout", f"Score:{exec_score}"], session=session)
-                    signal.volatility_spike = vol_spike
-                    return signal
+                    return TradeSignal("SELL", current_price, 0, 0, reasons=["M5 Breakout"], session=session)
+
                 
         return None
 
-    def _check_pullback_entry(self, m15_candles: 'CandleArray', m5_candles: 'CandleArray', 
-                              trend: str, current_price: float, session: str) -> Optional[TradeSignal]:
-        """
-        [PHASE 12] Pullback Logic (Mean-Reversion in trend).
-        Catches entries on EMA retests after a recent M15 breakout.
-        """
-        if trend == "RANGING": return None
+    def _check_pullback_entry(self, m30_candles: 'CandleArray', m5_candles: 'CandleArray', trend: str, current_price: float) -> Optional[TradeSignal]:
+        closes = m30_candles.close
+        ema20 = self._calculate_ema(closes, 20)
+        buffer = self.pullback_distance_pct / 100
         
-        m15_ema20 = self._calculate_ema(m15_candles.close, 20)
-        m15_ema50 = self._calculate_ema(m15_candles.close, 50)
-        
-        # Pullback: Price retraces towards EMA20 while trend is established
-        if trend == "BULLISH":
-            # 1. Structural requirements: 20 > 50
-            if m15_ema20 > m15_ema50:
-                # 2. Touch/Approach Check: Current price near or slightly below EMA20 but above EMA50
-                if m15_ema50 < current_price < (m15_ema20 * 1.002):
-                    # 3. Confirmation: M5 candle must be closing higher (Rejection of the low)
-                    if m5_candles.close[-1] > m5_candles.open[-1] and m5_candles.close[-1] > m15_ema20:
-                        return TradeSignal("BUY", current_price, 0, 0, reasons=["EMA Pullback"], session=session)
-        else: # BEARISH
-            if m15_ema20 < m15_ema50:
-                if m15_ema50 > current_price > (m15_ema20 * 0.998):
-                    if m5_candles.close[-1] < m5_candles.open[-1] and m5_candles.close[-1] < m15_ema20:
-                        return TradeSignal("SELL", current_price, 0, 0, reasons=["EMA Pullback"], session=session)
+        if trend == "BULLISH" and current_price > ema20 * 0.99:
+            if m30_candles.low[-2] <= ema20 * (1 + buffer):
+                return TradeSignal("BUY", current_price, 0, 0, rejection_type="PULLBACK")
+        elif trend == "BEARISH" and current_price < ema20 * 1.01:
+            if m30_candles.high[-2] >= ema20 * (1 - buffer):
+                return TradeSignal("SELL", current_price, 0, 0, rejection_type="PULLBACK")
         return None
 
     def _set_sl_tp(self, signal: TradeSignal, atr: float, m30_candles: 'CandleArray', 
                    h4_strength: int, session: str, confluence_score: int, ai_bias: float = 0.0) -> TradeSignal:
         
-        """
-        [PHASE 11] Institutional Risk Assignment.
-        Handles Dynamic RR scaling and Volatility Spike expansion.
-        """
+        # [PHASE 7] Session-aware Override Check
         session_conf = self.config.get("session_config", {}).get(session, {})
         
-        # 1. Base RR from Trend Strength
-        if h4_strength > 75: # Institutional Conviction
+        # 1. Base RR from Trend Strength (Heuristic Baseline)
+        if h4_strength > 70:
             rr = 3.0
         elif h4_strength > 55:
             rr = 2.5
-        elif h4_strength < 40: # Ranging mode
-            rr = 1.5
+        elif h4_strength == 50: # RANGING
+            rr = 1.8
         else:
             rr = 2.0
             
-        # 2. AI Bias Adjustment
+        # 2. Volatility Adjustment (ATR Ratio)
+        atr_avg = np.mean(m30_candles.high[-20:] - m30_candles.low[-20:])
+        vol_factor = atr / atr_avg if atr_avg > 0 else 1.0
+        if vol_factor > 1.2:
+            rr *= 1.2 
+        elif vol_factor < 0.8:
+            rr *= 0.8 
+
+        # 3. Session Adjustment (Heuristic or Override)
+        if "rr_ratio" in session_conf:
+            rr = session_conf["rr_ratio"]
+        else:
+            if session == "LONDON/NY":
+                rr += 0.5 
+            elif session == "TOKYO":
+                rr -= 0.3 
+            
+        # 4. AI Bias Adjustment
         rr += ai_bias
         
-        # 3. Final Clamp
+        # 5. Confluence Adjustment
+        if confluence_score >= 6:
+            rr += 0.3
+            
+        # 6. Final Clamp and Buffer Lookup
         rr = max(1.5, min(rr, 6.0))
         
-        # 4. Volatility SL Buffer
         sl_buffer_mult = session_conf.get("sl_atr_buffer", self.sl_atr_buffer)
-        
-        # Tier 2 Expansion: Volatility news spike
-        if getattr(signal, 'volatility_spike', False):
-            sl_buffer_mult = 3.0 # Expanded for safety
-            
-        # 4. SL Calculation (Adaptive)
-        sl_buffer_mult = self.sl_atr_buffer # Now 1.5 by default
-        if h4_strength > 75:
-            sl_buffer_mult *= 0.8 # Tighten for high conviction
-        elif h4_strength < 40:
-            sl_buffer_mult *= 1.2 # Loosen for low conviction
-            
         buffer = sl_buffer_mult * atr
         
-        # 5. Price Placement
         if signal.direction == "BUY":
-            # [Institutional] Use the lower of EMA or recent Swing Low
-            m5_lows = m30_candles.low[-5:]
-            signal.stop_loss = np.min(m5_lows) - buffer
+            signal.stop_loss = np.min(m30_candles.low[-3:]) - buffer
             risk = signal.entry_price - signal.stop_loss
             signal.take_profit = signal.entry_price + (risk * rr)
             signal.tp1_price = signal.entry_price + (risk * 1.0)
             signal.tp2_price = signal.entry_price + (risk * 2.0)
             signal.tp3_price = signal.take_profit
         else:
-            m5_highs = m30_candles.high[-5:]
-            signal.stop_loss = np.max(m5_highs) + buffer
+            signal.stop_loss = np.max(m30_candles.high[-3:]) + buffer
             risk = signal.stop_loss - signal.entry_price
             signal.take_profit = signal.entry_price - (risk * rr)
             signal.tp1_price = signal.entry_price - (risk * 1.0)
@@ -730,50 +547,32 @@ class StrategyEngine:
         signal.rr_ratio = rr
         return signal
 
-    def _tokyo_mean_reversion(self, m30_candles: 'CandleArray', m5_candles: 'CandleArray', 
-                              current_price: float, m30_ema: float, m30_rsi: float, session: str) -> Optional[TradeSignal]:
-        """
-        [PHASE 11] Adaptive Mean-Reversion Trigger.
-        Used for Tokyo session or Ranging/Low-ADX markets.
-        """
-        # Overbought/Oversold thresholds for MR
-        if m30_rsi > 70 and current_price < m30_ema:
-            # Signal: High rejection from overbought top, returning to mean
-            return TradeSignal("SELL", current_price, 0, 0, reasons=["Tokyo MR (Resistance)"], session=session)
-        elif m30_rsi < 30 and current_price > m30_ema:
-            # Signal: Strong bounce from oversold bottom, returning to mean
-            return TradeSignal("BUY", current_price, 0, 0, reasons=["Tokyo MR (Support)"], session=session)
-            
-        return None
-
-    def _calculate_confluence(self, h4_trend: str, h4_conviction: int, regime: str, signal: TradeSignal,
-                               m30_candles: 'CandleArray', m5_candles: 'CandleArray',
-                               m30_atr: float, m5_atr: float, session: str) -> Tuple[int, List[str]]:
-        """Institutional Confluence Scoring without H1 dependency."""
+    def _calculate_confluence(self, h4_trend: str, h4_strength: int, regime: str, signal: TradeSignal,
+                              m30_candles: 'CandleArray', m5_candles: 'CandleArray',
+                              m30_atr: float, m5_atr: float, session: str) -> Tuple[int, List[str]]:
         reasons = []
         score = 0
-        # 1. Trend Alignment (4 pts)
         if (signal.direction == "BUY" and h4_trend == "BULLISH") or (signal.direction == "SELL" and h4_trend == "BEARISH"):
             score += 2; reasons.append("H4 Alignment")
-            if h4_conviction > 60:
-                score += 2; reasons.append("High Conviction Anchor")
-            elif h4_conviction > 40:
-                score += 1; reasons.append("Moderate Trend Strength")
+        
+        closes = m30_candles.close
+        h1_rsi = self._calculate_rsi(closes, 14)
+        if (signal.direction == "BUY" and h1_rsi > 50) or (signal.direction == "SELL" and h1_rsi < 50):
+            score += 1; reasons.append("H1 Momentum")
             
-        # 2. Session Momentum (1 pt)
-        if session and session in ["LONDON", "LONDON/NY", "NEW_YORK"]:
-            score += 1; reasons.append(f"{session} Momentum Session")
+        if session and session in ["LONDON", "LONDON/NY", "NEW_YORK", "TOKYO"]:
+            score += 1; reasons.append(f"{session} Session")
             
-        # 3. M5 EMA Alignment (2 pts)
+        if m5_atr > m30_atr * 0.1:
+            score += 1; reasons.append("Volatility Exp")
+            
         m5_closes = m5_candles.close
         m5_ema20 = self._calculate_ema_series(m5_closes, 20)
-        m5_ema50 = self._calculate_ema_series(m5_closes, 50)
-        
         if len(m5_ema20) > 2:
-            if signal.direction == "BUY" and m5_ema20[-1] > m5_ema50[-1]:
-                score += 2; reasons.append("M5 EMA Alignment")
-            elif signal.direction == "SELL" and m5_ema20[-1] < m5_ema50[-1]:
-                score += 2; reasons.append("M5 EMA Alignment")
+            if signal.direction == "BUY" and m5_ema20[-1] > m5_ema20[-2]:
+                score += 1; reasons.append("M5 EMA Slope")
+            elif signal.direction == "SELL" and m5_ema20[-1] < m5_ema20[-2]:
+                score += 1; reasons.append("M5 EMA Slope")
             
         return score, reasons
 
@@ -810,123 +609,109 @@ class StrategyEngine:
                 self.consecutive_losses[s] = 0
                 self.session_cooldown_active[s] = False
 
-    def _analyze_preprocessed(self, preprocessed: dict, m30: 'CandleArray', m15: 'CandleArray', 
-                              m5: 'CandleArray', price: float, session: str) -> Tuple[Optional[TradeSignal], str, str]:
-        """Vectorized Backtest Path for Phase 11 logic."""
-        trend = preprocessed["h4_trend"]
-        conv = preprocessed["h4_conviction"]
-        regime = preprocessed["regime"]
-        h4_atr = preprocessed["h4_atr"]
-        
-        # Mode Selection
-        if trend == "RANGING" or conv < 40:
-            signal = self._tokyo_mean_reversion(m30, m5, price, preprocessed["m30_ema"], preprocessed["m30_rsi"], session)
-            return signal, trend, regime
-            
-        # Momentum Quality Gate (M30)
-        if preprocessed["m30_er"] < 0.35: return None, trend, regime
-        if trend == "BULLISH" and not preprocessed["m30_macd_vel_up"]: return None, trend, regime
-        if trend == "BEARISH" and not preprocessed["m30_macd_vel_down"]: return None, trend, regime
-        if trend == "BULLISH" and preprocessed["m30_vw_rsi"] < 45: return None, trend, regime
-        if trend == "BEARISH" and preprocessed["m30_vw_rsi"] > 55: return None, trend, regime
-        
-        # Execution & Trigger Layer (Breakout First)
-        signal = self._check_breakout_entry(m15, m5, trend, price, session, h4_atr)
-        
-        # [PHASE 12] Dual-Trigger System in Backtest
-        if not signal:
-            signal = self._check_pullback_entry(m15, m5, trend, price, session)
-        
-        if signal:
-            # Re-use scalar confluence and sl/tp logic for accuracy
-            conf, reasons = self._calculate_confluence(trend, conv, regime, signal, m30, m5, 0, 0, session)
-            signal.confluence_score = conf
-            signal.reasons = reasons
-            
-            ai_bias = self.config.get("ai_advisor", {}).get("bias", 0.0)
-            if conv > 75: ai_bias += 0.5
-            
-            m15_atr = self._calculate_atr(m15)
-            signal = self._set_sl_tp(signal, m15_atr, m30, conv, session, conf, ai_bias)
-            signal.confidence = self._calculate_confidence(conf, conv, signal)
-            
-            session_conf = self.config.get("session_config", {}).get(session, {})
-            # Relaxed threshold for pullback entries to increase frequency
-            min_score = session_conf.get("min_confluence_score", self.min_confluence_score)
-            if "EMA Pullback" in signal.reasons:
-                min_score = max(3, min_score - 1)
-                
-            if signal.confluence_score < min_score:
-                return None, trend, regime
-                
-        return signal, trend, regime
-
-    def preprocess_history(self, h4: 'CandleArray', m30: 'CandleArray', m15: 'CandleArray', m5: 'CandleArray') -> dict:
+    def preprocess_history(self, h4: 'CandleArray', h1: 'CandleArray', m30: 'CandleArray', m5: 'CandleArray') -> dict:
         """
-        [PHASE 11] Institutional Vectorized Preprocessing.
-        Maps H4-M30-M15 state to each M5 candle using strict look-behind offsets.
+        Pre-calculates all technical indicators and trends for full history speed.
+        Returns a dictionary of mapped states for each M5 candle.
         """
         import time as timer
-        start = timer.time()
-        logger.info("[Strategy] Phase 11 Vectorized Preprocessing started...")
-
-        # 1. H4 Pre-calculations (Anchor)
-        h4_trend_series = []
-        h4_conv_series = []
-        h4_atr_series = []
-        for i in range(len(h4)):
-            slice_h4 = h4[:i+1]
-            t, c = self._get_h4_trend(slice_h4)
-            h4_trend_series.append(t)
-            h4_conv_series.append(c)
-            h4_atr_series.append(self._calculate_atr(slice_h4))
-
-        # 2. M30 Pre-calculations (Momentum)
-        m30_closes = m30.close
-        m30_vols = m30.tick_volume
-        m30_ema = self._calculate_ema_series(m30_closes, 10)
-        m30_rsi = self._calculate_rsi_series(m30_closes, 14)
-        m30_vw_rsi = self._calculate_vw_rsi_series(m30_closes, m30_vols, 14)
-        m30_er = self._calculate_efficiency_ratio_series(m30_closes, 14)
-        _, _, m30_hist = self._calculate_macd_series(m30_closes)
+        import logging
+        logger = logging.getLogger("trading_bot.strategy")
         
-        m30_regimes = []
-        for i in range(len(m30)):
-            m30_regimes.append(MarketRegime.classify(m30[:i+1]))
+        start = timer.time()
+        logger.info("[Strategy] Vectorized Preprocessing started...")
 
-        # 3. Time-based Mapping to M5
+        # 1. Indicator Pre-calculations
+        h4_closes = h4.close
+        h1_closes = h1.close
+        m30_closes = m30.close
+        m5_closes = m5.close
+        
+        m30_ema = self._calculate_ema_series(m30_closes, 10)
+        h1_ema20 = self._calculate_ema_series(h1_closes, 14)
+        h1_rsi = self._calculate_rsi_series(h1_closes, 14)
+        
+        # 2. Time-based Mappings
         m5_times = m5.time
         h4_times = h4.time
+        h1_times = h1.time
         m30_times = m30.time
-        m15_times = m15.time # though not used for mapping yet, good to have
         
+        h4_trend_data = []
+        for i in range(len(h4)):
+            slice_h4 = h4[:i+1]
+            if len(slice_h4) < 20:
+                h4_trend_data.append(("RANGING", 0))
+            else:
+                h4_trend_data.append(self._get_h4_trend(slice_h4))
+        
+        m30_regime_data = []
+        m30_atr_data = []
+        sma_atr_20_data = []
+        
+        h30 = m30.high
+        l30 = m30.low
+        c30 = m30.close
+        tr30 = np.zeros_like(c30)
+        tr30[1:] = np.maximum(h30[1:] - l30[1:], 
+                              np.maximum(np.abs(h30[1:] - c30[:-1]), 
+                                         np.abs(l30[1:] - c30[:-1])))
+        
+        h5 = m5.high
+        l5 = m5.low
+        c5 = m5.close
+        tr5 = np.zeros_like(c5)
+        tr5[1:] = np.maximum(h5[1:] - l5[1:], 
+                             np.maximum(np.abs(h5[1:] - c5[:-1]), 
+                                        np.abs(l5[1:] - c5[:-1])))
+        m5_atrs = np.zeros_like(c5)
+        for i in range(len(m5)):
+            m5_atrs[i] = np.mean(tr5[max(0, i-13):i+1]) if i > 0 else 0.1
+        
+        for i in range(len(m30)):
+            slice_m30 = m30[:i+1]
+            reg = MarketRegime.classify(slice_m30)
+            m30_regime_data.append(reg)
+            
+            atr = np.mean(tr30[max(0, i-13):i+1]) if i > 0 else 0.1
+            m30_atr_data.append(atr)
+            sma_atr_20_data.append(np.mean(tr30[max(0, i-19):i+1]) if i > 0 else atr)
+
+        # 3. Final M5 Mapping
         m5_precomputed = []
         for i in range(len(m5)):
             t = m5_times[i]
             
-            # Offsets to prevent look-ahead bias
+            # [FIX]: Subtract timeframe duration to prevent Look-ahead Bias
             h4_idx = np.searchsorted(h4_times, t - 14400, side='right') - 1
+            h1_idx = np.searchsorted(h1_times, t - 3600, side='right') - 1
             m30_idx = np.searchsorted(m30_times, t - 1800, side='right') - 1
             
             h4_idx = max(0, h4_idx)
+            h1_idx = max(0, h1_idx)
             m30_idx = max(0, m30_idx)
+
+            h1_t = "BULLISH" if h1_closes[h1_idx] > h1_ema20[h1_idx] else "BEARISH"
+            h4_t, h4_s = h4_trend_data[h4_idx]
             
-            # MACD Velocity
-            m30_macd_vel_up = m30_hist[m30_idx] > m30_hist[max(0, m30_idx-1)]
-            m30_macd_vel_down = m30_hist[m30_idx] < m30_hist[max(0, m30_idx-1)]
+            effective_trend = h4_t
+            if h4_t == "RANGING":
+                effective_trend = h1_t
+                h4_s = 20
+                
+            atr_ratio = m30_atr_data[m30_idx] / sma_atr_20_data[m30_idx] if sma_atr_20_data[m30_idx] > 0 else 1.0
             
             m5_precomputed.append({
-                "h4_trend": h4_trend_series[h4_idx],
-                "h4_conviction": h4_conv_series[h4_idx],
-                "h4_atr": h4_atr_series[h4_idx],
-                "regime": m30_regimes[m30_idx],
+                "h4_trend": effective_trend,
+                "h4_strength": h4_s,
+                "regime": m30_regime_data[m30_idx],
+                "h1_rsi": h1_rsi[h1_idx],
                 "m30_ema": m30_ema[m30_idx],
-                "m30_rsi": m30_rsi[m30_idx],
-                "m30_vw_rsi": m30_vw_rsi[m30_idx],
-                "m30_er": m30_er[m30_idx],
-                "m30_macd_vel_up": m30_macd_vel_up,
-                "m30_macd_vel_down": m30_macd_vel_down
+                "m30_atr": m30_atr_data[m30_idx],
+                "sma_atr_20": sma_atr_20_data[m30_idx],
+                "vol_scaling": (atr_ratio < 0.6 or atr_ratio > 2.5),
+                "m5_atr": m5_atrs[i]
             })
             
         logger.info("[Strategy] Preprocessing complete in %.2fs", timer.time() - start)
-        return {"m5": m5_precomputed}
+        return {"m5": m5_precomputed}

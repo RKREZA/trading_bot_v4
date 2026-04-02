@@ -201,8 +201,8 @@ class TradingBot:
                 self.risk_manager.reset_daily_stats(acc.get("balance", 0.0))
             self._save_state()
 
-    def _manage_trailing_stops(self, symbol: str, current_bid: float, current_ask: float, atr: float) -> None:
-        self.trailing_stop_manager.manage_positions(symbol, current_bid, current_ask, atr)
+    def _manage_trailing_stops(self, symbol: str, current_bid: float, current_ask: float) -> None:
+        self.trailing_stop_manager.manage_positions(symbol, current_bid, current_ask)
 
     def _startup_checks(self) -> bool:
         """Run before entering the main loop."""
@@ -257,16 +257,6 @@ class TradingBot:
                 acc = self.connection.get_account_snapshot()
                 tick = mt5.symbol_info_tick(symbol) if mt5 else None
                 
-                # Fetch candles securely
-                d1_candles = self.data_fetcher.fetch_candles(symbol, "D1", 100)
-                h4_candles = self.data_fetcher.fetch_candles(symbol, "H4", 100)
-                m30_candles = self.data_fetcher.fetch_candles(symbol, "M30", 100)
-                m15_candles = self.data_fetcher.fetch_candles(symbol, "M15", 100)
-                m5_candles = self.data_fetcher.fetch_candles(symbol, "M5", 100)
-                
-                # Calculate current ATR (M15 for execution layer)
-                current_atr = self.strategy._calculate_atr(m15_candles) if len(m15_candles) > 0 else 0.0
-                
                 # Update Dashboard State
                 self.dashboard.account_info = acc
                 if tick:
@@ -280,18 +270,28 @@ class TradingBot:
                 
                 # Update tick prices for trailing
                 if tick:
-                    self._manage_trailing_stops(symbol, tick.bid, tick.ask, current_atr)
+                    self._manage_trailing_stops(symbol, tick.bid, tick.ask)
+
+                # Fetch candles securely
+                d1_candles = self.data_fetcher.fetch_candles(symbol, "D1", 100)
+                h4_candles = self.data_fetcher.fetch_candles(symbol, "H4", 100)
+                h1_candles = self.data_fetcher.fetch_candles(symbol, "H1", 100)
+                m30_candles = self.data_fetcher.fetch_candles(symbol, "M30", 100)
+                m5_candles = self.data_fetcher.fetch_candles(symbol, "M5", 100)
                 
-                if len(m5_candles) > 0:
-                    current_price = m5_candles.close[-1]
+                if len(m30_candles) > 0:
+                    current_price = m30_candles.close[-1]
                     session = "NEW_YORK" # simplified fallback if TimeManager missing
                     if hasattr(self.strategy, 'get_session_from_hour'):
                         session = self.strategy.get_session_from_hour(datetime.now(timezone.utc).hour)
                     
                     self.dashboard.session = session
                     
+                    # Log to dashboard if needed
+                    # self.analysis_logger.log(f"Analyzed {symbol} at {current_price}")
+                        
                     self.execution_pipeline.execute_cycle(
-                        symbol, h4_candles, m30_candles, m15_candles, m5_candles, d1_candles, current_price, session
+                        symbol, m30_candles, h1_candles, h4_candles, m5_candles, d1_candles, current_price, session
                     )
                 
                 # Final Dashboard update for the cycle
