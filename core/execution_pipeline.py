@@ -39,7 +39,7 @@ class ExecutionPipeline:
         self.state_lock = state_lock
         self.spread_history = []
         
-    def execute_cycle(self, symbol: str, m30: "CandleArray", h1: "CandleArray", h4: "CandleArray", m5: "CandleArray", d1: "CandleArray", current_price: float, session: str) -> bool:
+    def execute_cycle(self, symbol: str, h1: "CandleArray", m15: "CandleArray", m5: "CandleArray", d1: "CandleArray", current_price: float, session: str) -> bool:
         """Runs one full execution cycle for a symbol."""
         # 0. Risk Context & Circuit Breakers
         acc_info = self.connection.get_account_snapshot()
@@ -96,10 +96,9 @@ class ExecutionPipeline:
         # 1. Generate Signal
         signal, trend, regime = self.strategy.analyze(
             symbol=symbol,
-            m30_candles=m30,
             h1_candles=h1,
-            h4_candles=h4,
-            m5_candles=m5,
+            m15_candles=m15,
+            m5_candles_original=m5,
             d1_candles=d1,
             current_price=current_price,
             session=session,
@@ -115,7 +114,8 @@ class ExecutionPipeline:
             return False
 
         # 4. AI Advisory (Veto) Check
-        if hasattr(self.ai_advisor, 'enabled') and self.ai_advisor.enabled:
+        use_ai = self.config.get("use_ai_filter", False)
+        if use_ai and hasattr(self.ai_advisor, 'enabled') and self.ai_advisor.enabled:
              signal_data_for_ai = {
                  "direction": signal.direction,
                  "reasons": signal.reasons,

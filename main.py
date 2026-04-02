@@ -16,7 +16,14 @@ import copy
 import pandas as pd
 import numpy as np
 from datetime import datetime, timezone, date, timedelta
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict, Any
+
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+from rich import print as rprint
+from rich.live import Live
+
 from core.walk_forward import WalkForwardValidation
 from core.health import start_health_server
 from core.types import BotConfig
@@ -201,8 +208,8 @@ class TradingBot:
                 self.risk_manager.reset_daily_stats(acc.get("balance", 0.0))
             self._save_state()
 
-    def _manage_trailing_stops(self, symbol: str, current_bid: float, current_ask: float) -> None:
-        self.trailing_stop_manager.manage_positions(symbol, current_bid, current_ask)
+    def _manage_trailing_stops(self, symbol: str, current_bid: float, current_ask: float, atr: float, last_candle: dict) -> None:
+        self.trailing_stop_manager.manage_positions(symbol, current_bid, current_ask, atr, last_candle)
 
     def _startup_checks(self) -> bool:
         """Run before entering the main loop."""
@@ -268,30 +275,27 @@ class TradingBot:
                 self.dashboard.loss_count = self.loss_count
                 self.dashboard.positions = self.connection.get_positions(symbol)
                 
-                # Update tick prices for trailing
-                if tick:
-                    self._manage_trailing_stops(symbol, tick.bid, tick.ask)
-
                 # Fetch candles securely
-                d1_candles = self.data_fetcher.fetch_candles(symbol, "D1", 100)
-                h4_candles = self.data_fetcher.fetch_candles(symbol, "H4", 100)
-                h1_candles = self.data_fetcher.fetch_candles(symbol, "H1", 100)
-                m30_candles = self.data_fetcher.fetch_candles(symbol, "M30", 100)
-                m5_candles = self.data_fetcher.fetch_candles(symbol, "M5", 100)
+                h1_candles = self.data_fetcher.fetch_candles(symbol, "H1", 200)
+                m15_candles = self.data_fetcher.fetch_candles(symbol, "M15", 200)
+                m5_candles = self.data_fetcher.fetch_candles(symbol, "M5", 500)
+                d1_candles = self.data_fetcher.fetch_candles(symbol, "D1", 50)
+
+                # 4. Trailing Stops (Sniper Mode M5)
+                if tick and len(m5_candles) > 30:
+                    atr = self.strategy._calculate_atr(m5_candles, 14) 
+                    self._manage_trailing_stops(symbol, tick.bid, tick.ask, atr, m5_candles[-1])
                 
-                if len(m30_candles) > 0:
-                    current_price = m30_candles.close[-1]
-                    session = "NEW_YORK" # simplified fallback if TimeManager missing
+                if len(m5_candles) > 30:
+                    current_price = m5_candles.close[-1]
+                    session = "NEW_YORK" 
                     if hasattr(self.strategy, 'get_session_from_hour'):
                         session = self.strategy.get_session_from_hour(datetime.now(timezone.utc).hour)
                     
                     self.dashboard.session = session
-                    
-                    # Log to dashboard if needed
-                    # self.analysis_logger.log(f"Analyzed {symbol} at {current_price}")
                         
                     self.execution_pipeline.execute_cycle(
-                        symbol, m30_candles, h1_candles, h4_candles, m5_candles, d1_candles, current_price, session
+                        symbol, h1_candles, m15_candles, m5_candles, d1_candles, current_price, session
                     )
                 
                 # Final Dashboard update for the cycle
@@ -308,6 +312,61 @@ class TradingBot:
             self._save_state()
             self.connection.disconnect()
             logger.info("Shutdown complete.")
+
+    def _print_backtest_summary(self, res: dict):
+        console = Console()
+        
+        # 1. Main Metrics Table
+        table = Table(title="SNIPER MODE: FINAL VALIDATION", show_header=True, header_style="bold cyan")
+        table.add_column("Metric", style="dim")
+        table.add_column("Value", justify="right", style="bold yellow")
+        
+        table.add_row("Initial Balance", f"${res.get('initial_balance', 1000.0):.2f}")
+        table.add_row("Final Balance", f"${res.get('final_balance', 0.0):.2f}")
+        table.add_row("Net Profit", f"[bold {'green' if res.get('net_profit', 0) >= 0 else 'red'}]${res.get('net_profit', 0.0):.2f}[/]")
+        table.add_row("-", "-")
+        table.add_row("Win Rate", f"{res.get('win_rate', 0.0):.1f}%")
+        table.add_row("Total Trades", str(res.get('total_trades', 0)))
+        
+        # Calculate PF and Sharpe if not present
+        df = pd.DataFrame(res.get('trades', []))
+        if not df.empty:
+            pos = df[df['pnl'] > 0]['pnl'].sum()
+            neg = abs(df[df['pnl'] < 0]['pnl'].sum())
+            pf = pos / neg if neg > 0 else 99.0
+            table.add_row("Profit Factor", f"{pf:.2f}")
+            
+            # Drawdown
+            df['cum_pnl'] = df['pnl'].cumsum()
+            df['peak'] = df['cum_pnl'].cummax()
+            df['dd'] = df['peak'] - df['cum_pnl']
+            max_dd = df['dd'].max()
+            table.add_row("Max Drawdown ($)", f"${max_dd:.2f}")
+        
+        console.print(Panel(table, border_style="green", title="[bold white]Institutional Analytics[/]"))
+        
+        # 2. Session Breakdown Table
+        if not df.empty:
+            s_table = Table(title="Session performance", show_header=True, header_style="bold magenta")
+            s_table.add_column("Session")
+            s_table.add_column("Trades", justify="right")
+            s_table.add_column("Wins (TP)", justify="right", style="green")
+            s_table.add_column("Losses (SL)", justify="right", style="red")
+            s_table.add_column("Win Rate", justify="right")
+            s_table.add_column("Net PnL", justify="right")
+            
+            for session in ["TOKYO", "LONDON", "LONDON/NY", "NEW_YORK"]:
+                s_df = df[df['session'] == session]
+                if s_df.empty: continue
+                wins = len(s_df[s_df['pnl'] > 0])
+                losses = len(s_df[s_df['pnl'] < 0])
+                s_wr = (wins / len(s_df) * 100)
+                s_pnl = s_df['pnl'].sum()
+                s_table.add_row(
+                    session, str(len(s_df)), str(wins), str(losses), f"{s_wr:.1f}%", 
+                    f"[{'green' if s_pnl >= 0 else 'red'}]${s_pnl:.2f}[/]"
+                )
+            console.print(s_table)
 
     def run_backtest(self, symbol="XAUUSDm", start_date=None, end_date=None, count=10000):
         print(f"Project 10/10 Final Validation: {symbol}")
@@ -334,23 +393,23 @@ class TradingBot:
                 # Use UTC for backtest date range to match candles
                 dt_from = datetime.fromisoformat(start_date).replace(tzinfo=timezone.utc)
                 dt_to = datetime.fromisoformat(end_date).replace(tzinfo=timezone.utc)
-                h4 = self.data_fetcher.fetch_candles_range(symbol, "H4", dt_from, dt_to)
                 h1 = self.data_fetcher.fetch_candles_range(symbol, "H1", dt_from, dt_to)
-                m30 = self.data_fetcher.fetch_candles_range(symbol, "M30", dt_from, dt_to)
+                m15 = self.data_fetcher.fetch_candles_range(symbol, "M15", dt_from, dt_to)
                 m5 = self.data_fetcher.fetch_candles_range(symbol, "M5", dt_from, dt_to)
                 d1 = self.data_fetcher.fetch_candles_range(symbol, "D1", dt_from, dt_to)
             else:
-                h4 = self.data_fetcher.fetch_candles(symbol, "H4", count)
                 h1 = self.data_fetcher.fetch_candles(symbol, "H1", count)
-                m30 = self.data_fetcher.fetch_candles(symbol, "M30", count)
+                m15 = self.data_fetcher.fetch_candles(symbol, "M15", count)
                 m5 = self.data_fetcher.fetch_candles(symbol, "M5", count)
                 d1 = self.data_fetcher.fetch_candles(symbol, "D1", count)
                 
             # Backtest Strategy Setup
             engine = BacktestEngine(self.config, self.strategy)
-
-            
-            return engine.run(symbol, h4, h1, m30, m5, d1)
+            res = engine.run(symbol, h1, m15, m5, d1)
+            if res:
+                res['initial_balance'] = self.config.get("backtest", {}).get("initial_balance", 1000.0)
+                self._print_backtest_summary(res)
+            return res
         finally:
             self.connection.disconnect()
 
@@ -363,20 +422,18 @@ class TradingBot:
             if start_date and end_date:
                 dt_from = datetime.fromisoformat(start_date).replace(tzinfo=timezone.utc)
                 dt_to = datetime.fromisoformat(end_date).replace(tzinfo=timezone.utc)
-                h4 = self.data_fetcher.fetch_candles_range(symbol, "H4", dt_from, dt_to)
                 h1 = self.data_fetcher.fetch_candles_range(symbol, "H1", dt_from, dt_to)
-                m30 = self.data_fetcher.fetch_candles_range(symbol, "M30", dt_from, dt_to)
+                m15 = self.data_fetcher.fetch_candles_range(symbol, "M15", dt_from, dt_to)
                 m5 = self.data_fetcher.fetch_candles_range(symbol, "M5", dt_from, dt_to)
                 d1 = self.data_fetcher.fetch_candles_range(symbol, "D1", dt_from, dt_to)
             else:
-                h4 = self.data_fetcher.fetch_candles(symbol, "H4", count)
                 h1 = self.data_fetcher.fetch_candles(symbol, "H1", count)
-                m30 = self.data_fetcher.fetch_candles(symbol, "M30", count)
+                m15 = self.data_fetcher.fetch_candles(symbol, "M15", count)
                 m5 = self.data_fetcher.fetch_candles(symbol, "M5", count)
                 d1 = self.data_fetcher.fetch_candles(symbol, "D1", count)
 
             wfo = WalkForwardValidation(self.config, self.strategy)
-            results = wfo.run_validation(symbol, h4, h1, m30, m5, d1, mode=mode)
+            results = wfo.run_validation(symbol, h1, m15, m5, d1, mode=mode)
             
             # Print Summary
             print("\n" + "="*40)
