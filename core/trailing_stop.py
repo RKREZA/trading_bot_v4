@@ -5,7 +5,7 @@ from typing import Dict, Any, Optional
 logger = logging.getLogger("trading_bot.trailing_stop")
 
 class TrailingStopManager:
-    """Manages aggressive runaway trailing stops and risk protection."""
+    """Manages adaptive trailing stops for 'Optimal Balance' strategy."""
     
     def __init__(self, config: dict, connection: Any, position_meta: Dict[int, Any], state_lock: threading.Lock):
         self.config = config
@@ -15,9 +15,7 @@ class TrailingStopManager:
         
     def manage_positions(self, symbol: str, current_bid: float, current_ask: float, atr: float, last_candle: Optional[dict] = None):
         """
-        Implements Sniper-grade Runaway Trailing (up to 1:15 RR).
-        - 1.0R: Break-Even
-        - 2.0R+: aggressive M1 Candle Trailing
+        Coordinates Trailing Stops for active positions.
         """
         if not self.config.get("trailing_stop_enabled", True):
             return
@@ -29,60 +27,66 @@ class TrailingStopManager:
         
         for pos in positions:
             if pos.magic != magic: continue
-                
+            
             ticket = pos.ticket
             with self.state_lock:
                 if ticket not in self.position_meta:
                     self.position_meta[ticket] = {
-                        "ticket": ticket, "session": "GLOBAL", "best_price": pos.price_current,
-                        "partial_closed_count": 0, "risk": abs(pos.price_open - pos.sl) if pos.sl > 0 else 0
+                        "ticket": ticket, "best_price": pos.price_current,
+                        "risk": abs(pos.price_open - pos.sl) if pos.sl > 0 else 0
                     }
-                    
                 meta = self.position_meta[ticket]
-                is_buy = (pos.type == 0)
-                current_price = current_bid if is_buy else current_ask
                 
-                # 1. Update High-Water Mark 
-                if is_buy and current_price > meta["best_price"]: meta["best_price"] = current_price
-                elif not is_buy and current_price < meta["best_price"]: meta["best_price"] = current_price
-                    
-                risk = meta.get("risk", 0)
-                if risk <= 0: risk = abs(pos.price_open - pos.sl) if pos.sl > 0 else 0
-                if risk <= 0: continue
+            is_buy = (pos.type == 0)
+            current_price = current_bid if is_buy else current_ask
+            
+            # 1. High-Water Mark Update
+            if (is_buy and current_price > meta["best_price"]) or (not is_buy and current_price < meta["best_price"]):
+                meta["best_price"] = current_price
                 
-                profit_points = (current_price - pos.price_open) if is_buy else (pos.price_open - current_price)
-                rr = profit_points / risk
-                
-                # 2. RUNAWAY TRAILING LOGIC
-                new_sl = None
-                
-                # Phase A: Break-Even (Move to BE+0.1R at 1.0R profit)
-                if rr >= 1.0 and pos.sl != (pos.price_open + (risk * 0.1) if is_buy else pos.price_open - (risk * 0.1)):
-                    new_sl = pos.price_open + (risk * 0.1) if is_buy else pos.price_open - (risk * 0.1)
-                    if (is_buy and new_sl > pos.sl) or (not is_buy and (pos.sl == 0.0 or new_sl < pos.sl)):
-                        self.connection.modify_sl_tp(ticket, symbol, new_sl, pos.tp)
-                        logger.info(f"[Runaway] Trade {ticket} moved to BE (1.0R hit)")
+            # 2. Optimized Trailing Logic (Shared with Backtest)
+            new_sl = self.calculate_new_sl(
+                is_buy, pos.price_open, pos.sl, meta["best_price"], atr, meta["risk"], last_candle
+            )
+            
+            if new_sl and new_sl != pos.sl:
+                if (is_buy and new_sl > pos.sl) or (not is_buy and (pos.sl == 0 or new_sl < pos.sl)):
+                    if self.connection.modify_sl_tp(ticket, symbol, new_sl, pos.tp):
+                        logger.info(f"[Trailing] Trade {ticket} -> {new_sl:.2f}")
 
-                # Phase B: Aggressive M1 Candle Trailing (at 2.0R+ profit)
-                if rr >= 2.0 and last_candle:
-                    # Move SL to the low/high of the previous M1 candle
-                    suggested_sl = last_candle['low'] if is_buy else last_candle['high']
-                    
-                    # Ensure we only move SL in profit direction (tightening)
-                    if is_buy and suggested_sl > pos.sl:
-                        new_sl = suggested_sl
-                    elif not is_buy and (pos.sl == 0.0 or suggested_sl < pos.sl):
-                        new_sl = suggested_sl
-                        
-                    if new_sl and new_sl != pos.sl:
-                        self.connection.modify_sl_tp(ticket, symbol, new_sl, pos.tp)
-                        logger.info(f"[Runaway] Trade {ticket} Trailing M1 Candle: {new_sl}")
+    @staticmethod
+    def calculate_new_sl(is_buy: bool, entry: float, current_sl: float, best_price: float, 
+                         atr: float, risk: float, last_candle: Optional[dict] = None) -> Optional[float]:
+        """
+        Core Trailing Engine: Synchronized between Live and Backtest.
+        Optimized for 'Optimal Balance' (70% WR / 1:2 RR).
+        """
+        if risk <= 0: return None
+        
+        profit_points = (best_price - entry) if is_buy else (entry - best_price)
+        rr = profit_points / risk
+        
+        new_sl = current_sl
 
-                # 3. Fallback Chandelier Exit (If M1 Trail not active or less aggressive)
-                if rr < 2.0:
-                    multiplier = 3.5
-                    chandelier_dist = atr * multiplier
-                    c_sl = (meta["best_price"] - chandelier_dist) if is_buy else (meta["best_price"] + chandelier_dist)
-                    
-                    if (is_buy and c_sl > pos.sl) or (not is_buy and (pos.sl == 0.0 or c_sl < pos.sl)):
-                        self.connection.modify_sl_tp(ticket, symbol, c_sl, pos.tp)
+        # Phase 1: Institutional Chandelier (Room to Breathe)
+        # Wider buffer (4.0x ATR) early on, tighter (2.5x ATR) after 1.5R profit
+        c_mult = 4.0 if rr < 1.5 else 2.5
+        chandelier_sl = (best_price - (atr * c_mult)) if is_buy else (best_price + (atr * c_mult))
+        
+        if (is_buy and chandelier_sl > new_sl) or (not is_buy and (new_sl == 0 or chandelier_sl < new_sl)):
+            new_sl = chandelier_sl
+
+        # Phase 2: Delayed Break-Even (Active at 1.5R)
+        # Gold often retraces to entry before surging; BE at 1.0R is too early.
+        if rr >= 1.5:
+            be_sl = entry + (risk * 0.1) if is_buy else entry - (risk * 0.1)
+            if (is_buy and be_sl > new_sl) or (not is_buy and (new_sl == 0 or be_sl < new_sl)):
+                new_sl = be_sl
+
+        # Phase 3: Structural Lock-in (Active at 3.0R+)
+        if rr >= 3.0 and last_candle:
+            structural_sl = last_candle['low'] if is_buy else last_candle['high']
+            if (is_buy and structural_sl > new_sl) or (not is_buy and (new_sl == 0 or structural_sl < new_sl)):
+                new_sl = structural_sl
+                
+        return new_sl if new_sl != current_sl else None

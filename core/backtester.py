@@ -136,27 +136,32 @@ class BacktestEngine:
                     })
                     open_trade = None
                 else:
+                    # Update best price for trailing
+                    if open_trade.direction == "BUY":
+                        if bid_h > open_trade.best_price: open_trade.best_price = bid_h
+                    else:
+                        if ask_l < open_trade.best_price: open_trade.best_price = ask_l
+                        
                     # Trailing Stop Toggle
                     if not self.config.get("trailing_stop_enabled", True):
                         continue
                         
-                    # Update Trailing Stops
+                    # Update Trailing Stops (Synced with Live Logic)
                     risk = abs(open_trade.entry_price - open_trade.signal.stop_loss)
-                    mfe = (bid_h - open_trade.entry_price) if open_trade.direction == "BUY" else (open_trade.entry_price - ask_l)
-                    rr = mfe / risk if risk > 0 else 0
+                    last_c = {"low": m5_lows[i-1], "high": m5_highs[i-1]}
                     
-                    if rr >= 1.0: # Break-even
-                        be_sl = open_trade.entry_price + (risk * 0.1) if open_trade.direction == "BUY" else open_trade.entry_price - (risk * 0.1)
-                        if (open_trade.direction == "BUY" and be_sl > open_trade.sl) or \
-                           (open_trade.direction == "SELL" and (open_trade.sl == 0 or be_sl < open_trade.sl)):
-                            open_trade.sl = be_sl
-                            
-                    if rr >= 2.0: # M5 Candle Trail
-                        prev_m5 = {"low": m5_lows[i-1], "high": m5_highs[i-1]}
-                        s_sl = prev_m5["low"] if open_trade.direction == "BUY" else prev_m5["high"]
-                        if (open_trade.direction == "BUY" and s_sl > open_trade.sl) or \
-                           (open_trade.direction == "SELL" and (open_trade.sl == 0 or s_sl < open_trade.sl)):
-                            open_trade.sl = s_sl
+                    new_sl = TrailingStopManager.calculate_new_sl(
+                        open_trade.direction == "BUY",
+                        open_trade.entry_price,
+                        open_trade.sl,
+                        open_trade.best_price,
+                        m5_atr_series[i],
+                        risk,
+                        last_c
+                    )
+                    
+                    if new_sl:
+                        open_trade.sl = new_sl
 
             # 2. Strategy Logic (Only if no open trade)
             if not open_trade:
