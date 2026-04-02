@@ -110,14 +110,22 @@ class BacktestEngine:
             pbar.update(1)
             t = m5_times[i]
             candle_dt = datetime.fromtimestamp(t, tz=timezone.utc)
+            session = self.strategy.get_session_from_hour(candle_dt.hour)
             
+            # --- Dynamic Session Spread (P1 Fix) ---
+            # Tokyo: 3.5, London: 1.8, NY: 1.2 points
+            spread_map = {"TOKYO": 3.5, "LONDON": 1.8, "LONDON/NY": 1.4, "NEW_YORK": 1.2}
+            current_spread_pts = spread_map.get(session, 1.5)
+            spread = current_spread_pts * point
+
             # 1. Trade Management (SL/TP Exits & Trailing Stops)
             if open_trade:
                 bid_l, bid_h = m5_lows[i], m5_highs[i]
-                bid_c = m5_closes[i]
-                ask_l, ask_h = bid_l + (point * 1.0), bid_h + (point * 1.0) # Approx spread
+                ask_l, ask_h = bid_l + spread, bid_h + spread
                 
                 # Check for Exits on current M5 candle
+                # BUY closes at BID (bid_l, bid_h)
+                # SELL closes at ASK (ask_l, ask_h)
                 closed = False
                 if open_trade.direction == "BUY":
                     if bid_l <= open_trade.sl: exit_price, result, closed = open_trade.sl, "SL", True
@@ -127,6 +135,8 @@ class BacktestEngine:
                     elif ask_l <= open_trade.tp: exit_price, result, closed = open_trade.tp, "TP", True
                 
                 if closed:
+                    # Apply slippage on exit too? Usually SL/TP have some slippage.
+                    # For purity, we just use the hit price level.
                     pnl = (exit_price - open_trade.entry_price) * (1 if open_trade.direction == "BUY" else -1) * contract_size * open_trade.lot
                     self.balance += pnl
                     trades_list.append({
@@ -165,7 +175,6 @@ class BacktestEngine:
 
             # 2. Strategy Logic (Only if no open trade)
             if not open_trade:
-                session = self.strategy.get_session_from_hour(candle_dt.hour)
                 # Slice candles for the strategy (emulate live window)
                 h1_slice = h1_candles; m15_slice = m15_candles; m5_slice = m5_arr[:i+1]
                 
@@ -178,7 +187,12 @@ class BacktestEngine:
                     sl_dist = abs(signal.entry_price - signal.stop_loss)
                     lot = LotCalculator.calculate(risk_val, sl_dist, point, 1.0, min_lot)
                     
-                    open_trade = _OpenTrade(int(t), signal, signal.entry_price, lot, signal.stop_loss, signal.take_profit, candle_dt, session)
+                    # --- Slippage Simulation (P1 Fix) ---
+                    # Add 1.5pts slippage to entry price
+                    slippage = 1.5 * point
+                    entry_price = signal.entry_price + (slippage if signal.direction == "BUY" else -slippage)
+                    
+                    open_trade = _OpenTrade(int(t), signal, entry_price, lot, signal.stop_loss, signal.take_profit, candle_dt, session)
             
             pbar.set_postfix({"balance": f"${self.balance:.0f}", "trade": len(trades_list)})
             

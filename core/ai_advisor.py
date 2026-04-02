@@ -442,6 +442,56 @@ Response format:
         finally:
             self._eval_event.set()
 
+    def filter_signal_backtest(self, signal_data: dict) -> tuple[bool, float, float]:
+        """
+        Synchronous signal vetting used by ExecutionPipeline.
+        Uses background-cached macro context and news to provide zero-latency vetoing.
+        
+        Args:
+            signal_data (dict): Signal metadata.
+            
+        Returns:
+            tuple[bool, float, float]: (approved, probability, confidence_score)
+        """
+        if not self._enabled:
+            return True, 1.0, 100.0
+
+        # 1. News Block (Zero Latency check against cache)
+        if self.is_news_blocked():
+            self._log(f"[AI] VETO: Trade near high-impact news.", "WARNING")
+            return False, 0.0, 0.0
+
+        # 2. Macro Bias Alignment
+        direction = signal_data.get("direction")
+        bias = self.session_bias
+        
+        # If bias is strong, we require alignment unless it's NEUTRAL
+        if bias == "BULLISH" and direction == "SELL":
+            return False, 0.2, 30.0
+        if bias == "BEARISH" and direction == "BUY":
+            return False, 0.2, 30.0
+
+        # 3. Confidence lookup from last review if applicable
+        # This is tricky because the review is async. 
+        # For 'backtest' or 'instant' live, we rely on the bias/news gate.
+        # If a background review for this PRICE level already exists, use it.
+        with self._lock:
+            last_review = self._context.get("last_signal_review")
+        
+        score = 80.0 # Default baseline
+        if last_review and last_review.get("direction") == direction:
+            # Check price proximity (e.g., within 0.5% for Gold)
+            price_diff = abs(last_review.get("entry", 0) - signal_data.get("price", 0))
+            if price_diff < 5.0: # Close enough to the previous signal
+                verdict = last_review.get("verdict", "VALID")
+                if verdict == "AVOID": return False, 0.1, 10.0
+                if verdict == "CAUTION": score = 60.0
+                score += last_review.get("confidence_adjustment", 0)
+
+        # Final threshold check
+        threshold = self.config.get("ai_advisor", {}).get("min_confidence", 65)
+        return score >= threshold, score / 100.0, score
+
     # ------------------------------------------------------------------
     # Feature 3: Post-session Trade Review (daily, at midnight reset)
     # ------------------------------------------------------------------

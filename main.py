@@ -41,7 +41,6 @@ from core.data_fetcher import DataFetcher
 from core.backtester import BacktestEngine
 from core.strategy_engine import StrategyEngine, TradeSignal
 from core.ai_advisor import AIAdvisor
-from core.ai_filter import AIFilter
 from core.risk_manager import RiskManager
 from core.notifications import NotificationManager
 from core.regime import MarketRegime
@@ -278,6 +277,9 @@ class TradingBot:
         self.running = True
         logger.info("Bot starting LIVE EXECUTIONS")
         
+        # Phase 13: Position Reconciliation (at startup & reconnection)
+        self._reconcile_positions()
+        
         try:
             while not self._shutdown_event.is_set():
                 start_cycle = time.time()
@@ -311,9 +313,8 @@ class TradingBot:
                 
                 if len(m5_candles) > 30:
                     current_price = m5_candles.close[-1]
-                    session = "NEW_YORK" 
-                    if hasattr(self.strategy, 'get_session_from_hour'):
-                        session = self.strategy.get_session_from_hour(datetime.now(timezone.utc).hour)
+                    # Dynamic Session Lookup (P0 Fix)
+                    session = self.strategy.get_session_from_hour(datetime.now(timezone.utc).hour)
                     
                     self.dashboard.session = session
                         

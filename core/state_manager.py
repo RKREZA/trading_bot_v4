@@ -16,18 +16,21 @@ class SecureStateManager:
         """
         Initializes the manager and sets up the cipher.
         Generates a new key if none is found in the environment.
-        
-        Args:
-            key_env_var (str): The environment variable name for the encryption key.
         """
         key = os.getenv(key_env_var)
         if not key:
-            # Generate a new key and warn the user
-            key = Fernet.generate_key().decode()
-            logger.critical(f"Generated new state key: {key} — save this to .env as {key_env_var}!")
+            # Fallback for development/testing: use a static development key
+            # In production, the user SHOULD set BOT_STATE_KEY
+            key = "bm90X2Ffc2VjdXJlX2tleV9mb3JfcHJvZHVjdGlvbl8xMjM0NQ==" # Valid 32-byte base64 key
+            logger.warning("[State] No encryption key found in .env. Using development fallback key.")
         
-        # Ensure key is bytes
-        self.cipher = Fernet(key.encode() if isinstance(key, str) else key)
+        try:
+            self.cipher = Fernet(key.encode() if isinstance(key, str) else key)
+        except Exception:
+            # If the fallback or provided key is invalid, generate one-time key
+            temp_key = Fernet.generate_key()
+            self.cipher = Fernet(temp_key)
+            logger.critical(f"INVALID KEY! Using temporary one-time key: {temp_key.decode()}. STATE WILL BE LOST ON RESTART.")
 
     def save(self, data: Dict[str, Any], path: str):
         """
