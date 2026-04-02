@@ -114,7 +114,8 @@ class BacktestEngine:
             
             # --- Dynamic Session Spread (P1 Fix) ---
             # Tokyo: 3.5, London: 1.8, NY: 1.2 points
-            spread_map = {"TOKYO": 3.5, "LONDON": 1.8, "LONDON/NY": 1.4, "NEW_YORK": 1.2}
+            bt_cfg = self.config.get("backtest", {})
+            spread_map = bt_cfg.get("session_spreads", {"TOKYO": 3.5, "LONDON": 1.8, "LONDON/NY": 1.4, "NEW_YORK": 1.2})
             current_spread_pts = spread_map.get(session, 1.5)
             spread = current_spread_pts * point
 
@@ -167,6 +168,7 @@ class BacktestEngine:
                         open_trade.best_price,
                         m5_atr_series[i],
                         risk,
+                        self.config,
                         last_c
                     )
                     
@@ -188,8 +190,9 @@ class BacktestEngine:
                     lot = LotCalculator.calculate(risk_val, sl_dist, point, 1.0, min_lot)
                     
                     # --- Slippage Simulation (P1 Fix) ---
-                    # Add 1.5pts slippage to entry price
-                    slippage = 1.5 * point
+                    # Add slippage points from config
+                    slippage_pts = self.config.get("backtest", {}).get("slippage_points", 1.5)
+                    slippage = slippage_pts * point
                     entry_price = signal.entry_price + (slippage if signal.direction == "BUY" else -slippage)
                     
                     open_trade = _OpenTrade(int(t), signal, entry_price, lot, signal.stop_loss, signal.take_profit, candle_dt, session)

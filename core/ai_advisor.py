@@ -472,24 +472,26 @@ Response format:
             return False, 0.2, 30.0
 
         # 3. Confidence lookup from last review if applicable
-        # This is tricky because the review is async. 
-        # For 'backtest' or 'instant' live, we rely on the bias/news gate.
-        # If a background review for this PRICE level already exists, use it.
+        ai_cfg = self.config.get("ai_advisor", {})
+        valid_score = ai_cfg.get("valid_score", 80.0)
+        caution_score = ai_cfg.get("caution_score", 60.0)
+        proximity_threshold = ai_cfg.get("price_proximity", 5.0)
+
         with self._lock:
             last_review = self._context.get("last_signal_review")
         
-        score = 80.0 # Default baseline
+        score = valid_score # Default baseline
         if last_review and last_review.get("direction") == direction:
             # Check price proximity (e.g., within 0.5% for Gold)
             price_diff = abs(last_review.get("entry", 0) - signal_data.get("price", 0))
-            if price_diff < 5.0: # Close enough to the previous signal
+            if price_diff < proximity_threshold: # Close enough to the previous signal
                 verdict = last_review.get("verdict", "VALID")
                 if verdict == "AVOID": return False, 0.1, 10.0
-                if verdict == "CAUTION": score = 60.0
+                if verdict == "CAUTION": score = caution_score
                 score += last_review.get("confidence_adjustment", 0)
 
         # Final threshold check
-        threshold = self.config.get("ai_advisor", {}).get("min_confidence", 65)
+        threshold = ai_cfg.get("min_confidence", 65)
         return score >= threshold, score / 100.0, score
 
     # ------------------------------------------------------------------

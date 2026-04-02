@@ -125,8 +125,9 @@ class ExecutionPipeline:
             
             if len(self.spread_history) >= 20:
                 spread_sma = sum(self.spread_history) / 20
-                if not self.research_mode and current_spread > spread_sma * 1.5:
-                    logger.warning(f"SPREAD FILTER: Aborting trade. Current: {current_spread:.1f} | SMA: {spread_sma:.1f}")
+                spread_mult = self.config.get("execution", {}).get("spread_filter_mult", 1.5)
+                if not self.research_mode and current_spread > spread_sma * spread_mult:
+                    logger.warning(f"SPREAD FILTER: Aborting trade. Current: {current_spread:.1f} | SMA: {spread_sma:.1f} (Threshold: {spread_mult}x)")
                     return False
 
         # Start Latency Tracking

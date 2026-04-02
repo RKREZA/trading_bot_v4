@@ -68,7 +68,7 @@ class TrailingStopManager:
                 
             # 2. Optimized Trailing Logic (Shared with Backtest)
             new_sl = self.calculate_new_sl(
-                is_buy, pos.price_open, pos.sl, meta["best_price"], atr, meta["risk"], last_candle
+                is_buy, pos.price_open, pos.sl, meta["best_price"], atr, meta["risk"], self.config, last_candle
             )
             
             if new_sl and new_sl != pos.sl:
@@ -78,7 +78,7 @@ class TrailingStopManager:
 
     @staticmethod
     def calculate_new_sl(is_buy: bool, entry: float, current_sl: float, best_price: float, 
-                         atr: float, risk: float, last_candle: Optional[dict] = None) -> Optional[float]:
+                         atr: float, risk: float, config: dict, last_candle: Optional[dict] = None) -> Optional[float]:
         """
         Calculates the new Stop Loss level based on the adaptive 3-phase logic.
         
@@ -89,6 +89,7 @@ class TrailingStopManager:
             best_price (float): Highest price reached (for BUY) or lowest (for SELL).
             atr (float): ATR value.
             risk (float): Initial risk amount (points).
+            config (dict): Global configuration.
             last_candle (Optional[dict]): Structured candle for Phase 3.
             
         Returns:
@@ -100,24 +101,32 @@ class TrailingStopManager:
         rr = profit_points / risk
         
         new_sl = current_sl
+        
+        ts_cfg = config.get("trailing_stop", {})
 
         # Phase 1: Institutional Chandelier (Room to Breathe)
-        # Wider buffer (4.0x ATR) early on, tighter (2.5x ATR) after 1.5R profit
-        c_mult = 4.0 if rr < 1.5 else 2.5
+        p1_threshold = ts_cfg.get("phase1_rr_threshold", 1.5)
+        p1_wider = ts_cfg.get("phase1_wider_mult", 4.0)
+        p1_tighter = ts_cfg.get("phase1_tighter_mult", 2.5)
+        
+        c_mult = p1_wider if rr < p1_threshold else p1_tighter
         chandelier_sl = (best_price - (atr * c_mult)) if is_buy else (best_price + (atr * c_mult))
         
         if (is_buy and chandelier_sl > new_sl) or (not is_buy and (new_sl == 0 or chandelier_sl < new_sl)):
             new_sl = chandelier_sl
 
-        # Phase 2: Delayed Break-Even (Active at 1.5R)
-        # Gold often retraces to entry before surging; BE at 1.0R is too early.
-        if rr >= 1.5:
-            be_sl = entry + (risk * 0.1) if is_buy else entry - (risk * 0.1)
+        # Phase 2: Delayed Break-Even (Configurable threshold)
+        p2_threshold = ts_cfg.get("phase2_rr_threshold", 1.5)
+        p2_offset = ts_cfg.get("phase2_be_offset_pct", 0.1)
+        
+        if rr >= p2_threshold:
+            be_sl = entry + (risk * p2_offset) if is_buy else entry - (risk * p2_offset)
             if (is_buy and be_sl > new_sl) or (not is_buy and (new_sl == 0 or be_sl < new_sl)):
                 new_sl = be_sl
 
-        # Phase 3: Structural Lock-in (Active at 3.0R+)
-        if rr >= 3.0 and last_candle:
+        # Phase 3: Structural Lock-in (Configurable threshold)
+        p3_threshold = ts_cfg.get("phase3_rr_threshold", 3.0)
+        if rr >= p3_threshold and last_candle:
             structural_sl = last_candle['low'] if is_buy else last_candle['high']
             if (is_buy and structural_sl > new_sl) or (not is_buy and (new_sl == 0 or structural_sl < new_sl)):
                 new_sl = structural_sl
