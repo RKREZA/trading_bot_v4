@@ -33,7 +33,8 @@ class _OpenTrade:
         "signal", "entry_price", "lot", "sl", "tp",
         "entry_time", "regime", "ai_score", "spread", "slippage",
         "best_price", "trail_phase", "partial_closed_count", "tp_partial_1", "tp_partial_2",
-        "comm_entry_paid", "comm_entry_amount", "session", "total_commission_paid"
+        "comm_entry_paid", "comm_entry_amount", "session", "total_commission_paid",
+        "initial_risk"
     )
 
     def __init__(self, signal: TradeSignal, entry_price: float, lot: float,
@@ -55,6 +56,7 @@ class _OpenTrade:
         self.session = session
         self.comm_entry_amount = 0.0
         self.total_commission_paid = 0.0
+        self.initial_risk = 0.0 # Will be set by Backtester._handle_entry
         
         # Calculate multi-level partial TPs (1:1 and 2:1 RR)
         risk = abs(entry_price - signal.stop_loss)
@@ -499,10 +501,15 @@ class BacktestEngine:
                         entry_dt = open_trade.entry_time if isinstance(open_trade.entry_time, datetime) else datetime.fromtimestamp(open_trade.entry_time, tz=timezone.utc)
                         exit_dt = candle_dt
     
-                        # [PHASE 13.1] Result Categorization (Satisfaction Fix)
+                        # [PHASE 13.2] Strict Result Categorization (BE is a Loss)
+                        # A win only counts if it reaches at least 0.5R profit (Institutional Truth)
                         actual_result = result_type
-                        if result_type == "SL" and final_pnl > 0:
-                            actual_result = "TRAIL_WIN"
+                        if result_type == "SL" or result_type == "TRAIL_WIN":
+                            # Combine PnL from partials with final pnl
+                            if final_pnl >= (open_trade.initial_risk * 0.5):
+                                actual_result = "TRAIL_WIN"
+                            else:
+                                actual_result = "SL" # BE or minor profit is a loss
                         
                         trade_record = {
                             "time": entry_dt,
@@ -758,6 +765,9 @@ class BacktestEngine:
             slippage=slippage, 
             session=session
         )
+        # --- PHASE 13.2: Store total initial risk in dollars ---
+        risk_dist = abs(entry - signal.stop_loss)
+        trade.initial_risk = risk_dist * contract_size * lot
         
         # 4. Initial commission
         comm_entry = self._get_commission(symbol, lot) * 0.5
