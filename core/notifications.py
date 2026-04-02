@@ -6,14 +6,29 @@ from typing import Optional
 logger = logging.getLogger("trading_bot.notifications")
 
 class NotificationManager:
+    """
+    Handles outbound notifications to Telegram and other channels.
+    Provides structured methods for trade alerts, critical system errors, and performance updates.
+    """
     def __init__(self, config: dict):
+        """
+        Initializes the notification manager.
+        
+        Args:
+            config (dict): Global configuration (expects 'notifications' key).
+        """
         self.config = config.get("notifications", {})
         self.enabled = self.config.get("enabled", False)
         self.telegram_token = os.getenv("TELEGRAM_BOT_TOKEN")
         self.chat_id = os.getenv("TELEGRAM_CHAT_ID")
         
     def send_telegram(self, message: str):
-        """Send a message to the configured Telegram chat."""
+        """
+        Sends a generic markdown-formatted message to the Telegram chat.
+        
+        Args:
+            message (str): Text content of the message.
+        """
         if not self.enabled or not self.telegram_token or not self.chat_id:
             return
 
@@ -30,11 +45,28 @@ class NotificationManager:
             logger.error(f"Telegram Notification Error: {e}")
 
     def notify_critical(self, event: str, details: str):
-        """For events that need immediate human attention."""
+        """
+        Sends a high-priority alert for critical system events (e.g., connection loss, circuit breaker).
+        
+        Args:
+            event (str): Short name of the event.
+            details (str): Detailed explanation or error trace.
+        """
         msg = f"🚨 *CRITICAL ALERT*\n{event}\n\n{details}"
         self.send_telegram(msg)
 
     def notify_trade_open(self, symbol: str, direction: str, entry: float, lot: float, sl: float, tp: float):
+        """
+        Formulates and sends an alert when a new trade is opened.
+        
+        Args:
+            symbol (str): Trading instrument.
+            direction (str): BUY or SELL.
+            entry (float): Execution price.
+            lot (float): Position size.
+            sl (float): Stop Loss.
+            tp (float): Take Profit.
+        """
         msg = (
             f"🚀 *TRADE OPENED*\n"
             f"Instrument: `{symbol}`\n"
@@ -47,6 +79,16 @@ class NotificationManager:
         self.send_telegram(msg)
 
     def notify_trade_close(self, symbol: str, direction: str, exit_price: float, pnl: float, result: str):
+        """
+        Formulates and sends an alert when a trade is closed.
+        
+        Args:
+            symbol (str): Trading instrument.
+            direction (str): BUY or SELL.
+            exit_price (float): Closing price.
+            pnl (float): Profit or Loss in base currency.
+            result (str): Outcome description (e.g., 'TP' or 'SL').
+        """
         icon = "✅" if pnl > 0 else "❌"
         msg = (
             f"{icon} *TRADE CLOSED*\n"

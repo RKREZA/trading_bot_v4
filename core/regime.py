@@ -1,14 +1,31 @@
 import numpy as np
-from typing import List, Dict
+from typing import List, Dict, Any
 
 class MarketRegime:
+    """
+    Classifies the current market environment into one of four regimes:
+    - TRENDING: High efficiency ratio (directional move).
+    - RANGING: Low efficiency ratio (choppy/sideways).
+    - HIGH_VOLATILITY: ATR exceeds historical 75th percentile.
+    - LOW_LIQUIDITY: Volume is significantly below 50-period average.
+    """
     TRENDING = "TRENDING"
     RANGING = "RANGING"
     HIGH_VOLATILITY = "HIGH_VOLATILITY"
     LOW_LIQUIDITY = "LOW_LIQUIDITY"
 
     @staticmethod
-    def classify(candles: List[Dict], lookback: int = 50) -> str:
+    def classify(candles: Any, lookback: int = 50) -> str:
+        """
+        Analyzes candle data to determine the current market regime.
+        
+        Args:
+            candles (CandleArray): Input candle data as a CandleArray.
+            lookback (int): Number of candles to consider for structural analysis.
+            
+        Returns:
+            str: One of the MarketRegime constants.
+        """
         if len(candles) < lookback:
             return MarketRegime.RANGING
 

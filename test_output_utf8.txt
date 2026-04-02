@@ -1,0 +1,85 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.11.9, pytest-9.0.2, pluggy-1.6.0 -- C:\Users\rkreza\AppData\Local\Programs\Python\Python311\python.exe
+cachedir: .pytest_cache
+hypothesis profile 'default'
+rootdir: C:\xampp\htdocs\trading_bot_v3
+plugins: anyio-4.12.1, hypothesis-6.151.10, langsmith-0.7.14, typeguard-2.13.3
+collecting ... collected 8 items
+
+tests/test_strategy.py::TestIndicators::test_ema_series_length FAILED    [ 12%]
+tests/test_strategy.py::TestIndicators::test_ema_trending_up FAILED      [ 25%]
+tests/test_strategy.py::TestIndicators::test_atr_calculation FAILED      [ 37%]
+tests/test_strategy.py::TestMarketRegime::test_trending_regime FAILED    [ 50%]
+tests/test_strategy.py::TestMarketRegime::test_ranging_regime FAILED     [ 62%]
+tests/test_strategy.py::TestStrategyLogic::test_analyze_uptrend_signal FAILED [ 75%]
+tests/test_strategy.py::TestStrategyLogic::test_session_filter_skips_untradeable FAILED [ 87%]
+tests/test_strategy.py::TestConfluence::test_confluence_logic FAILED     [100%]
+
+================================== FAILURES ===================================
+____________________ TestIndicators.test_ema_series_length ____________________
+tests\test_strategy.py:85: in test_ema_series_length
+    result = engine._calculate_ema_series(data, 3)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: 'StrategyEngine' object has no attribute '_calculate_ema_series'
+_____________________ TestIndicators.test_ema_trending_up _____________________
+tests\test_strategy.py:90: in test_ema_trending_up
+    result = engine._calculate_ema_series(data, 5)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: 'StrategyEngine' object has no attribute '_calculate_ema_series'
+_____________________ TestIndicators.test_atr_calculation _____________________
+tests\test_strategy.py:97: in test_atr_calculation
+    atr = engine._calculate_atr(candles, period=14)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+core\strategy_engine.py:158: in _calculate_atr
+    h, l, c = candles.high, candles.low, candles.close
+              ^^^^^^^^^^^^
+E   AttributeError: 'list' object has no attribute 'high'
+____________________ TestMarketRegime.test_trending_regime ____________________
+tests\test_strategy.py:111: in test_trending_regime
+    regime = MarketRegime.classify(candles)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+core\regime.py:32: in classify
+    closes = candles.close[-lookback:]
+             ^^^^^^^^^^^^^
+E   AttributeError: 'list' object has no attribute 'close'
+____________________ TestMarketRegime.test_ranging_regime _____________________
+tests\test_strategy.py:116: in test_ranging_regime
+    regime = MarketRegime.classify(candles)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+core\regime.py:32: in classify
+    closes = candles.close[-lookback:]
+             ^^^^^^^^^^^^^
+E   AttributeError: 'list' object has no attribute 'close'
+________________ TestStrategyLogic.test_analyze_uptrend_signal ________________
+tests\test_strategy.py:134: in test_analyze_uptrend_signal
+    signal, trend, regime = engine.analyze(
+core\strategy_engine.py:224: in analyze
+    raw_ts = m5_candles_original.time[-1]
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: 'list' object has no attribute 'time'
+___________ TestStrategyLogic.test_session_filter_skips_untradeable ___________
+tests\test_strategy.py:150: in test_session_filter_skips_untradeable
+    signal, _, _ = engine.analyze("TEST", h4, h1, m30, m5, 100.0, session="SYDNEY")
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+core\strategy_engine.py:224: in analyze
+    raw_ts = m5_candles_original.time[-1]
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: 'list' object has no attribute 'time'
+____________________ TestConfluence.test_confluence_logic _____________________
+tests\test_strategy.py:163: in test_confluence_logic
+    m30_atr = engine._calculate_atr(m30)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^
+core\strategy_engine.py:158: in _calculate_atr
+    h, l, c = candles.high, candles.low, candles.close
+              ^^^^^^^^^^^^
+E   AttributeError: 'list' object has no attribute 'high'
+=========================== short test summary info ===========================
+FAILED tests/test_strategy.py::TestIndicators::test_ema_series_length - AttributeError: 'StrategyEngine' object has no attribute '_calculate_ema_series'
+FAILED tests/test_strategy.py::TestIndicators::test_ema_trending_up - AttributeError: 'StrategyEngine' object has no attribute '_calculate_ema_series'
+FAILED tests/test_strategy.py::TestIndicators::test_atr_calculation - AttributeError: 'list' object has no attribute 'high'
+FAILED tests/test_strategy.py::TestMarketRegime::test_trending_regime - AttributeError: 'list' object has no attribute 'close'
+FAILED tests/test_strategy.py::TestMarketRegime::test_ranging_regime - AttributeError: 'list' object has no attribute 'close'
+FAILED tests/test_strategy.py::TestStrategyLogic::test_analyze_uptrend_signal - AttributeError: 'list' object has no attribute 'time'
+FAILED tests/test_strategy.py::TestStrategyLogic::test_session_filter_skips_untradeable - AttributeError: 'list' object has no attribute 'time'
+FAILED tests/test_strategy.py::TestConfluence::test_confluence_logic - AttributeError: 'list' object has no attribute 'high'
+============================== 8 failed in 0.44s ==============================

@@ -5,19 +5,37 @@ from typing import Dict, Optional, Tuple
 logger = logging.getLogger("trading_bot.risk")
 
 class CircuitBreaker:
-    """Hard-stop safety mechanisms that go beyond Kelly/drawdown scaling."""
+    """
+    Hard-stop safety mechanisms that go beyond Kelly/drawdown scaling.
+    Designed to prevent 'revenge trading' and account blowouts during extreme volatility.
+    """
     def __init__(self, config: dict):
+        """
+        Initializes the CircuitBreaker with risk thresholds.
+        
+        Args:
+            config (dict): Global configuration dictionary.
+        """
         self.risk_cfg = config.get("risk", {})
         self.max_consecutive_losses = self.risk_cfg.get("max_consecutive_losses", 4)
         self.max_hourly_trades = self.risk_cfg.get("max_hourly_trades", 3)
         self.hourly_trades: Dict[int, int] = {}  # hour -> count
     
     def record_trade(self):
+        """Increments the trade counter for the current hour."""
         hour = datetime.now(timezone.utc).hour
         self.hourly_trades[hour] = self.hourly_trades.get(hour, 0) + 1
 
     def check_all(self, context: dict) -> Tuple[bool, str]:
-        """Returns (allowed, reason)."""
+        """
+        Evaluates all safety checks.
+        
+        Args:
+            context (dict): Current trading context (losses, margin, etc.).
+            
+        Returns:
+            Tuple[bool, str]: (Allowed, Reason).
+        """
         # 1. Consecutive losses
         if context.get("consecutive_losses", 0) >= self.max_consecutive_losses:
             return False, "CIRCUIT_BREAKER: Max consecutive losses"
@@ -36,7 +54,21 @@ class CircuitBreaker:
 
 
 class RiskManager:
+    """
+    Orchestrates position sizing and drawdown protection.
+    Features:
+    - Dynamic Kelly Criterion scaling.
+    - Asymmetric Risk (reducing risk when equity is below SMA).
+    - Linear Drawdown Scaling.
+    - Session-specific risk multipliers.
+    """
     def __init__(self, config: dict):
+        """
+        Initializes the RiskManager.
+        
+        Args:
+            config (dict): Global configuration dictionary.
+        """
         self.full_config = config
         self.risk_config = config.get("risk", {})
         self.base_risk_pct = self.risk_config.get("risk_per_trade", 1.0)
@@ -62,8 +94,17 @@ class RiskManager:
 
     def check_circuit_breakers(self, current_balance: float, current_equity: float, daily_trades: int, daily_losses: int, consecutive_losses: int) -> Tuple[bool, str]:
         """
-        Hard Circuit Breakers based on config.
-        Returns (Allowed, Reason).
+        Hard Circuit Breakers based on daily and account-level stats.
+        
+        Args:
+            current_balance (float): Current account balance.
+            current_equity (float): Current account equity.
+            daily_trades (int): Total trades today.
+            daily_losses (int): Total losses today.
+            consecutive_losses (int): Current losing streak.
+            
+        Returns:
+            Tuple[bool, str]: (Allowed, Reason).
         """
         # Ensure we have a day start balance
         if self.day_start_balance is None:
@@ -91,7 +132,14 @@ class RiskManager:
         return True, "OK"
 
     def _calculate_kelly_fraction(self) -> float:
-        """Calculate Kelly Fraction based on trade history. Thread-safe."""
+        """
+        Calculates the Kelly Criterion fraction to determine optimal risk.
+        Kelly % = (win_rate * odds - (1 - win_rate)) / odds
+        Where odds = average_win / average_loss.
+        
+        Returns:
+            float: Recommended risk fraction (un-clamped).
+        """
         # Fix Memory Leak: only run on recent trades window
         recent_trades = self.trade_history[-100:]
         
@@ -121,8 +169,17 @@ class RiskManager:
 
     def calculate_scaled_risk(self, current_balance: float, current_equity: float = None, session: Optional[str] = None) -> float:
         """
-        Scale risk percentage based on Kelly Fraction, current drawdown, 
-        Equity SMA (Asymmetric Risk), and trading session.
+        Main entry point for risk calculation.
+        Applies a cascading reduction series:
+        Kelly -> Asymmetric (SMA) -> Session -> Drawdown.
+        
+        Args:
+            current_balance (float): Current account balance.
+            current_equity (Optional[float]): Current equity.
+            session (Optional[str]): Current session.
+            
+        Returns:
+            float: Scaled risk percentage (e.g., 1.5 for 1.5%).
         """
         if self.initial_balance is None:
             self.initial_balance = current_balance

@@ -15,15 +15,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.strategy_engine import StrategyEngine, TradeSignal
 from core.regime import MarketRegime
+from core.types import CandleArray
 
 # ---------------------------------------------------------------------------
 # Helpers — generate synthetic candle data
 # ---------------------------------------------------------------------------
 
 def make_candles(n: int, base_price: float = 100.0, trend: str = "flat",
-                  step: float = 0.5) -> list:
+                  step: float = 0.5) -> CandleArray:
     """
-    Generate synthetic candles.
+    Generate synthetic candles and returns a CandleArray.
     trend: 'up', 'down', 'flat'
     """
     candles = []
@@ -46,7 +47,7 @@ def make_candles(n: int, base_price: float = 100.0, trend: str = "flat",
             "close": c,
             "tick_volume": 1000 + i * 10,
         })
-    return candles
+    return CandleArray.from_dicts(candles)
 
 
 @pytest.fixture
@@ -76,22 +77,10 @@ def engine(config):
 
 
 # ---------------------------------------------------------------------------
-# EMA Tests
+# Indicator Tests
 # ---------------------------------------------------------------------------
 
 class TestIndicators:
-    def test_ema_series_length(self, engine):
-        data = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
-        result = engine._calculate_ema_series(data, 3)
-        assert len(result) == len(data)
-
-    def test_ema_trending_up(self, engine):
-        data = np.array([float(i) for i in range(20)])
-        result = engine._calculate_ema_series(data, 5)
-        # EMA should be increasing
-        for i in range(1, len(result)):
-            assert result[i] > result[i - 1]
-
     def test_atr_calculation(self, engine):
         candles = make_candles(30, trend="up", step=1.0)
         atr = engine._calculate_atr(candles, period=14)
@@ -124,48 +113,35 @@ class TestMarketRegime:
 class TestStrategyLogic:
     def test_analyze_uptrend_signal(self, engine):
         # Setup alignment: H4 Up, H1 Up, M30 Up, M5 breakout
-        h4 = make_candles(100, base_price=100, trend="up", step=2.0)
-        h1 = make_candles(100, base_price=150, trend="up", step=1.0)
-        m30 = make_candles(100, base_price=170, trend="up", step=0.5)
-        m5 = make_candles(100, base_price=180, trend="up", step=0.2)
+        h4 = make_candles(100, trend="up", step=2.0)
+        h1 = make_candles(100, trend="up", step=1.0)
+        m15 = make_candles(100, trend="up", step=0.5)
+        m5 = make_candles(100, trend="up", step=0.2)
         
-        current_price = m5[-1]["close"] + 0.1 # Force a small breakout
+        current_price = m5.close[-1] + 0.1 # Force a small breakout
+        
+        # provide required preprocessed dict
+        pre = {
+            "m_bias": "BULLISH", "m_high": m5.high[-2], "m_low": m5.low[-2],
+            "in_demand": True, "d_depth": 10.0, "vol_sma": 1000
+        }
         
         signal, trend, regime = engine.analyze(
-            "TEST", h4, h1, m30, m5, current_price, session="LONDON"
+            "TEST", h4, h1, m15, m5, current_price, session="LONDON", preprocessed=pre
         )
         
         assert trend == "BULLISH"
-        # We don't strictly assert signal here because confluence/confidence might still filter it
-        # but trend and regime should be identified.
-        assert regime in [MarketRegime.TRENDING, MarketRegime.RANGING, MarketRegime.HIGH_VOLATILITY]
+        # In the context of PA_SNIPER, regime is the type of logic triggered
+        assert regime == "PA_SNIPER"
 
     def test_session_filter_skips_untradeable(self, engine):
-        h4 = make_candles(100, trend="up")
-        h1 = make_candles(100, trend="up")
-        m30 = make_candles(100, trend="up")
-        m5 = make_candles(100, trend="up")
-        
-        # Test a session not in our config
-        signal, _, _ = engine.analyze("TEST", h4, h1, m30, m5, 100.0, session="SYDNEY")
-        assert signal is None
-
-# ---------------------------------------------------------------------------
-# Confluence & Confidence Tests
-# ---------------------------------------------------------------------------
-
-class TestConfluence:
-    def test_confluence_logic(self, engine):
-        signal = TradeSignal(direction="BUY", entry_price=100, stop_loss=98, take_profit=105, timestamp=datetime.now(timezone.utc))
-        m30 = make_candles(50, trend="up")
+        h4 = make_candles(50, trend="up")
+        h1 = make_candles(50, trend="up")
+        m15 = make_candles(50, trend="up")
         m5 = make_candles(50, trend="up")
         
-        m30_atr = engine._calculate_atr(m30)
-        m5_atr = engine._calculate_atr(m5)
+        pre = {"m_bias": "NEUTRAL", "m_high": 200, "m_low": 50, "vol_sma": 1000}
         
-        score, reasons = engine._calculate_confluence(
-            "BULLISH", 80, MarketRegime.TRENDING, signal, m30, m5, m30_atr, m5_atr, "LONDON"
-        )
-        
-        assert score >= 1 # At least London session and H4 alignment
-        assert "LONDON Session" in reasons or "LONDON/NY Session" in reasons
+        # Test a session not in our config
+        signal, _, _ = engine.analyze("TEST", h4, h1, m15, m5, 100.0, session="SYDNEY", preprocessed=pre)
+        assert signal is None

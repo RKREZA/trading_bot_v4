@@ -8,11 +8,36 @@ from core.strategy_engine import StrategyEngine
 logger = logging.getLogger("trading_bot.validation")
 
 class ValidationSuite:
+    """
+    Rigorously stress-tests a strategy to ensure it isn't overfitted or fragile.
+    Executes a series of adversarial simulations:
+    - High Spread/Slippage: Tests durability under poor execution conditions.
+    - Random Entry: Vets if the alpha is better than pure luck.
+    - Window Stability: Checks consistency across different time periods.
+    - Monte Carlo: Shuffles trade order to find worst-case drawdown probabilities.
+    """
     def __init__(self, config: dict, strategy: StrategyEngine):
+        """
+        Initializes the validation suite.
+        
+        Args:
+            config (dict): Bot configuration.
+            strategy (StrategyEngine): The strategy instance to vet.
+        """
         self.config = config
         self.strategy = strategy
 
     def run_all_tests(self, symbol: str, h4: List, h1: List, m30: List, m5: List, d1: List) -> Dict:
+        """
+        Runs the full battery of stress tests and returns an aggregated report.
+        
+        Args:
+            symbol (str): Symbol name.
+            h4, h1, m30, m5, d1 (List): Multi-timeframe historical candle data.
+            
+        Returns:
+            Dict: Aggregated validation report with status (PASS/FAIL) and metrics.
+        """
         results = {}
         
         # Original Backtest
@@ -66,6 +91,10 @@ class ValidationSuite:
         return tester.run(symbol, h4, h1, m30, m5, d1, quiet=True)
 
     def _random_entry_test(self, symbol, h4, h1, m30, m5, d1):
+        """
+        Replaces the strategy logic with a random number generator.
+        If random entries perform nearly as well as the strategy, the strategy lacks alpha.
+        """
         class RandomStrategy(StrategyEngine):
             def analyze(self, symbol, h4, h1, m30, m5, current_price, d1_candles=None, session=None):
                 if random.random() < 0.05: # 5% chance
@@ -160,8 +189,16 @@ class ValidationSuite:
 
     def monte_carlo_equity(self, trades: List[Dict], iterations: int = 1000) -> Dict:
         """
-        Perform Monte Carlo simulation on trade sequence.
-        Randomly shuffle trade order 1000 times, recompute equity curve and max drawdown.
+        Shuffles the sequence of historical trades 1000 times.
+        Calculates the probability of insolvency or extreme drawdown if the 
+        distribution of returns remains the same but the order changes.
+        
+        Args:
+            trades (List[Dict]): List of trade objects with 'pnl'.
+            iterations (int): Number of shuffle iterations.
+            
+        Returns:
+            Dict: Statistics including P95 (95% confidence) Max Drawdown.
         """
         import numpy as np
         import pandas as pd

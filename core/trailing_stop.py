@@ -5,9 +5,24 @@ from typing import Dict, Any, Optional
 logger = logging.getLogger("trading_bot.trailing_stop")
 
 class TrailingStopManager:
-    """Manages adaptive trailing stops for 'Optimal Balance' strategy."""
+    """
+    Manages adaptive trailing stops for active positions.
+    Implements a 3-phase risk reduction strategy:
+    1. Chandelier: Initial buffer based on ATR.
+    2. Break-Even: Moved to entry + buffer after 1.5R profit.
+    3. Structural: Locked in using candle extremes after 3.0R profit.
+    """
     
     def __init__(self, config: dict, connection: Any, position_meta: Dict[int, Any], state_lock: threading.Lock):
+        """
+        Initializes the TrailingStopManager.
+        
+        Args:
+            config (dict): Global configuration.
+            connection (MT5Connection): terminal connection.
+            position_meta (dict): Shared position metadata.
+            state_lock (Lock): Thread-safety lock for metadata access.
+        """
         self.config = config
         self.connection = connection
         self.position_meta = position_meta
@@ -15,7 +30,14 @@ class TrailingStopManager:
         
     def manage_positions(self, symbol: str, current_bid: float, current_ask: float, atr: float, last_candle: Optional[dict] = None):
         """
-        Coordinates Trailing Stops for active positions.
+        Performs trailing stop logic for all active positions on a symbol.
+        
+        Args:
+            symbol (str): Symbol name.
+            current_bid (float): Current bid price.
+            current_ask (float): Current ask price.
+            atr (float): Current ATR for buffer calculation.
+            last_candle (Optional[dict]): Most recent closed candle for structural stops.
         """
         if not self.config.get("trailing_stop_enabled", True):
             return
@@ -58,8 +80,19 @@ class TrailingStopManager:
     def calculate_new_sl(is_buy: bool, entry: float, current_sl: float, best_price: float, 
                          atr: float, risk: float, last_candle: Optional[dict] = None) -> Optional[float]:
         """
-        Core Trailing Engine: Synchronized between Live and Backtest.
-        Optimized for 'Optimal Balance' (70% WR / 1:2 RR).
+        Calculates the new Stop Loss level based on the adaptive 3-phase logic.
+        
+        Args:
+            is_buy (bool): Trade direction.
+            entry (float): Entry price.
+            current_sl (float): Current Stop Loss.
+            best_price (float): Highest price reached (for BUY) or lowest (for SELL).
+            atr (float): ATR value.
+            risk (float): Initial risk amount (points).
+            last_candle (Optional[dict]): Structured candle for Phase 3.
+            
+        Returns:
+            Optional[float]: The new SL level if it should be moved, else None.
         """
         if risk <= 0: return None
         

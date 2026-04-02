@@ -26,6 +26,25 @@ _SESSION_KEY_MAP = {
 
 @dataclass
 class TradeSignal:
+    """
+    Represents a generated trading signal with all necessary parameters for execution.
+    
+    Attributes:
+        direction (str): 'BUY' or 'SELL'.
+        entry_price (float): The price at which the trade should be entered.
+        stop_loss (float): The price level for stopping losses.
+        take_profit (float): The primary take profit target.
+        session (str): The trading session name (e.g., 'LONDON', 'NEW_YORK').
+        tp1_price (float): First partial take profit target.
+        tp2_price (float): Second partial take profit target.
+        tp3_price (float): Third partial take profit target.
+        confidence (float): A percentage score (0-100) representing the signal's strength.
+        confluence_score (int): Number of confluence factors aligned for this trade.
+        reasons (List[str]): Human-readable reasons why this signal was generated.
+        rejection_type (str): If signal is None, why it was rejected (internal use).
+        timestamp (datetime): When the signal was created.
+        rr_ratio (float): Risk-to-Reward ratio.
+    """
     direction: str
     entry_price: float
     stop_loss: float
@@ -42,7 +61,23 @@ class TradeSignal:
     rr_ratio: float = 2.0
 
 class StrategyEngine:
+    """
+    Core engine responsible for analyzing market data and generating signals.
+    
+    Uses a multi-timeframe hierarchy:
+    H1: Institutional Zone detection (Demand/Supply).
+    M15: Bias determination (Bullish/Bearish/Neutral).
+    M5: Entry precision, volume expansion, and rejection candle detection.
+    """
     def __init__(self, config: dict, analysis_logger=None, silent: bool = False):
+        """
+        Initializes the StrategyEngine with config parameters.
+        
+        Args:
+            config (dict): Global configuration dictionary.
+            analysis_logger (Optional[Dashboard.AnalysisLogger]): Logger for UI dashboard updates.
+            silent (bool): If True, suppresses standard logging output.
+        """
         self.config = config
         self.strategy_config = config.get("strategy_defaults", {})
         self.pa_config = self.strategy_config.get("price_action", {})
@@ -80,6 +115,16 @@ class StrategyEngine:
 
     @staticmethod
     def get_session_from_hour(hour: int, utc_offset: int = 0) -> str:
+        """
+        Maps a UTC hour to a trading session.
+        
+        Args:
+            hour (int): Current hour (0-23).
+            utc_offset (int): Offset from UTC.
+            
+        Returns:
+            str: Session name ('LONDON', 'NEW_YORK', 'LONDON/NY', 'TOKYO').
+        """
         utc_hour = (hour - utc_offset) % 24
         if 8 <= utc_hour < 14: return "LONDON"
         if 14 <= utc_hour < 17: return "LONDON/NY"
@@ -87,17 +132,44 @@ class StrategyEngine:
         return "TOKYO"
 
     def _log(self, message: str, level: str = "INFO"):
+        """
+        Internal logging wrapper that bridges to the analysis logger.
+        
+        Args:
+            message (str): Log message.
+            level (str): Log level ('INFO', 'WARNING', 'ERROR').
+        """
         if self.silent: return
         if self.analysis_logger: self.analysis_logger.log(message, level)
         logger.info(message)
 
     def _calculate_atr(self, candles: 'CandleArray', period: int = 14) -> float:
+        """
+        Calculates the Average True Range (ATR) using NumPy for performance.
+        
+        Args:
+            candles (CandleArray): Input candle data.
+            period (int): Period for ATR calculation.
+            
+        Returns:
+            float: The calculated ATR value.
+        """
         if not candles or len(candles) < 2: return 0.1
         h, l, c = candles.high, candles.low, candles.close
         tr = np.maximum(h[1:] - l[1:], np.maximum(np.abs(h[1:] - c[:-1]), np.abs(l[1:] - c[:-1])))
         return np.mean(tr[-period:]) if len(tr) >= period else np.mean(tr)
 
-    def _is_rejection_candle(self, open_p, high_p, low_p, close_p, direction: str) -> bool:
+    def _is_rejection_candle(self, open_p: float, high_p: float, low_p: float, close_p: float, direction: str) -> bool:
+        """
+        Detects price rejection (long wicks relative to body).
+        
+        Args:
+            open_p, high_p, low_p, close_p (float): OHLC values for the current candle.
+            direction (str): 'BUY' (look for bottom wick) or 'SELL' (look for top wick).
+            
+        Returns:
+            bool: True if criteria for rejection are met.
+        """
         cr = high_p - low_p
         if cr <= 0: return False
         body = abs(close_p - open_p)
@@ -106,7 +178,18 @@ class StrategyEngine:
         else:
             return ((high_p - max(open_p, close_p)) / cr * 100) >= self.min_wick_pct and (body / cr * 100) >= self.min_body_pct
 
-    def _is_engulfing(self, po, pc, co, cc, direction: str) -> bool:
+    def _is_engulfing(self, po: float, pc: float, co: float, cc: float, direction: str) -> bool:
+        """
+        Identifies an engulfing candle pattern.
+        
+        Args:
+            po, pc (float): Open and Close of the previous candle.
+            co, cc (float): Open and Close of the current candle.
+            direction (str): 'BUY' (Bullish Engulfing) or 'SELL' (Bearish Engulfing).
+            
+        Returns:
+            bool: True if engulfing pattern is detected.
+        """
         if direction == "BUY": return cc > co and pc < po and cc > po and co < pc
         return cc < co and pc > po and cc < po and co > pc
 
@@ -114,6 +197,28 @@ class StrategyEngine:
                 m5_candles_original: 'CandleArray', current_price: float,
                 d1_candles: Optional['CandleArray'] = None, session: Optional[str] = None,
                 preprocessed: Optional[dict] = None, circuit_breaker_safe: bool = True) -> Tuple[Optional[TradeSignal], str, str]:
+        """
+        Primary entry point for market analysis. Logic:
+        1. Check gatekeepers (Session, Circuit Breaker).
+        2. Evaluate M5 data for volume expansion.
+        3. Match current price against H1 Institutional Zones (Demand/Supply).
+        4. Validate against M15 Bias.
+        5. Look for M5 Price Action patterns (Rejection candles, Engulfing).
+        
+        Args:
+            symbol (str): Trading symbol (e.g., 'XAUUSDm').
+            h1_candles (CandleArray): H1 timeframe data for zones.
+            m15_candles (CandleArray): M15 timeframe data for bias.
+            m5_candles_original (CandleArray): M5 timeframe data for entries.
+            current_price (float): Current market price (bid/ask).
+            d1_candles (Optional[CandleArray]): D1 data (optional).
+            session (Optional[str]): Current session.
+            preprocessed (Optional[dict]): Cached results from preprocess_history.
+            circuit_breaker_safe (bool): Whether circuit breakers allow trading.
+            
+        Returns:
+            Tuple[Optional[TradeSignal], str, str]: (Signal or None, Bias, LogicType).
+        """
         
         # Primary trigger timeframe is now M5
         raw_ts = m5_candles_original.time[-1]
@@ -181,6 +286,18 @@ class StrategyEngine:
 
     def _setup_trade_params(self, signal: TradeSignal, last_candle: dict, atr: float, 
                             sh: float, sl: float) -> TradeSignal:
+        """
+        Calculates SL, TP, and R/R ratio based on local structure and ATR.
+        
+        Args:
+            signal (TradeSignal): The signal to populate.
+            last_candle (dict): The trigger candle data.
+            atr (float): Current ATR for buffer calculation.
+            sh, sl (float): Swing High/Low levels current.
+            
+        Returns:
+            TradeSignal: The fully parameterized signal.
+        """
         # TIGHT SL: Extreeme of rejection candle + 0.1 ATR (M5 needs more room than M1)
         buffer = atr * 0.1
         if signal.direction == "BUY":
@@ -198,12 +315,31 @@ class StrategyEngine:
         return signal
 
     def _check_gatekeepers(self, session: str, cp: float, cb_safe: bool = True) -> Tuple[bool, str]:
+        """
+        Validates whether trading is allowed based on session and safety locks.
+        
+        Args:
+            session (str): Current session name.
+            cp (float): Current price.
+            cb_safe (bool): Whether circuit breakers are clear.
+            
+        Returns:
+            Tuple[bool, str]: (Allowed, Reason).
+        """
         if not cb_safe: return False, "CB_TRIPPED"
         if session and session not in self.tradeable_sessions: return False, "SESSION_OFF"
         if session and self.session_cooldown_active.get(session, False): return False, "COOLDOWN"
         return True, "OK"
 
     def report_trade_result(self, result: str, timestamp: datetime, session: Optional[str] = None):
+        """
+        Updates internal counters after a trade closes.
+        
+        Args:
+            result (str): 'TP' or 'SL'.
+            timestamp (datetime): Close time.
+            session (Optional[str]): Trading session.
+        """
         with self.lock:
             self.daily_trades += 1
             if result == "SL":
@@ -220,7 +356,19 @@ class StrategyEngine:
             for s in self.consecutive_losses: self.consecutive_losses[s] = 0; self.session_cooldown_active[s] = False
 
     def preprocess_history(self, h1: 'CandleArray', m15: 'CandleArray', m5_alias: 'CandleArray', m5_original: 'CandleArray') -> dict:
-        """Vectorized Preprocessing for H1/M15/M5 snipe hierarchy."""
+        """
+        Vectorized preprocessing of historical data to speed up the main analyze loop.
+        Computes H1 Zones, M15 Biases, and M5 Structural levels in a single pass.
+        
+        Args:
+            h1 (CandleArray): H1 data.
+            m15 (CandleArray): M15 data.
+            m5_alias (CandleArray): M5 data (unused alias).
+            m5_original (CandleArray): Primary M5 data.
+            
+        Returns:
+            dict: Mapped precomputed data for every M5 candle.
+        """
         logger.info("[Strategy] M5 Sniper Preprocessing...")
         h1_c = h1.close; h1_h = h1.high; h1_l = h1.low; h1_t = h1.time
         m15_c = m15.close; m15_t = m15.time

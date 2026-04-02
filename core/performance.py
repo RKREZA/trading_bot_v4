@@ -3,8 +3,22 @@ import pandas as pd
 from typing import List, Dict
 
 class PerformanceMetrics:
+    """
+    Static utility for calculating post-trade performance analytics.
+    Calculates standard institutional metrics like Sharpe Ratio, Profit Factor, and Max Drawdown.
+    """
     @staticmethod
     def calculate_metrics(trades: List[Dict], initial_balance: float) -> Dict:
+        """
+        Processes a list of trade dictionaries to produce a summary metric report.
+        
+        Args:
+            trades (List[Dict]): List of trade objects with 'pnl' and 'time' keys.
+            initial_balance (float): Starting balance for the evaluation period.
+            
+        Returns:
+            Dict: Comprehensive report containing Profit Factor, Win Rate, DD, Sharpe, etc.
+        """
         if not trades:
             return {
                 "initial_balance": initial_balance,

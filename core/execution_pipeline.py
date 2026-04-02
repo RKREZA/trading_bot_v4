@@ -16,10 +16,19 @@ except ImportError:
     mt5 = None
 
 class ExecutionPipeline:
-    """Orchestrates signal generation, AI vetting, risk checks, and order execution."""
+    """
+    Orchestrates the end-to-end signal life cycle:
+    1. Circuit Breaker & Risk Context validation.
+    2. Real-time Spread Filtering.
+    3. Multi-timeframe Strategy Analysis (M5 Sniper).
+    4. AI Advisory Veto (Confidence filtering).
+    5. Dynamic Risk Scaling & Lot Sizing.
+    6. MT5 Order Execution & Notification.
+    7. State reconciliation.
+    """
     
     def __init__(self, 
-                 config: "BotConfig", 
+                 config: Any, 
                  connection: MT5Connection, 
                  position_manager: PositionManager,
                  strategy: StrategyEngine, 
@@ -28,6 +37,20 @@ class ExecutionPipeline:
                  notification_manager: NotificationManager,
                  position_meta: Dict[int, Any],
                  state_lock: threading.Lock):
+        """
+        Initializes the execution pipeline with all necessary component handles.
+        
+        Args:
+            config (BotConfig): Validated configuration object.
+            connection (MT5Connection): MT5 terminal connection wrapper.
+            position_manager (PositionManager): Wrapper for managing active trades.
+            strategy (StrategyEngine): Signal generation engine.
+            ai_advisor (AIAdvisor): AI-based signal filter/veto.
+            risk_manager (RiskManager): Risk scaling and circuit breaker logic.
+            notification_manager (NotificationManager): Telegram/Webhook notifier.
+            position_meta (dict): Shared state for active position metadata.
+            state_lock (Lock): Thread-safety lock for position_meta access.
+        """
         self.config = config
         self.connection = connection
         self.position_manager = position_manager
@@ -41,8 +64,20 @@ class ExecutionPipeline:
         self.last_analysis = {} # Stores latest strategy metadata for dashboard
         self.research_mode = config.get("research_mode", False)
         
-    def execute_cycle(self, symbol: str, h1: "CandleArray", m15: "CandleArray", m5: "CandleArray", d1: "CandleArray", current_price: float, session: str) -> bool:
-        """Runs one full execution cycle for a symbol."""
+    def execute_cycle(self, symbol: str, h1: Any, m15: Any, m5: Any, d1: Any, current_price: float, session: str) -> bool:
+        """
+        Runs one full execution cycle for a symbol.
+        Sequence: Gatekeepers -> Analysis -> AI Filter -> Risk Check -> Execution.
+        
+        Args:
+            symbol (str): Trading symbol.
+            h1, m15, m5, d1 (CandleArray): Multi-timeframe candle data.
+            current_price (float): Latest known market price.
+            session (str): Current trading session identifier.
+            
+        Returns:
+            bool: True if an order was successfully placed.
+        """
         # 0. Risk Context & Circuit Breakers
         acc_info = self.connection.get_account_snapshot()
         current_balance = acc_info.get("balance", 0.0)

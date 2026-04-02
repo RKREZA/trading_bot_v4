@@ -7,9 +7,17 @@ import logging
 logger = logging.getLogger("trading_bot.health")
 
 class HealthHandler(BaseHTTPRequestHandler):
+    """
+    HTTP Request Handler for the bot's health monitoring endpoint.
+    Returns current bot status, connectivity, and session performance in JSON format.
+    """
     bot = None
     
     def do_GET(self):
+        """
+        Handles GET requests to the health endpoint.
+        Aggregates live bot metrics into a JSON response.
+        """
         try:
             status = {
                 "alive": True,
@@ -32,6 +40,14 @@ class HealthHandler(BaseHTTPRequestHandler):
         pass  # Suppress access logs to keep terminal clean
 
 def start_health_server(bot, port=8081):
+    """
+    Starts a lightweight HTTP server in a background daemon thread 
+    to provide an external health-check endpoint.
+    
+    Args:
+        bot (TradingBot): The running bot instance to monitor.
+        port (int): Port to bind the server to.
+    """
     HealthHandler.bot = bot
     server = HTTPServer(("0.0.0.0", port), HealthHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()

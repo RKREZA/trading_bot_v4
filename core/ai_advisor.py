@@ -26,50 +26,29 @@ logger = logging.getLogger("trading_bot.ai_advisor")
 
 class AIAdvisor:
     """
-    Non-blocking AI analysis layer.
-
+    Non-blocking AI analysis layer that leverages DeepSeek or NVIDIA NVLM models.
+    Operates in the background to avoid blocking the main trading loop.
+    
+    Features:
+    - Pre-session Analysis: Daily macro context and bias.
+    - Signal Veto: Real-time vetting of generated trade signals.
+    - Post-session Review: Daily performance audit and improvement suggestions.
+    
     Storage design:
-      - self._context (dict) — in-memory, thread-safe via self._lock
-      - ai_context.json     — persisted copy, reloaded on restart
-
-    Context schema:
-    {
-      "session": {
-        "date": "YYYY-MM-DD",
-        "risk_level": "LOW|MEDIUM|HIGH",
-        "reasoning": "...",
-        "recommended_lot_multiplier": 0.5–1.0,
-        "recommended_sl_buffer_add": 0.0–0.3,
-        "high_impact_times_utc": ["HH:MM", ...],
-        "overall_bias": "BULLISH|BEARISH|NEUTRAL",
-        "key_levels_watch": ["...", ...],
-        "updated_at": "ISO datetime"
-      },
-      "last_signal_review": {
-        "direction": "BUY|SELL",
-        "verdict": "VALID|CAUTION|AVOID",
-        "confidence_adjustment": int,
-        "reasoning": "...",
-        "aligned_with_bias": bool,
-        "updated_at": "ISO datetime"
-      },
-      "post_session": {
-        "date": "YYYY-MM-DD",
-        "summary": "...",
-        "patterns_detected": [...],
-        "improvement_suggestions": [...],
-        "best_trade_insight": "...",
-        "worst_trade_insight": "...",
-        "overall_rating": "POOR|AVERAGE|GOOD|EXCELLENT",
-        "stats": {"wins": int, "losses": int, "pnl": float},
-        "updated_at": "ISO datetime"
-      }
-    }
+    - self._context (dict): In-memory, thread-safe via self._lock.
+    - ai_context.json: Persisted copy, reloaded on restart for continuity.
     """
 
     CONTEXT_FILE = "ai_context.json"
 
     def __init__(self, config: dict, analysis_logger=None):
+        """
+        Initializes the AIAdvisor.
+        
+        Args:
+            config (dict): Global configuration.
+            analysis_logger (Optional[Dashboard.AnalysisLogger]): Dashboard logger bridge.
+        """
         self.config = config
         self.analysis_logger = analysis_logger
         self._lock = threading.Lock()
@@ -226,7 +205,18 @@ class AIAdvisor:
     # ------------------------------------------------------------------
 
     def _call_api(self, prompt: str, system: str = "", max_tokens: int = 512) -> str:
-        """Blocking streaming API call. Run only from background threads."""
+        """
+        Sends a request to the AI model and handles streaming response.
+        Implements a 15-minute lockout on 429 (Rate Limit) errors.
+        
+        Args:
+            prompt (str): The user message/prompt.
+            system (str): The system instructions.
+            max_tokens (int): Response limit.
+            
+        Returns:
+            str: The joined text content of the AI response.
+        """
         if not self._client:
             return ""
         messages = []
@@ -350,8 +340,16 @@ Respond ONLY in this exact JSON (no extra text, no markdown):
 
     def evaluate_signal_async(self, signal, h4_trend: str, symbol: str) -> bool:
         """
-        Non-blocking signal evaluation. Returns True if a request was sent,
-        or False if throttled/locked out.
+        Triggers a background vetting of a trade signal.
+        Enforces a 5-minute cooldown between evaluations to prevent spam.
+        
+        Args:
+            signal (TradeSignal): The signal to vet.
+            h4_trend (str): Current H4 structural trend for context.
+            symbol (str): Trading symbol.
+            
+        Returns:
+            bool: True if evaluation thread was started.
         """
         if not self._enabled:
             return False

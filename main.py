@@ -58,11 +58,19 @@ logger = logging.getLogger("trading_bot.main")
 
 class TradingBot:
     """
-    Main trading bot orchestrator.
-    Coordinates Connection, Data, Strategy, and Risk management.
+    The central orchestrator of the Trading Bot V3 system.
+    Responsible for initializing all core components, managing the life cycle 
+    of the trading process (Live, Backtest, or Optimization), and ensuring 
+    state persistence and thread safety.
     """
 
     def __init__(self, config_path: str = "config.json"):
+        """
+        Initializes the TradingBot and all its sub-components.
+        
+        Args:
+            config_path (str): Path to the JSON configuration file.
+        """
         self.config = self._load_config(config_path)
         self.analysis_logger = AnalysisLogger(max_entries=100)
         
@@ -212,7 +220,13 @@ class TradingBot:
         self.trailing_stop_manager.manage_positions(symbol, current_bid, current_ask, atr, last_candle)
 
     def _startup_checks(self) -> bool:
-        """Run before entering the main loop."""
+        """
+        Performs a set of critical health checks (Config, MT5, Market, Balance) 
+        before allowing the bot to enter the live trading loop.
+        
+        Returns:
+            bool: True if all critical checks pass.
+        """
         checks = []
         try:
             BotConfig(**self.config)
@@ -243,6 +257,11 @@ class TradingBot:
         return all_passed
 
     def run_live(self):
+        """
+        The main entry point for live trading.
+        Initializes the dashboard, health server, and runs the continuous 
+        polling loop for signal generation and trade management.
+        """
         if not self.connection.connect(): 
             logger.critical("Could not initialize MT5. Check terminal status and credentials.")
             return
@@ -379,6 +398,19 @@ class TradingBot:
             console.print(s_table)
 
     def run_backtest(self, symbol="XAUUSDm", start_date=None, end_date=None, count=10000):
+        """
+        Executes a historical simulation of the strategy.
+        Fetches range-based or count-based data and runs the BacktestEngine.
+        
+        Args:
+            symbol (str): Trading instrument.
+            start_date (Optional[str]): ISO start date.
+            end_date (Optional[str]): ISO end date.
+            count (int): Number of candles to fetch if dates are not provided.
+            
+        Returns:
+            dict: Backtest result summary.
+        """
         print(f"Project 10/10 Final Validation: {symbol}")
         if not self.connection.connect():
             logger.error("Failed to connect to MT5 for backtesting.")
@@ -424,7 +456,16 @@ class TradingBot:
             self.connection.disconnect()
 
     def run_optimization(self, symbol="XAUUSDm", start_date=None, end_date=None, count=10000, mode="anchored"):
-        """Performs WFO to find the best stable parameters."""
+        """
+        Performs Walk-Forward Optimization to find stable parameters.
+        Iterates through historical windows to vet parameter consistency.
+        
+        Args:
+            symbol (str): Trading instrument.
+            start_date, end_date (Optional[str]): Date range.
+            count (int): Candle count fallback.
+            mode (str): 'anchored' or 'rolling' WFO.
+        """
         logger.info(f"Starting WFO Optimization for {symbol} (Mode: {mode})")
         if not self.connection.connect(): return
         

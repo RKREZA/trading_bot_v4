@@ -19,7 +19,17 @@ BAR_FULL, BAR_EMPTY = "█", "·"
 
 
 class AnalysisLogger:
+    """
+    In-memory log buffer for the dashboard.
+    Maintains a rolling queue of logs to prevent memory bloat while keeping recent history.
+    """
     def __init__(self, max_entries: int = 100):
+        """
+        Initializes the logger.
+        
+        Args:
+            max_entries (int): Maximum number of log lines to retain.
+        """
         self._logs = deque(maxlen=max_entries)
 
     def log(self, message: str, level: str = "INFO"):
@@ -27,12 +37,24 @@ class AnalysisLogger:
         self._logs.append(f"[{timestamp}] [{level}] {message}")
 
     def get_recent(self, count: int = 50) -> List[str]:
+        """
+        Retrieves the most recent log entries.
+        
+        Args:
+            count (int): Number of lines to fetch.
+            
+        Returns:
+            List[str]: List of formatted log strings.
+        """
         return list(self._logs)[-count:]
 
 
 import logging
 class AnalysisLoggerHandler(logging.Handler):
-    """Bridge standard logging to AnalysisLogger."""
+    """
+    Bridge between Python's standard logging module and the Dashboard's AnalysisLogger.
+    Allows library-level logs to appear in the CLI UI.
+    """
     def __init__(self, analysis_logger: AnalysisLogger, level=logging.INFO):
         super().__init__(level)
         self.analysis_logger = analysis_logger
@@ -46,7 +68,19 @@ class AnalysisLoggerHandler(logging.Handler):
 
 
 class Dashboard:
+    """
+    Real-time CLI dashboard using the 'rich' library.
+    Provides a visual representation of account status, market data, signals, 
+    and AI advisory context.
+    """
     def __init__(self, config: dict, logger: Optional[AnalysisLogger] = None):
+        """
+        Initializes the dashboard.
+        
+        Args:
+            config (dict): Global configuration.
+            logger (Optional[AnalysisLogger]): Log buffer to display.
+        """
         self.config = config
         self.logger = logger or AnalysisLogger()
         self.console = Console()
@@ -73,10 +107,12 @@ class Dashboard:
 
 
     def start(self):
+        """Starts the full-screen 'rich.live' UI."""
         self._live = Live(self._render(), console=self.console, refresh_per_second=4, screen=True)
         self._live.start()
 
     def stop(self):
+        """Stops the UI and returns the terminal to a normal state."""
         if self._live:
             self._live.stop()
 
@@ -85,6 +121,13 @@ class Dashboard:
             self._live.update(self._render())
 
     def _render(self) -> Group:
+        """
+        The main UI layout generator. 
+        Combines various panels into a single Group for rendering.
+        
+        Returns:
+            Group: The root layout object.
+        """
         parts = []
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         header = Text()

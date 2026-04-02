@@ -11,7 +11,22 @@ import pandas as pd
 logger = logging.getLogger("trading_bot.walk_forward")
 
 class WalkForwardValidation:
+    """
+    Implements Walk-Forward Optimization (WFO) to validate strategy robustness.
+    WFO involves optimizing parameters on a training window (In-Sample) 
+    and testing them on a subsequent unseen window (Out-of-Sample).
+    
+    This technique helps detect curve-fitting by ensuring that 'best' 
+    parameters from the past remain profitable in the immediate future.
+    """
     def __init__(self, config: dict, strategy: StrategyEngine):
+        """
+        Initializes the WFO suite.
+        
+        Args:
+            config (dict): Bot configuration.
+            strategy (StrategyEngine): Base strategy instance.
+        """
         self.config = config
         self.strategy = strategy
         self.last_train_perf = {}
@@ -19,8 +34,17 @@ class WalkForwardValidation:
     def run_validation(self, symbol: str, h1: Any, m15: Any, m5: Any, d1: Any, 
                        train_days: int = 14, test_days: int = 7, mode: str = "anchored") -> List[Dict]:
         """
-        Institutional-grade Walk-Forward Optimization (WFO) for M5 Sniper.
-        Hierarchy: H1 (Zones), M15 (Bias), M5 (Entries)
+        Executes the walk-forward simulation across historical data.
+        
+        Args:
+            symbol (str): Symbol name.
+            h1, m15, m5, d1 (CandleArray): Multi-timeframe data.
+            train_days (int): Length of the IS optimization window.
+            test_days (int): Length of the OOS validation window.
+            mode (str): 'anchored' (growing train window) or 'rolling' (fixed train window).
+            
+        Returns:
+            List[Dict]: List of results for each walk-forward window.
         """
         results = []
         if not m5: return []
@@ -96,10 +120,15 @@ class WalkForwardValidation:
         return results
 
     def _filter_arr(self, arr: CandleArray, start: datetime, end: datetime) -> CandleArray:
+        """Slices a CandleArray based on a datetime range."""
         mask = (arr.time >= start.timestamp()) & (arr.time < end.timestamp())
         return arr[mask]
 
     def _optimize(self, symbol, data, grid) -> dict:
+        """
+        Performs a brute-force grid search on the training data.
+        Returns the parameter set that maximized Net Profit within the window.
+        """
         best_metric = -999999; best_params = {}
         keys, values = zip(*grid.items())
         

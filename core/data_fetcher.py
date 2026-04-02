@@ -41,9 +41,16 @@ TIMEFRAME_MAP = {
 
 
 class DataFetcher:
-    """Fetches and caches candle data from MT5."""
+    """
+    Main component for retrieving market data from MT5.
+    Implements an incremental caching strategy to minimize MT5 terminal overhead:
+    - TIMEFRAME_MAP: Maps string identifiers to MT5 constants.
+    - CACHE_TTL: Defines the validity period for cached data per timeframe.
+    - Incremental Update: Only fetches the latest few candles if the history is already cached.
+    """
 
     def __init__(self):
+        """Initializes the DataFetcher with an empty internal cache."""
         self._cache: Dict[str, dict] = {}  # key -> {data, timestamp}
 
     def _cache_key(self, symbol: str, timeframe: str) -> str:
@@ -67,7 +74,17 @@ class DataFetcher:
 
     def fetch_candles(self, symbol: str, timeframe: str, count: int = 500, force_refresh: bool = False) -> CandleArray:
         """
-        Fetch candle data, returning cached CandleArray or incrementally updating it.
+        Retrieves candle data for a symbol and timeframe.
+        Attempts to update the cache incrementally if possible.
+        
+        Args:
+            symbol (str): Symbol name.
+            timeframe (str): Timeframe (e.g., 'M5', 'H1').
+            count (int): Requested number of historical candles.
+            force_refresh (bool): If True, bypasses TTL and forces a refresh.
+            
+        Returns:
+            CandleArray: The requested data wrapped in a CandleArray object.
         """
         if timeframe not in TIMEFRAME_MAP or TIMEFRAME_MAP[timeframe] is None:
             logger.warning("Invalid timeframe: %s", timeframe)
@@ -146,7 +163,16 @@ class DataFetcher:
 
     def fetch_candles_range(self, symbol: str, timeframe: str, date_from: datetime.datetime, date_to: datetime.datetime) -> CandleArray:
         """
-        Fetch OHLC data for a specific date range.
+        Fetches historical OHLC data for a specific date range (broker-limited).
+        
+        Args:
+            symbol (str): Symbol name.
+            timeframe (str): Timeframe constant.
+            date_from (datetime): Start of range (UTC).
+            date_to (datetime): End of range (UTC).
+            
+        Returns:
+            CandleArray: The requested historical data.
         """
         if timeframe not in TIMEFRAME_MAP or TIMEFRAME_MAP[timeframe] is None:
             return CandleArray.from_dicts([])
@@ -180,7 +206,15 @@ class DataFetcher:
 
     def fetch_ticks_range(self, symbol: str, date_from: datetime.datetime, date_to: datetime.datetime) -> List[dict]:
         """
-        Fetch real tick data for a specific date range.
+        Fetches raw tick data (including bid/ask/flags) for backtesting or auditing.
+        
+        Args:
+            symbol (str): Symbol name.
+            date_from (datetime): Start time.
+            date_to (datetime): End time.
+            
+        Returns:
+            List[dict]: List of raw ticks as dictionaries.
         """
         try:
             with MT5Connection.MT5_LOCK:

@@ -11,7 +11,24 @@ except ImportError:
 logger = logging.getLogger("trading_bot.ai_filter")
 
 class AIFilter:
+    """
+    Electronic News & AI-driven signal filter.
+    Designed to prevent trading during high-impact news events and provide 
+    an additional layer of LLM-based signal vetting.
+    
+    Attributes:
+        enabled (bool): Whether the filter is active.
+        threshold (float): Minimum confidence score required to pass.
+        high_impact_events (list): Cache of news event times (HH:MM).
+    """
     def __init__(self, config: Optional[dict] = None, threshold: Optional[float] = None):
+        """
+        Initializes the AIFilter with configuration and threshold.
+        
+        Args:
+            config (Optional[dict]): Configuration dictionary (nested or flat).
+            threshold (Optional[float]): Overriding confidence threshold.
+        """
         if config is None: config = {}
         # Handle both nested and flat config
         self.config_data = config.get("ai_advisor", {}) if "ai_advisor" in config else config
@@ -29,7 +46,13 @@ class AIFilter:
         self.silent = False
 
     def _fetch_news_context(self) -> List[str]:
-        """Fetch high-impact news times for the current day."""
+        """
+        Queries the AI model to identify high-impact news times for the day.
+        Caches results for 4 hours to minimize API costs and latency.
+        
+        Returns:
+            List[str]: List of UTC times (HH:MM) for high-impact events.
+        """
         if not self.api_key: return []
         
         now = datetime.now(timezone.utc)
@@ -62,7 +85,16 @@ class AIFilter:
             return []
 
     def is_news_blocked(self, timestamp: datetime) -> bool:
-        """Check if the current time is within +/- 30 mins of a high-impact event."""
+        """
+        Checks if a given timestamp falls within a +/- 30 minute window of 
+        any high-impact economic event.
+        
+        Args:
+            timestamp (datetime): The time to check (UTC).
+            
+        Returns:
+            bool: True if trading should be blocked due to news.
+        """
         if not self.enabled or self.backtest_mode: return False
         events = self._fetch_news_context()
         if not events: return False
@@ -82,7 +114,14 @@ class AIFilter:
 
     def filter_signal(self, signal_data: dict) -> Tuple[bool, float, float]:
         """
-        Evaluate a signal and return (is_valid, confidence_score, sl_buffer_adjustment).
+        Main entry point for vetting a trade signal.
+        Performs news proximity checks and structural confidence scoring.
+        
+        Args:
+            signal_data (dict): Dictionary containing signal metadata (regime, ATR, etc.).
+            
+        Returns:
+            Tuple[bool, float, float]: (is_approved, confidence_score, sl_buffer_adjustment).
         """
         if not self.enabled:
             return True, 1.0, 0.0

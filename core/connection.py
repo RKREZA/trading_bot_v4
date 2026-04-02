@@ -25,13 +25,26 @@ BOT_MAGIC_NUMBER = 234000
 
 
 class MT5Connection:
-    """Manages the MT5 terminal connection with health checks and auto-reconnect."""
+    """
+    Manages the MT5 terminal connection with health checks and auto-reconnect.
+    
+    This class is the primary interface to the MetaTrader 5 terminal.
+    It uses a global MT5_LOCK to ensure thread safety across all mt5 library calls,
+    preventing race conditions in the underlying C wrapper.
+    """
     
     # Global lock for all mt5.* library calls across the entire application.
     # This prevents race conditions and segmentation faults in the non-thread-safe C-wrapper.
     MT5_LOCK = threading.Lock()
 
     def __init__(self, max_retries: int = 5, health_check_interval: int = 30):
+        """
+        Initializes the connection manager.
+        
+        Args:
+            max_retries (int): Number of attempts to reconnect before giving up.
+            health_check_interval (int): Seconds between connection pings.
+        """
         self.max_retries = max_retries
         self.health_check_interval = health_check_interval
         self.connected = False
@@ -55,7 +68,13 @@ class MT5Connection:
         return {"login": int(login), "password": password, "server": server}
 
     def connect(self) -> bool:
-        """Connect to MT5 terminal with retry logic."""
+        """
+        Connects to the MT5 terminal using credentials from environment variables.
+        Shuts down any existing connection before starting a new one for a clean slate.
+        
+        Returns:
+            bool: True if connection and account initialization were successful.
+        """
         if mt5 is None:
             logger.error("MetaTrader5 package not installed. Run: pip install MetaTrader5")
             return False
@@ -207,8 +226,14 @@ class MT5Connection:
 
     def get_market_status(self, symbol: str) -> bool:
         """
-        Check if the market is currently open for a symbol.
-        Uses candle-freshness (M1) as a broker-agnostic heuristic.
+        Determines if the market is open for a specific symbol.
+        Uses a broker-agnostic heuristic combining trade_mode and candle freshness.
+        
+        Args:
+            symbol (str): The trading symbol to check.
+            
+        Returns:
+            bool: True if symbol is tradeable and has recent candle activity.
         """
         if mt5 is None: return False
         
@@ -244,8 +269,13 @@ class MT5Connection:
 
     def get_filling_mode(self, symbol: str) -> int:
         """
-        Dynamically determine the supported filling mode for a symbol.
-        Common modes: FOK (Fill or Kill), IOC (Immediate or Cancel), RETURN.
+        Queries the broker for the supported order filling mode (FOK, IOC, or RETURN).
+        
+        Args:
+            symbol (str): Symbol to query.
+            
+        Returns:
+            int: The MT5 filling mode constant.
         """
         if mt5 is None:
             return 0
@@ -271,7 +301,19 @@ class MT5Connection:
 
     def place_order(self, symbol: str, signal, lot_size: float, max_retries: int = 3, delay: float = 1.0) -> Optional[dict]:
         """
-        Place an order in MT5 based on the provided signal, with retry logic.
+        Sends a trade request to the MT5 server.
+        Includes automatic retries for requotes and price changes,
+        and dynamically adjusts stops to respect broker minimum distances.
+        
+        Args:
+            symbol (str): Symbol to trade.
+            signal (TradeSignal): Signal object containing direction, SL, and TP.
+            lot_size (float): The volume to trade.
+            max_retries (int): Number of retries on transient errors.
+            delay (float): Wait time between retries.
+            
+        Returns:
+            Optional[dict]: Dict containing 'ticket', 'volume', and 'price' if successful.
         """
         if not self.ensure_connected():
             return None
@@ -504,13 +546,30 @@ class MT5Connection:
 
 
 class PositionManager:
-    """Manages open positions and risk-based lot sizing."""
+    """
+    Higher-level manager for tracking open positions and calculating precise lot sizes.
+    Filters positions by the bot's magic number to avoid interference with manual trades.
+    """
 
     def __init__(self, connection: MT5Connection):
+        """
+        Initializes the PositionManager.
+        
+        Args:
+            connection (MT5Connection): The active MT5 terminal connection.
+        """
         self.connection = connection
 
     def get_open_positions(self, symbol: str = None) -> List:
-        """Return list of open positions, optionally filtered by symbol and magic number."""
+        """
+        Fetches positions from MT5 and filters them by the instance magic number.
+        
+        Args:
+            symbol (Optional[str]): Symbol filter.
+            
+        Returns:
+            List: List of filtered MT5 position structures.
+        """
         if not self.connection.ensure_connected():
             return []
         try:
@@ -533,7 +592,19 @@ class PositionManager:
         return len(self.get_open_positions(symbol))
 
     def calculate_lot_size(self, symbol: str, signal, risk_percent: float, account_balance: float = None) -> float:
-        """Calculate lot size based on risk percentage and stop-loss distance using unified LotCalculator."""
+        """
+        Calculates the appropriate lot size based on account balance and risk % per trade.
+        Delegates the core math to LotCalculator and applies additional 'tight SL' scaling.
+        
+        Args:
+            symbol (str): Symbol to calculate for.
+            signal (TradeSignal): Proposed trade signal for structural SL info.
+            risk_percent (float): Risk per trade (e.g., 1.0 for 1%).
+            account_balance (Optional[float]): Use specific balance or current account balance.
+            
+        Returns:
+            float: Rounded and clamped lot size.
+        """
         if account_balance is None:
             account_balance = self.connection.account_info.get('balance', 1000)
 

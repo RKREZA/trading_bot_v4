@@ -5,7 +5,19 @@ from typing import Dict, List, Optional, Any
 
 @dataclass(slots=True)
 class CandleArray:
-    """Vectorized candle data for fast indicator computation."""
+    """
+    High-performance vectorized container for OHLCVT candle data.
+    Uses NumPy arrays internally to enable O(1) indicator calculations 
+    and avoid the overhead of list-of-dicts processing.
+    
+    Attributes:
+        time (np.ndarray): int64 Unix timestamps.
+        open (np.ndarray): float64 open prices.
+        high (np.ndarray): float64 high prices.
+        low (np.ndarray): float64 low prices.
+        close (np.ndarray): float64 close prices.
+        tick_volume (np.ndarray): int64 tick volumes.
+    """
     time: np.ndarray      # int64 timestamps
     open: np.ndarray
     high: np.ndarray
@@ -15,6 +27,15 @@ class CandleArray:
 
     @classmethod
     def from_dicts(cls, candles: list[dict]) -> "CandleArray":
+        """
+        Factory method to convert a list of dictionaries into a vectorized CandleArray.
+        
+        Args:
+            candles (list[dict]): List of MT5-style candle dictionaries.
+            
+        Returns:
+            CandleArray: Initialized vectorized object.
+        """
         return cls(
             time=np.array([c['time'] for c in candles], dtype=np.int64),
             open=np.array([c['open'] for c in candles]),
@@ -32,6 +53,16 @@ class CandleArray:
         return CandleArray(*(getattr(self, f.name)[start:end] for f in fields(self)))
 
     def __getitem__(self, idx):
+        """
+        Provides intuitive access to the data. 
+        Returns a sliced CandleArray if idx is a slice, or a dictionary if idx is an int.
+        
+        Args:
+            idx (slice | int): Index or range.
+            
+        Returns:
+            CandleArray | dict: Sliced object or single candle dictionary.
+        """
         if isinstance(idx, slice):
             start = idx.start if idx.start is not None else 0
             stop = idx.stop if idx.stop is not None else len(self.time)
@@ -54,6 +85,10 @@ class CandleArray:
 # Configuration Models
 
 class RiskConfig(BaseModel):
+    """
+    Schema for account-level risk management parameters.
+    Encapsulates circuit breakers, position limits, and Kelly Criterion settings.
+    """
     model_config = ConfigDict(extra='allow')
     risk_per_trade: float = 1.0
     max_daily_trades: int = 5
@@ -66,6 +101,10 @@ class RiskConfig(BaseModel):
     drawdown_scaling: bool = True
 
 class StrategyConfig(BaseModel):
+    """
+    Schema for strategy-specific execution parameters.
+    Defines thresholds for entry signals, SL buffers, and cooldowns.
+    """
     model_config = ConfigDict(extra='allow')
     min_confluence_score: int = 4
     min_confidence: int = 60
@@ -76,10 +115,14 @@ class StrategyConfig(BaseModel):
 # BotConfig combines all sub-configs
 
 class BotConfig(BaseModel):
+    """
+    Root configuration model for the Trading Bot.
+    Aggregates risk, strategy, session, and backtest configurations.
+    """
     model_config = ConfigDict(extra='allow')
     
-    symbol: str = "XAUUSDm"
-    magic_number: int = 234000
+    symbol: str = Field(default="XAUUSDm", description="Primary trading symbol")
+    magic_number: int = Field(default=234000, description="Unique ID for bot's trades")
     risk: RiskConfig = Field(default_factory=RiskConfig)
     strategy_defaults: StrategyConfig = Field(default_factory=StrategyConfig)
     session_config: Dict[str, Any] = Field(default_factory=dict)
