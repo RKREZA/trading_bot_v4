@@ -326,9 +326,12 @@ class StrategyEngine:
         is_ranging = (h4_trend == "RANGING" or h4_conviction < 40)
         
         if is_ranging:
-            # [PHASE 13.4] Disable TOKYO Mean-Reversion to focus on high-conviction trends
-            return None, "RANGING_FILTER", "NEUTRAL"
-
+            # TOKYO style Mean-Reversion (Adaptive to all sessions if ranging)
+            # Use M30 EMA as the mean
+            m30_ema = self._calculate_ema(m30_candles.close, 10)
+            m30_rsi = self._calculate_rsi(m30_candles.close, 14)
+            signal = self._tokyo_mean_reversion(m30_candles, m5_candles, current_price, m30_ema, m30_rsi, session)
+            return signal, h4_trend, str(regime)
 
         # 3. M30 Momentum Quality Layer
         m30_closes = m30_candles.close
@@ -383,7 +386,7 @@ class StrategyEngine:
             if h4_conviction > 75:
                 ai_bias += 0.5 # Institutional conviction boost
                 
-            signal = self._set_sl_tp(signal, self._calculate_atr(m15_candles), m30_candles, h4_conviction, session, confluence, ai_bias, m5_candles)
+            signal = self._set_sl_tp(signal, self._calculate_atr(m15_candles), m30_candles, h4_conviction, session, confluence, ai_bias)
             
             # Final confidence mapping
             signal.confidence = self._calculate_confidence(confluence, h4_conviction, signal)
@@ -399,54 +402,12 @@ class StrategyEngine:
             
         return signal, h4_trend, str(regime)
 
-    def _analyze_preprocessed(self, preprocessed: dict, m30_candles: 'CandleArray', m15_candles: 'CandleArray', 
-                              m5_candles: 'CandleArray', current_price: float, session: str) -> Tuple[Optional[TradeSignal], str, str]:
-        """[PHASE 13.3] Optimized Backtest Path. Synchronized with live logic."""
-        h4_trend = preprocessed["h4_trend"]
-        h4_conviction = preprocessed["h4_conviction"]
-        h4_atr = preprocessed["h4_atr"]
-        regime = preprocessed["regime"]
-        
-        # 1. Gatekeepers (Simplified for speed in backtest)
-        if session and session not in self.tradeable_sessions:
-            return None, "SESSION_DISABLED", "NEUTRAL"
-            
-        is_ranging = (h4_trend == "RANGING" or h4_conviction < 40)
-        if is_ranging:
-            return None, "RANGING_FILTER", "NEUTRAL"
-
-
-        # 2. Momentum Quality
-        m30_er = preprocessed["m30_er"]
-        if m30_er < 0.35: return None, "LOW_EFFICIENCY", str(regime)
-        
-        # 3. Execution Layer
-        signal = self._check_breakout_entry(m15_candles, m5_candles, h4_trend, current_price, session, h4_atr)
-        if not signal:
-            signal = self._check_pullback_entry(m15_candles, m5_candles, h4_trend, current_price, session)
-
-        if signal:
-            # 4. Confluence & Scaling
-            confluence, reasons = self._calculate_confluence(h4_trend, h4_conviction, regime, signal, 
-                                                           m30_candles, m5_candles, 0, 0, session)
-            signal.confluence_score = confluence
-            signal.reasons = reasons
-            
-            ai_bias = self.config.get("ai_advisor", {}).get("bias", 0.0)
-            if h4_conviction > 75: ai_bias += 0.5
-            
-            # [MICRO-STOP] Pass m5_candles to enable tighter Stops
-            signal = self._set_sl_tp(signal, preprocessed["m15_atr"], m30_candles, h4_conviction, session, confluence, ai_bias, m5_candles)
-            signal.confidence = self._calculate_confidence(confluence, h4_conviction, signal)
-            
-            # Gating
-            session_conf = self.config.get("session_config", {}).get(session, {})
-            min_conf = session_conf.get("min_confluence_score", self.min_confluence_score)
-            if signal.confluence_score < min_conf:
-                return None, h4_trend, str(regime)
-            
-        return signal, h4_trend, str(regime)
-
+    def _analyze_preprocessed(self, preprocessed: dict, m30: 'CandleArray', m15: 'CandleArray', 
+                              m5: 'CandleArray', price: float, session: str) -> Tuple[Optional[TradeSignal], str, str]:
+        """Specific logic for preprocessed (backtest) optimization."""
+        # This will be refactored to match the live path during the preprocess_history update.
+        # Placeholder for now until step 5.
+        return None, "BACKTEST_NOT_SYNCED", "NEUTRAL"
 
         if signal:
             confluence, reasons = self._calculate_confluence(h4_trend, h4_strength, regime, signal, 
@@ -708,54 +669,62 @@ class StrategyEngine:
         return None
 
     def _set_sl_tp(self, signal: TradeSignal, atr: float, m30_candles: 'CandleArray', 
-                   h4_strength: int, session: str, confluence_score: int, ai_bias: float = 0.0, 
-                   m5_candles: Optional['CandleArray'] = None) -> TradeSignal:
+                   h4_strength: int, session: str, confluence_score: int, ai_bias: float = 0.0) -> TradeSignal:
         
         """
-        [PHASE 13.6] High-Leverage Institutional Executioner.
-        Uses M5 Extremums to minimize SL distance, maximizing lot size and R-growth.
+        [PHASE 11] Institutional Risk Assignment.
+        Handles Dynamic RR scaling and Volatility Spike expansion.
         """
         session_conf = self.config.get("session_config", {}).get(session, {})
+        
+        # 1. Base RR from Session Config (Reachable Targets)
         base_rr = session_conf.get("rr_ratio", self.rr_ratio)
-        rr = base_rr + (0.5 if h4_strength > 75 else -0.5 if h4_strength < 40 else 0)
-        rr = max(1.5, min(rr + ai_bias, 6.0))
         
-        # 4. Global Minimum SL (Safety Floor)
-        min_sl_pts = self.config.get("risk", {}).get("min_sl_points", 50)
-        point = 0.01 # Gold standard
+        if h4_strength > 75: # High Conviction Boost
+            rr = base_rr + 0.5
+        elif h4_strength < 40: # Low Conviction Penalty
+            rr = base_rr - 0.5
+        else:
+            rr = base_rr
+            
+        # 2. AI Bias Adjustment
+        rr += ai_bias
         
-        # 5. Micro-Stop Placement
+        # 3. Final Clamp
+        rr = max(1.5, min(rr, 6.0))
+        
+        # 4. SL Calculation (Adaptive)
+        sl_buffer_mult = session_conf.get("sl_atr_buffer", self.sl_atr_buffer)
+        
+        # News/Volatility Expansion
+        if getattr(signal, 'volatility_spike', False):
+            sl_buffer_mult *= 1.5 # 1.5x expansion for spikes
+            
+        if h4_strength > 75:
+            sl_buffer_mult *= 0.8 # Tighten for high conviction
+        elif h4_strength < 40:
+            sl_buffer_mult *= 1.2 # Loosen for low conviction
+            
+        buffer = sl_buffer_mult * atr
+        
+        # 5. Price Placement
         if signal.direction == "BUY":
-            # [Micro-Stop] Low of the trigger candle + small cushion
-            if m5_candles is not None:
-                m5_low = np.min(m5_candles.low[-2:])
-                target_sl = m5_low - (5 * point)
-                # Ensure distance is at least min_sl_pts
-                if (signal.entry_price - target_sl) < (min_sl_pts * point):
-                    target_sl = signal.entry_price - (min_sl_pts * point)
-                signal.stop_loss = target_sl
-            else:
-                # Fallback to ATR if M5 not available
-                signal.stop_loss = signal.entry_price - (2.0 * atr)
-                
+            # [Institutional] Use the lower of EMA or recent Swing Low
+            m5_lows = m30_candles.low[-5:]
+            signal.stop_loss = np.min(m5_lows) - buffer
             risk = signal.entry_price - signal.stop_loss
             signal.take_profit = signal.entry_price + (risk * rr)
+            signal.tp1_price = signal.entry_price + (risk * 1.0)
+            signal.tp2_price = signal.entry_price + (risk * 2.0)
+            signal.tp3_price = signal.take_profit
         else:
-            if m5_candles is not None:
-                m5_high = np.max(m5_candles.high[-2:])
-                target_sl = m5_high + (5 * point)
-                if (target_sl - signal.entry_price) < (min_sl_pts * point):
-                    target_sl = signal.entry_price + (min_sl_pts * point)
-                signal.stop_loss = target_sl
-            else:
-                signal.stop_loss = signal.entry_price + (2.0 * atr)
-                
+            m5_highs = m30_candles.high[-5:]
+            signal.stop_loss = np.max(m5_highs) + buffer
             risk = signal.stop_loss - signal.entry_price
             signal.take_profit = signal.entry_price - (risk * rr)
-            
-        signal.rr_ratio = rr
-        return signal
-
+            signal.tp1_price = signal.entry_price - (risk * 1.0)
+            signal.tp2_price = signal.entry_price - (risk * 2.0)
+            signal.tp3_price = signal.take_profit
             
         signal.rr_ratio = rr
         return signal
@@ -840,8 +809,56 @@ class StrategyEngine:
                 self.consecutive_losses[s] = 0
                 self.session_cooldown_active[s] = False
 
-    # Removed duplicate _analyze_preprocessed to ensure Phase 13.3 logic is used.
-
+    def _analyze_preprocessed(self, preprocessed: dict, m30: 'CandleArray', m15: 'CandleArray', 
+                              m5: 'CandleArray', price: float, session: str) -> Tuple[Optional[TradeSignal], str, str]:
+        """Vectorized Backtest Path for Phase 11 logic."""
+        trend = preprocessed["h4_trend"]
+        conv = preprocessed["h4_conviction"]
+        regime = preprocessed["regime"]
+        h4_atr = preprocessed["h4_atr"]
+        
+        # Mode Selection
+        if trend == "RANGING" or conv < 40:
+            signal = self._tokyo_mean_reversion(m30, m5, price, preprocessed["m30_ema"], preprocessed["m30_rsi"], session)
+            return signal, trend, regime
+            
+        # Momentum Quality Gate (M30)
+        if preprocessed["m30_er"] < 0.35: return None, trend, regime
+        if trend == "BULLISH" and not preprocessed["m30_macd_vel_up"]: return None, trend, regime
+        if trend == "BEARISH" and not preprocessed["m30_macd_vel_down"]: return None, trend, regime
+        if trend == "BULLISH" and preprocessed["m30_vw_rsi"] < 45: return None, trend, regime
+        if trend == "BEARISH" and preprocessed["m30_vw_rsi"] > 55: return None, trend, regime
+        
+        # Execution & Trigger Layer (Breakout First)
+        signal = self._check_breakout_entry(m15, m5, trend, price, session, h4_atr)
+        
+        # [PHASE 12] Dual-Trigger System in Backtest
+        if not signal:
+            signal = self._check_pullback_entry(m15, m5, trend, price, session)
+        
+        if signal:
+            # Re-use scalar confluence and sl/tp logic for accuracy
+            conf, reasons = self._calculate_confluence(trend, conv, regime, signal, m30, m5, 0, 0, session)
+            signal.confluence_score = conf
+            signal.reasons = reasons
+            
+            ai_bias = self.config.get("ai_advisor", {}).get("bias", 0.0)
+            if conv > 75: ai_bias += 0.5
+            
+            m15_atr = self._calculate_atr(m15)
+            signal = self._set_sl_tp(signal, m15_atr, m30, conv, session, conf, ai_bias)
+            signal.confidence = self._calculate_confidence(conf, conv, signal)
+            
+            session_conf = self.config.get("session_config", {}).get(session, {})
+            # Relaxed threshold for pullback entries to increase frequency
+            min_score = session_conf.get("min_confluence_score", self.min_confluence_score)
+            if "EMA Pullback" in signal.reasons:
+                min_score = max(3, min_score - 1)
+                
+            if signal.confluence_score < min_score:
+                return None, trend, regime
+                
+        return signal, trend, regime
 
     def preprocess_history(self, h4: 'CandleArray', m30: 'CandleArray', m15: 'CandleArray', m5: 'CandleArray') -> dict:
         """
@@ -876,11 +893,6 @@ class StrategyEngine:
         for i in range(len(m30)):
             m30_regimes.append(MarketRegime.classify(m30[:i+1]))
 
-        # 2b. M15 ATR Pre-calculation
-        m15_atr_series = []
-        for i in range(len(m15)):
-            m15_atr_series.append(self._calculate_atr(m15[:i+1]))
-
         # 3. Time-based Mapping to M5
         m5_times = m5.time
         h4_times = h4.time
@@ -894,11 +906,9 @@ class StrategyEngine:
             # Offsets to prevent look-ahead bias
             h4_idx = np.searchsorted(h4_times, t - 14400, side='right') - 1
             m30_idx = np.searchsorted(m30_times, t - 1800, side='right') - 1
-            m15_idx = np.searchsorted(m15_times, t - 900, side='right') - 1
             
             h4_idx = max(0, h4_idx)
             m30_idx = max(0, m30_idx)
-            m15_idx = max(0, m15_idx)
             
             # MACD Velocity
             m30_macd_vel_up = m30_hist[m30_idx] > m30_hist[max(0, m30_idx-1)]
@@ -909,11 +919,10 @@ class StrategyEngine:
                 "h4_conviction": h4_conv_series[h4_idx],
                 "h4_atr": h4_atr_series[h4_idx],
                 "regime": m30_regimes[m30_idx],
-                "m30_ema_10": m30_ema[m30_idx], # Sync key with _analyze_preprocessed
-                "m30_rsi_14": m30_rsi[m30_idx],
+                "m30_ema": m30_ema[m30_idx],
+                "m30_rsi": m30_rsi[m30_idx],
                 "m30_vw_rsi": m30_vw_rsi[m30_idx],
                 "m30_er": m30_er[m30_idx],
-                "m15_atr": m15_atr_series[m15_idx], # Added for Micro-Stops
                 "m30_macd_vel_up": m30_macd_vel_up,
                 "m30_macd_vel_down": m30_macd_vel_down
             })
