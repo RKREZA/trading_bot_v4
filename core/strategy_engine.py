@@ -90,6 +90,10 @@ class StrategyEngine:
         
         import threading
         self.lock = threading.Lock()
+        
+        # State for Liquidity Ranges
+        self.session_ranges = {} # session name -> (high, low)
+        self.current_session = None
 
     @staticmethod
     def get_session_from_hour(hour: int, utc_offset: int = 0) -> str:
@@ -322,11 +326,11 @@ class StrategyEngine:
         h4_atr = self._calculate_atr(h4_candles)
         
         # 2. Mode Selection (Adaptive)
-        # If H4 is Ranging or Conviction is weak, default to Mean-Reversion
+        # If H4 is Ranging or Conviction is weak, Tokyo is still valid for Mean-Reversion
+        # London/NY still require H4 conviction for trending plays, but we will handle this in _check_breakout_entry
         is_ranging = (h4_trend == "RANGING" or h4_conviction < 40)
         
-        if is_ranging:
-            # [PHASE 13.4] Disable TOKYO Mean-Reversion to focus on high-conviction trends
+        if is_ranging and session != "TOKYO":
             return None, "RANGING_FILTER", "NEUTRAL"
 
 
@@ -364,7 +368,7 @@ class StrategyEngine:
             return None, "LOW_VOL_CONVICTION", str(regime)
 
         # 4. Execution & Trigger Layer
-        signal = self._check_breakout_entry(m15_candles, m5_candles, h4_trend, current_price, session, h4_atr)
+        signal = self._check_breakout_entry(m30_candles, m15_candles, m5_candles, h4_trend, current_price, session, h4_atr)
         
         # [PHASE 12] Dual-Trigger System: If no breakout, check for pullback
         if not signal:
@@ -421,7 +425,7 @@ class StrategyEngine:
         if m30_er < 0.35: return None, "LOW_EFFICIENCY", str(regime)
         
         # 3. Execution Layer
-        signal = self._check_breakout_entry(m15_candles, m5_candles, h4_trend, current_price, session, h4_atr)
+        signal = self._check_breakout_entry(m30_candles, m15_candles, m5_candles, h4_trend, current_price, session, h4_atr)
         if not signal:
             signal = self._check_pullback_entry(m15_candles, m5_candles, h4_trend, current_price, session)
 
@@ -596,89 +600,109 @@ class StrategyEngine:
             
         return "RANGING", 50
 
-    def _check_breakout_entry(self, m15_candles: 'CandleArray', m5_candles: 'CandleArray', 
+    def _get_liquidity_zones(self, m5_candles: 'CandleArray', session: str) -> Dict[str, float]:
+        """[PHASE 14] Institutional Liquidity Zone Tracking."""
+        zones = {}
+        times = m5_candles.time
+        current_raw_ts = float(times[-1])
+        curr_dt = datetime.fromtimestamp(current_raw_ts, tz=timezone.utc)
+        
+        # 1. Previous 3h Rolling H/L (36 candles)
+        zones["3h_high"] = float(np.max(m5_candles.high[-37:-1]))
+        zones["3h_low"] = float(np.min(m5_candles.low[-37:-1]))
+            
+        # 2. Today's Tokyo Extremums (00:00 - 08:00 UTC)
+        tokyo_start = curr_dt.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        tokyo_end = tokyo_start + (8 * 3600)
+        tokyo_mask = (times >= tokyo_start) & (times < tokyo_end)
+        if np.any(tokyo_mask):
+            zones["tokyo_high"] = float(np.max(m5_candles.high[tokyo_mask]))
+            zones["tokyo_low"] = float(np.min(m5_candles.low[tokyo_mask]))
+            
+        # 3. Initial 30-min Opening Range
+        session_start_hour = 8 if session == "LONDON" else 14 if session in ["NEW_YORK", "LONDON/NY"] else None
+        if session_start_hour is not None:
+            open_start = curr_dt.replace(hour=session_start_hour, minute=0, second=0, microsecond=0).timestamp()
+            open_end = open_start + (30 * 60)
+            open_mask = (times >= open_start) & (times < open_end)
+            if np.any(open_mask):
+                zones["session_open_high"] = float(np.max(m5_candles.high[open_mask]))
+                zones["session_open_low"] = float(np.min(m5_candles.low[open_mask]))
+                
+        return zones
+
+    def _check_breakout_entry(self, m30_candles: 'CandleArray', m15_candles: 'CandleArray', m5_candles: 'CandleArray', 
                               trend: str, current_price: float, session: str, h4_atr: float) -> Optional[TradeSignal]:
         """
-        [PHASE 12] Adaptive Execution Logic.
-        Replaces 'Kill-Filters' with 'Confluence Scoring' to improve trade frequency.
+        [PHASE 14] Institutional Liquidity-Sweep Redesign.
+        Implements 1-2 candle return windows and session-specific archetypes.
         """
-        exec_score = 0
-        reasons = []
+        # --- TOKYO: Mean Reversion ONLY ---
+        if session == "TOKYO":
+            if len(m30_candles.close) < 20: return None
+            m30_closes = m30_candles.close
+            m30_sma = np.mean(m30_closes[-20:])
+            m30_std = np.std(m30_closes[-20:])
+            upper_bb = m30_sma + (2.0 * m30_std) # [INSTITUTIONAL] 2.0 SD
+            lower_bb = m30_sma - (2.0 * m30_std)
+            
+            if current_price > upper_bb:
+                # Rejection: previous candle pierced, current closes back inside
+                if m5_candles.high[-1] > upper_bb and m5_candles.close[-1] < upper_bb:
+                    return TradeSignal("SELL", current_price, 0, 0, reasons=["Tokyo BB Reject"], session=session)
+            elif current_price < lower_bb:
+                if m5_candles.low[-1] < lower_bb and m5_candles.close[-1] > lower_bb:
+                    return TradeSignal("BUY", current_price, 0, 0, reasons=["Tokyo BB Reject"], session=session)
+            return None
 
-        # 1. M15 Execution Layer (Weighted)
-        m15_atr = self._calculate_atr(m15_candles)
-        m15_vols = m15_candles.tick_volume
-        m15_adx = self._calculate_adx_series(m15_candles.high, m15_candles.low, m15_candles.close, 14)
+        # --- LONDON / NY: Liquidity Grab Scalping ---
+        zones = self._get_liquidity_zones(m5_candles, session)
         
-        # M15 RVOL (2 pts)
-        m15_vol_sma20 = np.mean(m15_vols[-20:])
-        if m15_vols[-1] >= m15_vol_sma20:
-            exec_score += 2
-        elif m15_vols[-1] >= m15_vol_sma20 * 0.8:
-            exec_score += 1 # Borderline volume OK
-            
-        # M15 ADX Slope (2 pts)
-        adx_diff = m15_adx[-1] - m15_adx[-2]
-        if adx_diff > 0:
-            exec_score += 2
-        elif abs(adx_diff) < (m15_adx[-1] * 0.05): # Flat ADX is acceptable
-            exec_score += 1
-            
-        vol_spike = m15_atr > (h4_atr * 2.0)
+        # Confluence Filters: Displacement & Volume
+        m5_vols = m5_candles.tick_volume
+        m5_vol_sma20 = np.mean(m5_vols[-21:-1])
+        fuel_ok = m5_vols[-1] > (m5_vol_sma20 * 1.5)
         
-        # 2. M5 Trigger Layer (Weighted)
         m5_body = abs(m5_candles.close[-1] - m5_candles.open[-1])
         m5_range = m5_candles.high[-1] - m5_candles.low[-1]
-        body_ratio = (m5_body / m5_range) if m5_range > 0 else 0
+        displacement_ok = (m5_body / m5_range) > 0.70 if m5_range > 0 else False # Body > 70% of total candle
         
-        if body_ratio >= 0.60:
-            exec_score += 3
-        elif body_ratio >= 0.45:
-            exec_score += 2 # Relaxed ratio for Gold volatility
-        elif body_ratio >= 0.30:
-            exec_score += 1
+        if not (fuel_ok and displacement_ok):
+            return None
             
-        # Spring Effect (1 pt)
-        tr5 = np.maximum(m5_candles.high[1:] - m5_candles.low[1:], 
-                         np.maximum(np.abs(m5_candles.high[1:] - m5_candles.close[:-1]), 
-                                    np.abs(m5_candles.low[1:] - m5_candles.close[:-1])))
-        m5_atr_tight = np.mean(tr5[-3:])
-        m5_atr_baseline = np.mean(tr5[-20:])
-        if m5_atr_tight <= m5_atr_baseline:
-            exec_score += 1
+        # [SWEEP-AND-RETURN] Check 1-2 candle window
+        # We check sweep of: Opening Range, Tokyo Extremums, and 3h H/L
+        liquidity_highs = [zones.get("session_open_high"), zones.get("tokyo_high"), zones.get("3h_high")]
+        liquidity_lows = [zones.get("session_open_low"), zones.get("tokyo_low"), zones.get("3h_low")]
+        
+        signal = None
+        
+        # SELL: Sweep of High
+        for l_high in liquidity_highs:
+            if l_high is None: continue
+            # 1-2 candle sweep check:
+            # high[-1] swept or high[-2] swept, AND close[-1] is back inside
+            swept = (m5_candles.high[-1] > l_high) or (m5_candles.high[-2] > l_high)
+            returned = (m5_candles.close[-1] < l_high)
             
-        # Fuel Check (2 pts)
-        m5_vols = m5_candles.tick_volume
-        m5_vol_sma10 = np.mean(m5_vols[-11:-1])
-        if m5_vols[-1] >= (m5_vol_sma10 * 1.5):
-            exec_score += 2
-        elif m5_vols[-1] >= (m5_vol_sma10 * 1.1):
-            exec_score += 1
-
-        # GATING: Require at least 5/10 Performance Score for Breakout
-        if exec_score < 5:
-            return None 
-
-        # 3. Final Breakout Structure Logic
-        lookback = self.swing_lookback 
-        if trend == "BULLISH":
-            res_m15 = np.max(m15_candles.high[-lookback:-1])
-            if current_price > res_m15:
-                m5_ema = self._calculate_ema(m5_candles.close, self.ema_fast)
-                if current_price > m5_ema:
-                    signal = TradeSignal("BUY", current_price, 0, 0, reasons=["Breakout", f"Score:{exec_score}"], session=session)
-                    signal.volatility_spike = vol_spike
-                    return signal
-        else:
-            sup_m15 = np.min(m15_candles.low[-lookback:-1])
-            if current_price < sup_m15:
-                m5_ema = self._calculate_ema(m5_candles.close, self.ema_fast)
-                if current_price < m5_ema:
-                    signal = TradeSignal("SELL", current_price, 0, 0, reasons=["Breakout", f"Score:{exec_score}"], session=session)
-                    signal.volatility_spike = vol_spike
-                    return signal
+            if swept and returned:
+                signal = TradeSignal("SELL", current_price, 0, 0, reasons=[f"Sweep:{l_high}"], session=session)
+                signal.rejection_type = "Sweep"
+                break
                 
-        return None
+        # BUY: Sweep of Low
+        if not signal:
+            for l_low in liquidity_lows:
+                if l_low is None: continue
+                swept = (m5_candles.low[-1] < l_low) or (m5_candles.low[-2] < l_low)
+                returned = (m5_candles.close[-1] > l_low)
+                
+                if swept and returned:
+                    signal = TradeSignal("BUY", current_price, 0, 0, reasons=[f"Sweep:{l_low}"], session=session)
+                    signal.rejection_type = "Sweep"
+                    break
+        
+        return signal
 
     def _check_pullback_entry(self, m15_candles: 'CandleArray', m5_candles: 'CandleArray', 
                               trend: str, current_price: float, session: str) -> Optional[TradeSignal]:
@@ -710,48 +734,42 @@ class StrategyEngine:
     def _set_sl_tp(self, signal: TradeSignal, atr: float, m30_candles: 'CandleArray', 
                    h4_strength: int, session: str, confluence_score: int, ai_bias: float = 0.0, 
                    m5_candles: Optional['CandleArray'] = None) -> TradeSignal:
-        
         """
-        [PHASE 13.6] High-Leverage Institutional Executioner.
-        Uses M5 Extremums to minimize SL distance, maximizing lot size and R-growth.
+        [PHASE 14] Institutional Order-Flow Stop-Loss.
+        SL = max(Swing Extremum + 20 points, 1.5 * M15_ATR).
         """
         session_conf = self.config.get("session_config", {}).get(session, {})
         base_rr = session_conf.get("rr_ratio", self.rr_ratio)
         rr = base_rr + (0.5 if h4_strength > 75 else -0.5 if h4_strength < 40 else 0)
         rr = max(1.5, min(rr + ai_bias, 6.0))
         
-        # 4. Global Minimum SL (Safety Floor)
-        min_sl_pts = self.config.get("risk", {}).get("min_sl_points", 50)
-        point = 0.01 # Gold standard
+        point = self.config.get("symbols_config", {}).get(self.config.get("symbol", "XAUUSDm"), {}).get("point", 0.01)
+        # Requirement: 20 points safety floor
+        safety_buffer = 20 * point
         
-        # 5. Micro-Stop Placement
+        # 1. Base ATR Stop (Requirement: 1.5x ATR)
+        atr_sl_dist = 1.5 * atr 
+        
+        # 2. Swing Extremum Stop (from Sweep window)
+        extremum_sl_dist = 0.0
+        if m5_candles is not None:
+            # We look back 3 candles (sweep window) for the actual extremum
+            if signal.direction == "BUY":
+                sweep_low = float(np.min(m5_candles.low[-3:]))
+                extremum_sl_dist = signal.entry_price - (sweep_low - safety_buffer)
+            else:
+                sweep_high = float(np.max(m5_candles.high[-3:]))
+                extremum_sl_dist = (sweep_high + safety_buffer) - signal.entry_price
+                
+        # 3. Dynamic Selection (Requirement: New SL formula)
+        final_sl_dist = max(atr_sl_dist, extremum_sl_dist)
+        
         if signal.direction == "BUY":
-            # [Micro-Stop] Low of the trigger candle + small cushion
-            if m5_candles is not None:
-                m5_low = np.min(m5_candles.low[-2:])
-                target_sl = m5_low - (5 * point)
-                # Ensure distance is at least min_sl_pts
-                if (signal.entry_price - target_sl) < (min_sl_pts * point):
-                    target_sl = signal.entry_price - (min_sl_pts * point)
-                signal.stop_loss = target_sl
-            else:
-                # Fallback to ATR if M5 not available
-                signal.stop_loss = signal.entry_price - (2.0 * atr)
-                
-            risk = signal.entry_price - signal.stop_loss
-            signal.take_profit = signal.entry_price + (risk * rr)
+            signal.stop_loss = signal.entry_price - final_sl_dist
+            signal.take_profit = signal.entry_price + (final_sl_dist * rr)
         else:
-            if m5_candles is not None:
-                m5_high = np.max(m5_candles.high[-2:])
-                target_sl = m5_high + (5 * point)
-                if (target_sl - signal.entry_price) < (min_sl_pts * point):
-                    target_sl = signal.entry_price + (min_sl_pts * point)
-                signal.stop_loss = target_sl
-            else:
-                signal.stop_loss = signal.entry_price + (2.0 * atr)
-                
-            risk = signal.stop_loss - signal.entry_price
-            signal.take_profit = signal.entry_price - (risk * rr)
+            signal.stop_loss = signal.entry_price + final_sl_dist
+            signal.take_profit = signal.entry_price - (final_sl_dist * rr)
             
         signal.rr_ratio = rr
         return signal
