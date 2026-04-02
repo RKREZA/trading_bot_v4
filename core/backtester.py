@@ -133,7 +133,7 @@ class BacktestEngine:
         idx = bisect.bisect_right(times, time_threshold) - 1
         return idx
 
-    def run(self, symbol: str, h4_candles: List[dict], h1_candles: List[dict], m30_candles: List[dict], 
+    def run(self, symbol: str, h4_candles: List[dict], m30_candles: List[dict], m15_candles: List[dict], 
             m5_candles: List[dict], d1_candles: List[dict], ticks: Optional[List[dict]] = None, 
             quiet: bool = False, tick_entry: bool = False):
         """
@@ -163,11 +163,11 @@ class BacktestEngine:
 
         # --- Compatibility Patch: Unpack CandleArray back into standard lists of dictionaries ---
         # We keep references to the original CandleArray objects for high-performance preprocessing
-        h4_arr, h1_arr, m30_arr, m5_arr = h4_candles, h1_candles, m30_candles, m5_candles
+        h4_arr, m30_arr, m15_arr, m5_arr = h4_candles, m30_candles, m15_candles, m5_candles
         
         h4_candles = [{"time": t, "open": o, "high": h, "low": l, "close": c, "tick_volume": v} for t, o, h, l, c, v in zip(h4_arr.time, h4_arr.open, h4_arr.high, h4_arr.low, h4_arr.close, h4_arr.tick_volume)]
-        h1_candles = [{"time": t, "open": o, "high": h, "low": l, "close": c, "tick_volume": v} for t, o, h, l, c, v in zip(h1_arr.time, h1_arr.open, h1_arr.high, h1_arr.low, h1_arr.close, h1_arr.tick_volume)]
         m30_candles = [{"time": t, "open": o, "high": h, "low": l, "close": c, "tick_volume": v} for t, o, h, l, c, v in zip(m30_arr.time, m30_arr.open, m30_arr.high, m30_arr.low, m30_arr.close, m30_arr.tick_volume)]
+        m15_candles = [{"time": t, "open": o, "high": h, "low": l, "close": c, "tick_volume": v} for t, o, h, l, c, v in zip(m15_arr.time, m15_arr.open, m15_arr.high, m15_arr.low, m15_arr.close, m15_arr.tick_volume)]
         m5_candles = [{"time": t, "open": o, "high": h, "low": l, "close": c, "tick_volume": v} for t, o, h, l, c, v in zip(m5_arr.time, m5_arr.open, m5_arr.high, m5_arr.low, m5_arr.close, m5_arr.tick_volume)]
         d1_candles = [{"time": t, "open": o, "high": h, "low": l, "close": c, "tick_volume": v} for t, o, h, l, c, v in zip(d1_candles.time, d1_candles.open, d1_candles.high, d1_candles.low, d1_candles.close, d1_candles.tick_volume)]
         
@@ -198,8 +198,8 @@ class BacktestEngine:
             m5_atr_series[:] = 0.1
         
         h4_times = h4_arr.time
-        h1_times = h1_arr.time
         m30_times = m30_arr.time
+        m15_times = m15_arr.time
         m5_times = m5_arr.time
         
         # Define m5_avg_atr (SMA 100 of ATR) for volatility-scaled spreads
@@ -211,19 +211,17 @@ class BacktestEngine:
         tick_times = None
         tick_arr = None
         if ticks:
-            # Using structured arrays for memory efficiency and vectorized access
             tick_dtype = [('time', 'i8'), ('bid', 'f8'), ('ask', 'f8')]
             tick_arr = np.array([(t['time'], t['bid'], t['ask']) for t in ticks], dtype=tick_dtype)
             tick_times = tick_arr['time']
             logger.info("[Backtest] Processed %d ticks into structured Numpy array.", len(ticks))
             
         # --- Optimization: Pre-calculate all Strategy/Regime Data (Vectorized) ---
-        pre_ctx = self.strategy.preprocess_history(h4_arr, h1_arr, m30_arr, m5_arr)
+        pre_ctx = self.strategy.preprocess_history(h4_arr, m30_arr, m15_arr, m5_arr)
         m5_precomputed = pre_ctx["m5"]
         
         pending_signal = None  # Next-candle entry: stores signal for delayed execution
 
-        
         # Use standard tqdm with custom configuration for better visibility
         with tqdm(range(200, len(m5_candles)), desc=f"BT:{symbol}", unit="c", 
                   dynamic_ncols=True, leave=True, colour="cyan") as pbar:
@@ -239,17 +237,21 @@ class BacktestEngine:
                 # Fetch slices for strategy (O(logN) with searchsorted)
                 # [FIX]: Subtract timeframe duration to prevent Look-ahead Bias
                 h4_idx = np.searchsorted(h4_times, current_candle['time'] - 14400, side='right') - 1
-                h1_idx = np.searchsorted(h1_times, current_candle['time'] - 3600, side='right') - 1
                 m30_idx = np.searchsorted(m30_times, current_candle['time'] - 1800, side='right') - 1
+                m15_idx = np.searchsorted(m15_times, current_candle['time'] - 900, side='right') - 1
                 
                 h4_slice = h4_arr[:max(0, h4_idx + 1)]
-                h1_slice = h1_arr[:max(0, h1_idx + 1)]
                 m30_slice = m30_arr[:max(0, m30_idx + 1)]
+                m15_slice = m15_arr[:max(0, m15_idx + 1)]
                 m5_slice = m5_arr[:i + 1]
                 
                 # --- High-Performance Core Metrics ---
                 current_atr = m5_atr_series[i-1]
                 avg_atr_here = m5_avg_atr[i-1]
+                
+                # --- Session-aware spread (points and price units) ---
+                spread_points = self._get_spread(symbol, current_atr, avg_atr_here, point, current_session)
+                spread_price = spread_points * point
                 
                 # --- Gap Risk: Weekend/Holiday Detection ---
                 if open_trade and i > 200:
@@ -277,7 +279,7 @@ class BacktestEngine:
                             "commission": round(float(comm_exit), 2), "result": "GAP",
                             "regime": open_trade.regime,
                             "ai_score": round(float(open_trade.ai_score), 4),
-                            "spread": 0, "slippage": round(float(gap_slippage / point), 2),
+                            "spread": round(float(spread_points), 1), "slippage": round(float(gap_slippage / point), 2),
                             "session": open_trade.session
                         }
                         trades.append(trade_record)
@@ -300,9 +302,15 @@ class BacktestEngine:
                     pending_signal = None
                     
                     open_trade = self._handle_entry(
-                        symbol, ps["signal"], current_candle, candle_time,
-                        point, contract_size, ps["session"], ps["regime"],
-                        ps["ai_score"], avg_atr_here, current_atr
+                        symbol=symbol, 
+                        signal=ps["signal"], 
+                        entry_price=current_candle['open'], 
+                        candle_time=candle_dt, 
+                        regime=ps["regime"], 
+                        ai_score=ps["ai_score"], 
+                        spread_val=spread_points, 
+                        current_atr=current_atr, 
+                        point=point
                     )
                     self.notification_manager.notify_trade_open(symbol, open_trade.signal.direction, open_trade.entry_price, open_trade.lot, open_trade.sl, open_trade.tp)
 
@@ -314,11 +322,8 @@ class BacktestEngine:
                         open_trade.comm_entry_amount = comm_entry
                         open_trade.total_commission_paid += comm_entry
                     
-                    # Fix Look-ahead Bias: use ATR from [i-1] for decisions at start of candle i
-                    spread_val = self._get_spread(symbol, current_atr, avg_atr_here, point, open_trade.session) * point
-                    
                     bid_h, bid_l, bid_c = current_candle['high'], current_candle['low'], current_candle['close']
-                    ask_h, ask_l, ask_c = bid_h + spread_val, bid_l + spread_val, bid_c + spread_val
+                    ask_h, ask_l, ask_c = bid_h + spread_price, bid_l + spread_price, bid_c + spread_price
                     
                     # --- Exit Evaluation (Tick-Level if available) ---
                     closed = False
@@ -364,9 +369,8 @@ class BacktestEngine:
                                 else:
                                     exit_price, result_type, closed = open_trade.tp, "TP", True
                     else:
-                        # Fallback to Candle-Level (OHLC) with spread adjustment
                         bid_h, bid_l = current_candle['high'], current_candle['low']
-                        ask_h, ask_l = bid_h + spread_val, bid_l + spread_val
+                        ask_h, ask_l = bid_h + spread_price, bid_l + spread_price
                         
                         if open_trade.signal.direction == "BUY":
                             if current_candle['open'] <= open_trade.sl:
@@ -378,7 +382,7 @@ class BacktestEngine:
                             elif bid_h >= open_trade.tp:
                                 exit_price, result_type, closed = open_trade.tp, "TP", True
                         else:
-                            ask_open = current_candle['open'] + spread_val
+                            ask_open = current_candle['open'] + spread_price
                             if ask_open >= open_trade.sl:
                                 exit_price, result_type, closed = ask_open, "SL", True
                             elif ask_h >= open_trade.sl:
@@ -508,7 +512,7 @@ class BacktestEngine:
                             "result": result_type,
                             "regime": open_trade.regime,
                             "ai_score": round(float(open_trade.ai_score), 4),
-                            "spread": round(float(spread_val / point), 2),
+                            "spread": round(float(spread_points), 1),
                             "slippage": round(float(open_trade.slippage / point), 2),
                             "session": open_trade.session
                         }
@@ -573,8 +577,14 @@ class BacktestEngine:
                     )
                     
                     signal, h4_trend, regime_str = self.strategy.analyze(
-                        symbol, h4_slice, h1_slice, m30_slice, m5_slice, bid, 
-                        d1_candles=d1_candles, session=current_session,
+                        symbol=symbol,
+                        h4_candles=h4_slice,
+                        m30_candles=m30_slice,
+                        m15_candles=m15_slice,
+                        m5_candles=m5_slice,
+                        current_price=bid,
+                        d1_candles=d1_candles,
+                        session=current_session,
                         preprocessed=pre_at_i,
                         circuit_breaker_safe=allowed
                     )
@@ -603,12 +613,17 @@ class BacktestEngine:
                                 else:
                                     signal.stop_loss += (ai_sl_buffer * current_atr)
                             
-                            # Execute
+                            pending_signal = {
+                                "signal": signal,
+                                "ai_score": ai_score,
+                                "regime": regime_str,
+                                "session": current_session
+                            }
+                            
+                            # Execute immediate breakout if tick_entry is enabled
                             if tick_entry and not open_trade:
-                                # Breakout mode: Entry at the breakout level within current candle
                                 entry_price = signal.entry_price
                                 if candle_ticks is not None:
-                                    # Find first tick crossing the level
                                     if signal.direction == "BUY":
                                         matches = np.where(candle_ticks['ask'] >= entry_price)[0]
                                     else:
@@ -618,19 +633,17 @@ class BacktestEngine:
                                         entry_price = candle_ticks[matches[0]]['ask' if signal.direction == "BUY" else 'bid']
                                 
                                 open_trade = self._handle_entry(
-                                    symbol, signal, current_candle, candle_time,
-                                    point, contract_size, current_session, ai_features["regime"],
-                                    ai_score, avg_atr_here, current_atr, force_price=entry_price
+                                    symbol=symbol, 
+                                    signal=signal, 
+                                    entry_price=entry_price, 
+                                    candle_time=candle_dt, 
+                                    regime=regime_str, 
+                                    ai_score=ai_score, 
+                                    spread_val=spread_points, 
+                                    current_atr=current_atr, 
+                                    point=point
                                 )
-                                self.notification_manager.notify_trade_open(symbol, signal.direction, open_trade.entry_price, open_trade.lot, signal.stop_loss, signal.take_profit)
-                            else:
-                                # Next-candle mode: Store as pending
-                                pending_signal = {
-                                    "signal": signal,
-                                    "ai_score": ai_score,
-                                    "regime": ai_features["regime"],
-                                    "session": current_session,
-                                }
+                                pending_signal = None
 
         performance = PerformanceMetrics.calculate_metrics(trades, self.initial_balance)
         performance['trades'] = trades
@@ -706,41 +719,49 @@ class BacktestEngine:
 
         return performance
 
-    def _handle_entry(self, symbol: str, signal: TradeSignal, current_candle: dict, candle_time: datetime,
-                      point: float, contract_size: float, session: str, regime: str, ai_score: float,
-                      avg_atr_here: float, current_atr: float, force_price: Optional[float] = None) -> _OpenTrade:
+    def _handle_entry(self, symbol: str, signal: TradeSignal, entry_price: float, candle_time: datetime,
+                      regime: str, ai_score: float, spread_val: float, current_atr: float, point: float) -> _OpenTrade:
         """Centralized helper for trade execution (Slippage, Spread, Lot calculation)."""
-        spread_val = self._get_spread(symbol, current_atr, avg_atr_here, point, session)
+        # 1. Slippage & Spread
+        avg_atr_here = current_atr # simplistic fallback
         slippage = self._get_slippage(symbol, current_atr, avg_atr_here, point)
-        
-        # Entry Price: Either a forced tick/breakout level or the candle OHLC
-        ref_price = force_price if force_price is not None else current_candle['open']
         
         if signal.direction == "BUY":
             # --- PHASE 11: 200ms Latency Simulation (Slippage-on-entry) ---
-            # 200ms is approx 0.1% of a 5m candle's ATR on average, but we scale it by current_atr
             latency_slippage = current_atr * 0.05 
-            entry = ref_price + (spread_val * point) + slippage + latency_slippage
+            entry = entry_price + (spread_val * point) + slippage + latency_slippage
         else:
             latency_slippage = current_atr * 0.05
-            entry = ref_price - slippage - latency_slippage
+            entry = entry_price - slippage - latency_slippage
             
+        # 2. Risk Scaling
+        session = getattr(signal, 'session', 'LONDON')
         risk_pct = self.risk_manager.calculate_scaled_risk(self.balance, current_equity=self.balance, session=session)
+        
+        # 3. Lot Calculation
+        symbol_cfg = self.config.get("symbols_config", {}).get(symbol, {})
+        contract_size = symbol_cfg.get("contract_size", 100)
         lot = self._calc_lot_size(symbol, self.balance, entry, signal.stop_loss, point, contract_size, risk_pct)
         
-        if signal.rejection_type == "VOL_SCALING":
+        # Apply Volatility Spike Scaling
+        if getattr(signal, 'volatility_spike', False):
             lot = max(0.01, round(lot * 0.5, 2))
             
         trade = _OpenTrade(
-            signal, entry, lot, candle_time,
-            regime, ai_score, spread_val, slippage, session
+            signal=signal, 
+            entry_price=entry, 
+            lot=lot, 
+            entry_time=candle_time,
+            regime=regime, 
+            ai_score=ai_score, 
+            spread=spread_val, 
+            slippage=slippage, 
+            session=session
         )
         
-        # Initial commission
+        # 4. Initial commission
         comm_entry = self._get_commission(symbol, lot) * 0.5
         self.balance -= comm_entry
-        trade.comm_entry_paid = True
-        trade.comm_entry_amount = comm_entry
         trade.total_commission_paid = comm_entry
         
         return trade
