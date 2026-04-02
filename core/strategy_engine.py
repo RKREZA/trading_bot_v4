@@ -59,7 +59,8 @@ class StrategyEngine:
         self.ema_fast = self.strategy_config.get("ema_fast", 20)
         self.ema_slow = self.strategy_config.get("ema_slow", 50)
         self.min_candle_body_pct = self.strategy_config.get("min_candle_body_pct", 20)
-        self.sl_atr_buffer = self.strategy_config.get("sl_atr_buffer", 1.5) # [ALPHA-EXPANSION] 0.8 -> 1.5
+        self.sl_atr_buffer = self.strategy_config.get("sl_atr_buffer", 1.5) 
+        self.rr_ratio = self.strategy_config.get("rr_ratio", 2.5) 
 
         self.vol_cfg = self.strategy_config.get("volatility_filter", {})
         self.vol_enabled = self.vol_cfg.get("enabled", False)
@@ -676,15 +677,15 @@ class StrategyEngine:
         """
         session_conf = self.config.get("session_config", {}).get(session, {})
         
-        # 1. Base RR from Trend Strength
-        if h4_strength > 75: # Institutional Conviction
-            rr = 3.0
-        elif h4_strength > 55:
-            rr = 2.5
-        elif h4_strength < 40: # Ranging mode
-            rr = 1.5
+        # 1. Base RR from Session Config (Reachable Targets)
+        base_rr = session_conf.get("rr_ratio", self.rr_ratio)
+        
+        if h4_strength > 75: # High Conviction Boost
+            rr = base_rr + 0.5
+        elif h4_strength < 40: # Low Conviction Penalty
+            rr = base_rr - 0.5
         else:
-            rr = 2.0
+            rr = base_rr
             
         # 2. AI Bias Adjustment
         rr += ai_bias
@@ -692,15 +693,13 @@ class StrategyEngine:
         # 3. Final Clamp
         rr = max(1.5, min(rr, 6.0))
         
-        # 4. Volatility SL Buffer
+        # 4. SL Calculation (Adaptive)
         sl_buffer_mult = session_conf.get("sl_atr_buffer", self.sl_atr_buffer)
         
-        # Tier 2 Expansion: Volatility news spike
+        # News/Volatility Expansion
         if getattr(signal, 'volatility_spike', False):
-            sl_buffer_mult = 3.0 # Expanded for safety
+            sl_buffer_mult *= 1.5 # 1.5x expansion for spikes
             
-        # 4. SL Calculation (Adaptive)
-        sl_buffer_mult = self.sl_atr_buffer # Now 1.5 by default
         if h4_strength > 75:
             sl_buffer_mult *= 0.8 # Tighten for high conviction
         elif h4_strength < 40:

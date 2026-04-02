@@ -424,29 +424,28 @@ class BacktestEngine:
                                 if ask_l < open_trade.best_price: 
                                     open_trade.best_price = ask_l
                                     
-                            # 1. Base Trail: [Institutional Chandelier] Adaptive Multiplier
-                            chandelier_multiplier = session_conf.get("trailing_atr_mult", 3.5)
-                            chandelier_dist = current_atr * chandelier_multiplier
-                            
-                            if open_trade.signal.direction == "BUY":
-                                new_sl = open_trade.best_price - chandelier_dist
-                            else:
-                                new_sl = open_trade.best_price + chandelier_dist
-                            
-                            # One-Way Ratchet
-                            if open_trade.signal.direction == "BUY":
-                                if new_sl > open_trade.sl: open_trade.sl = new_sl
-                            else:
-                                if open_trade.sl == 0 or (new_sl < open_trade.sl and new_sl > 0): 
-                                    open_trade.sl = new_sl
-
-                            # 2. Break-Even Trigger (Adaptive per session)
-                            # Primary shield against 'Too many SL'
+                            # [PHASE 13.1] Risk and Excursion calculation moved up
                             risk = abs(open_trade.entry_price - open_trade.signal.stop_loss)
                             excursion = (open_trade.best_price - open_trade.entry_price) if open_trade.signal.direction == "BUY" else (open_trade.entry_price - open_trade.best_price)
                             rr_reached = (excursion / risk) if risk > 0 else 0
                             
-                            be_activation = session_conf.get("activation_rr", 2.0)
+                            # 1. Base Trail: [Institutional Chandelier] Adaptive Multiplier
+                            # [PHASE 13.1] Delayed Trailing Stop (starts at 1.2R)
+                            if rr_reached >= 1.2:
+                                chandelier_multiplier = session_conf.get("trailing_atr_mult", 4.0)
+                                chandelier_dist = current_atr * chandelier_multiplier
+                                
+                                if open_trade.signal.direction == "BUY":
+                                    new_sl = open_trade.best_price - chandelier_dist
+                                    if new_sl > open_trade.sl: open_trade.sl = new_sl
+                                else:
+                                    new_sl = open_trade.best_price + chandelier_dist
+                                    if open_trade.sl == 0 or (new_sl < open_trade.sl and new_sl > 0): 
+                                        open_trade.sl = new_sl
+
+                            # 2. Break-Even Trigger (Adaptive per session)
+                            # Primary shield against 'Too many SL'
+                            be_activation = session_conf.get("activation_rr", 1.8)
                             if rr_reached >= be_activation:
                                 be_sl = open_trade.entry_price + (risk * 0.1) if open_trade.signal.direction == "BUY" else open_trade.entry_price - (risk * 0.1)
                                 if open_trade.signal.direction == "BUY":
@@ -500,6 +499,11 @@ class BacktestEngine:
                         entry_dt = open_trade.entry_time if isinstance(open_trade.entry_time, datetime) else datetime.fromtimestamp(open_trade.entry_time, tz=timezone.utc)
                         exit_dt = candle_dt
     
+                        # [PHASE 13.1] Result Categorization (Satisfaction Fix)
+                        actual_result = result_type
+                        if result_type == "SL" and final_pnl > 0:
+                            actual_result = "TRAIL_WIN"
+                        
                         trade_record = {
                             "time": entry_dt,
                             "exit_time": exit_dt,
@@ -509,7 +513,7 @@ class BacktestEngine:
                             "lot": open_trade.lot,
                             "pnl": round(float(final_pnl), 2),
                             "commission": round(float(total_comm), 2),
-                            "result": result_type,
+                            "result": actual_result,
                             "regime": open_trade.regime,
                             "ai_score": round(float(open_trade.ai_score), 4),
                             "spread": round(float(spread_points), 1),
@@ -672,13 +676,9 @@ class BacktestEngine:
             print(f"\n[SUCCESS] Trade history exported to: {csv_filename}")
 
         # --- Terminal Summary Table ---
-        sl_hits = sum(1 for t in trades if t['result'] == 'SL')
+        hard_sl_hits = sum(1 for t in trades if t['result'] == 'SL')
         tp_hits = sum(1 for t in trades if t['result'] == 'TP')
-        
-        # Calculate trailing stop hits (SL where pnl > 0 or sl move detected)
-        # Note: In our backtester 'SL' result is used for any stop hit.
-        trailing_sl_hits = sum(1 for t in trades if t['result'] == 'SL' and t['pnl'] > 0)
-        hard_sl_hits = sl_hits - trailing_sl_hits
+        trail_wins = sum(1 for t in trades if t['result'] == 'TRAIL_WIN')
 
         summary_data = [
             ["Metric", "Value"],
@@ -688,8 +688,8 @@ class BacktestEngine:
             ["Win Rate", f"{performance.get('win_rate', 0):.2f}%"],
             ["Total Trades", performance.get('total_trades', 0)],
             ["TP Hits", f"{tp_hits} (Full Target)"],
-            ["SL Hits (Hard)", f"{hard_sl_hits} (Initial SL)"],
-            ["SL Hits (Trail)", f"{trailing_sl_hits} (Profit Protected)"],
+            ["Trail Wins", f"{trail_wins} (Profit Protected)"],
+            ["Hard SL Hits", f"{hard_sl_hits} (Loss)"],
             ["Max Drawdown", f"{performance.get('max_drawdown', 0):.2f}%"],
             ["Profit Factor", f"{performance.get('profit_factor', 0):.2f}"],
             ["Sharpe Ratio", f"{performance.get('sharpe_ratio', 0):.2f}"],
