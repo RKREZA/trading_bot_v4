@@ -38,6 +38,8 @@ class ExecutionPipeline:
         self.position_meta = position_meta
         self.state_lock = state_lock
         self.spread_history = []
+        self.last_analysis = {} # Stores latest strategy metadata for dashboard
+        self.research_mode = config.get("research_mode", False)
         
     def execute_cycle(self, symbol: str, h1: "CandleArray", m15: "CandleArray", m5: "CandleArray", d1: "CandleArray", current_price: float, session: str) -> bool:
         """Runs one full execution cycle for a symbol."""
@@ -66,9 +68,12 @@ class ExecutionPipeline:
             consecutive_losses=con_losses
         )
         
-        if not allowed:
+        if not allowed and not self.research_mode:
             logger.warning(f"CIRCUIT BREAKER HALT: {cb_reason}")
             # We still run analyze so it can report trend/regime for dashboard, but it will return None signal
+            allowed = False # Ensure we don't take trade but let analyze run for UI
+        else:
+            allowed = True # Force allowed in research mode
         
         # --- PHASE 11: ROLLING SPREAD FILTER ---
         symbol_info = self.connection.get_symbol_info(symbol)
@@ -85,7 +90,7 @@ class ExecutionPipeline:
             
             if len(self.spread_history) >= 20:
                 spread_sma = sum(self.spread_history) / 20
-                if current_spread > spread_sma * 1.5:
+                if not self.research_mode and current_spread > spread_sma * 1.5:
                     logger.warning(f"SPREAD FILTER: Aborting trade. Current: {current_spread:.1f} | SMA: {spread_sma:.1f}")
                     return False
 
@@ -93,6 +98,11 @@ class ExecutionPipeline:
         import time
         start_time = time.time()
         
+        # --- PHASE 12: M5 SNIPER PREPROCESSING ---
+        # Fetch institutional context (H1 zones, M15 bias, M5 sweeps) for the latest candle
+        pre_ctx = self.strategy.preprocess_history(h1, m15, m5, m5)
+        latest_meta = pre_ctx.get("m5", [{}])[-1] if pre_ctx.get("m5") else {}
+
         # 1. Generate Signal
         signal, trend, regime = self.strategy.analyze(
             symbol=symbol,
@@ -102,8 +112,22 @@ class ExecutionPipeline:
             d1_candles=d1,
             current_price=current_price,
             session=session,
+            preprocessed=latest_meta,
             circuit_breaker_safe=allowed
         )
+
+        # Cache analysis for dashboard
+        self.last_analysis = {
+            "trend": trend,
+            "regime": regime,
+            "bias": latest_meta.get("m_bias", "NEUTRAL"),
+            "in_demand": latest_meta.get("in_demand", False),
+            "in_supply": latest_meta.get("in_supply", False),
+            "d_depth": latest_meta.get("d_depth", 50.0),
+            "s_depth": latest_meta.get("s_depth", 50.0),
+            "vol_sma": latest_meta.get("vol_sma", 0.0),
+            "current_vol": m5.tick_volume[-1] if len(m5) > 0 else 0
+        }
         
         if not signal:
             return False

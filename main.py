@@ -228,6 +228,10 @@ class TradingBot:
         balance = acc_info.get("balance", 0)
         checks.append(("Balance > $100", balance > 100))
         
+        research = self.config.get("research_mode", False)
+        if research:
+            checks.append(("RESEARCH MODE", True, "Restrictions Disabled"))
+        
         logger.info("-" * 30)
         logger.info(" STARTUP HEALTH CHECKS")
         logger.info("-" * 30)
@@ -297,6 +301,12 @@ class TradingBot:
                     self.execution_pipeline.execute_cycle(
                         symbol, h1_candles, m15_candles, m5_candles, d1_candles, current_price, session
                     )
+                    
+                    # Update Dashboard with latest analysis context
+                    analysis = self.execution_pipeline.last_analysis
+                    self.dashboard.h4_trend = analysis.get("trend", "NEUTRAL")
+                    self.dashboard.m30_structure = analysis.get("regime", "NEUTRAL")
+                    self.dashboard.analysis_context = analysis
                 
                 # Final Dashboard update for the cycle
                 self.dashboard.fetch_ms = int((time.time() - start_cycle) * 1000)

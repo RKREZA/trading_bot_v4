@@ -58,6 +58,7 @@ class StrategyEngine:
         # Legacy/Misc Config
         self.min_confidence = self.strategy_config.get("min_confidence", 65)
         self.cooldown_candles = int(self.strategy_config.get("cooldown_candles", 12)) # ~1 hour at M5
+        self.research_mode = config.get("research_mode", False)
         
         # Choppy Mitigation
         self.last_stop_time: Optional[datetime] = None
@@ -121,10 +122,10 @@ class StrategyEngine:
             self.reset_daily_stats(); self.last_loss_date = timestamp.date()
 
         gate_status, gate_reason = self._check_gatekeepers(session, current_price, circuit_breaker_safe)
-        if not gate_status: return None, gate_reason, "NEUTRAL"
+        if not self.research_mode and not gate_status: return None, gate_reason, "NEUTRAL"
 
         self.trade_counter += 1
-        if self.trade_counter - self.last_stop_index < self.cooldown_candles: return None, "COOLDOWN", "NEUTRAL"
+        if not self.research_mode and self.trade_counter - self.last_stop_index < self.cooldown_candles: return None, "COOLDOWN", "NEUTRAL"
 
         m5 = m5_candles_original[-100:]
         if len(m5) < 20: return None, "INSUFFICIENT_DATA", "NEUTRAL"
@@ -141,22 +142,29 @@ class StrategyEngine:
         signal = None; reason = ""
 
         # --- M5 SNIPER ENTRY (Session-Aware Precision) ---
-        vol_sma = preprocessed.get("vol_sma", 0.0)
+        vol_sma = preprocessed.get("vol_sma", 0.0) if preprocessed else 0.0
         
         # Session Tuning: Tokyo needs more volume and deeper zone entries due to low liquidity
         vol_mult = 1.25 if session == "TOKYO" else 1.1
         depth_thresh = 20 if session == "TOKYO" else 30
         
         vol_expansion = last_m5['tick_volume'] > vol_sma * vol_mult if vol_sma > 0 else True
+        if self.research_mode: vol_expansion = True # Bypass volume restriction
         
-        if bias in ["BULLISH", "NEUTRAL"] and in_demand and preprocessed.get("d_depth", 50) < depth_thresh:
+        # Entry Logic (Relaxed for Research Mode)
+        bias_bull = (bias in ["BULLISH", "NEUTRAL"]) or self.research_mode
+        bias_bear = (bias in ["BEARISH", "NEUTRAL"]) or self.research_mode
+        
+        d_depth = preprocessed.get("d_depth", 50) if preprocessed else 50
+        if bias_bull and (in_demand or self.research_mode) and (d_depth < depth_thresh or self.research_mode):
             if last_m5['low'] < m_low and current_price > m_low and vol_expansion:
                 if self._is_rejection_candle(last_m5['open'], last_m5['high'], last_m5['low'], last_m5['close'], "BUY") or \
                    self._is_engulfing(prev_m5['open'], prev_m5['close'], last_m5['open'], last_m5['close'], "BUY"):
                     signal = TradeSignal("BUY", current_price, 0, 0, session=session)
                     reason = "M5 Demand Snipe (Outer Zone)"
 
-        if not signal and bias in ["BEARISH", "NEUTRAL"] and in_supply and preprocessed.get("s_depth", 50) > (100 - depth_thresh):
+        s_depth = preprocessed.get("s_depth", 50) if preprocessed else 50
+        if not signal and bias_bear and (in_supply or self.research_mode) and (s_depth > (100 - depth_thresh) or self.research_mode):
             if last_m5['high'] > m_high and current_price < m_high and vol_expansion:
                 if self._is_rejection_candle(last_m5['open'], last_m5['high'], last_m5['low'], last_m5['close'], "SELL") or \
                    self._is_engulfing(prev_m5['open'], prev_m5['close'], last_m5['open'], last_m5['close'], "SELL"):

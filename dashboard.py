@@ -69,6 +69,7 @@ class Dashboard:
         self.market_open = True # Flag for dashboard
         self.fetch_status = ""
         self.fetch_ms = 0
+        self.analysis_context = {} # Latest data from StrategyEngine
 
 
     def start(self):
@@ -100,7 +101,8 @@ class Dashboard:
         # Row 3: Signal
         parts.append(self._render_signal())
         # Row 4: AI Advisor
-        parts.append(self._render_ai())
+        if self.config.get("use_ai_filter", False):
+            parts.append(self._render_ai())
         # Row 5: Analysis + Setup
         parts.append(self._equal_row(self._render_analysis(), self._render_setup()))
         # Row 6: Open Positions
@@ -177,8 +179,38 @@ class Dashboard:
             content.append(f" | TP: ${s['take_profit']:,.2f}", style=GREEN)
             content.append(f" | Conf: {s['confidence']:.0f}%", style=ACCENT)
         else:
-            content.append(" Scanning for opportunities...", style=DIM)
-        return Panel(content, title="[bold cyan]SIGNAL[/]", border_style="cyan", box=box.HEAVY, expand=True, padding=(0, 1))
+            # LIVE ANALYSIS VIEW (When no signal is active)
+            ctx = self.analysis_context
+            if ctx:
+                bias = ctx.get("bias", "NEUTRAL")
+                bias_color = GREEN if bias == "BULLISH" else (RED if bias == "BEARISH" else DIM)
+                
+                zone = "OUTSIDE"
+                zone_color = DIM
+                depth = 0.0
+                if ctx.get("in_demand"):
+                    zone, zone_color, depth = "DEMAND", GREEN, ctx.get("d_depth", 50.0)
+                elif ctx.get("in_supply"):
+                    zone, zone_color, depth = "SUPPLY", RED, ctx.get("s_depth", 50.0)
+                
+                vol_sma = ctx.get("vol_sma", 1.0)
+                curr_vol = ctx.get("current_vol", 0.0)
+                vol_expansion = curr_vol > vol_sma * 1.1
+                vol_color = GREEN if vol_expansion else DIM
+                vol_text = "EXPANDING" if vol_expansion else "STABLE"
+                
+                content.append(" M15 BIAS: ", style=DIM)
+                content.append(f"{bias}", style=f"bold {bias_color}")
+                content.append(" | ", style=DIM)
+                content.append("H1 ZONE: ", style=DIM)
+                content.append(f"{zone}", style=f"bold {zone_color}")
+                content.append(f" ({depth:.1f}%)", style=zone_color)
+                content.append(" | ", style=DIM)
+                content.append("VOL: ", style=DIM)
+                content.append(f"{vol_text}", style=vol_color)
+            else:
+                content.append(" Initializing analysis pipeline...", style=DIM)
+        return Panel(content, title="[bold cyan]SIGNAL / LIVE ANALYSIS[/]", border_style="cyan", box=box.HEAVY, expand=True, padding=(0, 1))
 
     def _render_signal_history(self) -> Panel:
         if not self.signal_history:
