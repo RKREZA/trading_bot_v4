@@ -1,6 +1,7 @@
 import logging
 import requests
 import os
+import time
 from typing import Optional
 
 logger = logging.getLogger("trading_bot.notifications")
@@ -32,17 +33,27 @@ class NotificationManager:
         if not self.enabled or not self.telegram_token or not self.chat_id:
             return
 
-        try:
-            url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
-            payload = {
-                "chat_id": self.chat_id,
-                "text": f"🤖 *TRADING BOT V3+*\n\n{message}",
-                "parse_mode": "Markdown"
-            }
-            response = requests.post(url, json=payload, timeout=10)
-            response.raise_for_status()
-        except Exception as e:
-            logger.error(f"Telegram Notification Error: {e}")
+        max_retries = 3
+        backoff_factor = 2
+        
+        for attempt in range(max_retries):
+            try:
+                url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
+                payload = {
+                    "chat_id": self.chat_id,
+                    "text": f"🤖 *TRADING BOT V3+*\n\n{message}",
+                    "parse_mode": "Markdown"
+                }
+                response = requests.post(url, json=payload, timeout=10)
+                response.raise_for_status()
+                return # Success
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    sleep_time = backoff_factor ** attempt
+                    logger.warning(f"Telegram attempt {attempt + 1} failed: {e}. Retrying in {sleep_time}s...")
+                    time.sleep(sleep_time)
+                else:
+                    logger.error(f"Telegram Notification Error after {max_retries} attempts: {e}")
 
     def notify_critical(self, event: str, details: str):
         """

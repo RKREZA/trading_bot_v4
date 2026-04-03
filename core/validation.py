@@ -1,7 +1,7 @@
 import random
 import copy
 import logging
-from typing import Dict, List
+from typing import Dict, List, Any
 from core.backtester import BacktestEngine
 from core.strategy_engine import StrategyEngine
 
@@ -27,13 +27,13 @@ class ValidationSuite:
         self.config = config
         self.strategy = strategy
 
-    def run_all_tests(self, symbol: str, h4: List, h1: List, m30: List, m5: List, d1: List) -> Dict:
+    def run_all_tests(self, symbol: str, h1: Any, m15: Any, m5: Any, d1: Any) -> Dict:
         """
         Runs the full battery of stress tests and returns an aggregated report.
         
         Args:
             symbol (str): Symbol name.
-            h4, h1, m30, m5, d1 (List): Multi-timeframe historical candle data.
+            h1, m15, m5, d1 (CandleArray): Multi-timeframe historical candle data.
             
         Returns:
             Dict: Aggregated validation report with status (PASS/FAIL) and metrics.
@@ -42,19 +42,19 @@ class ValidationSuite:
         
         # Original Backtest
         tester = BacktestEngine(self.config, self.strategy)
-        results['base'] = tester.run(symbol, h4, h1, m30, m5, d1, quiet=True)
+        results['base'] = tester.run(symbol, h1, m15, m5, d1, quiet=True)
         
         # 1. Spread Sensitivity Test (2x Spread)
-        results['spread_2x'] = self._spread_sensitivity_test(symbol, h4, h1, m30, m5, d1)
+        results['spread_2x'] = self._spread_sensitivity_test(symbol, h1, m15, m5, d1)
         
         # 2. Slippage Stress Test (5x Slippage)
-        results['slippage_stress'] = self._slippage_stress_test(symbol, h4, h1, m30, m5, d1)
+        results['slippage_stress'] = self._slippage_stress_test(symbol, h1, m15, m5, d1)
         
         # 3. Randomized Entry Test
-        results['random_entry'] = self._random_entry_test(symbol, h4, h1, m30, m5, d1)
+        results['random_entry'] = self._random_entry_test(symbol, h1, m15, m5, d1)
         
         # 4. Data Shuffle Test
-        results['rolling_stability'] = self._rolling_window_stability_test(symbol, h4, h1, m30, m5, d1)
+        results['rolling_stability'] = self._rolling_window_stability_test(symbol, h1, m15, m5, d1)
         
         # 5. Monte Carlo Simulation
         if results['base'].get('trades'):
@@ -62,7 +62,7 @@ class ValidationSuite:
         
         return self._generate_report(results)
 
-    def _spread_sensitivity_test(self, symbol, h4, h1, m30, m5, d1):
+    def _spread_sensitivity_test(self, symbol, h1, m15, m5, d1):
         stress_config = copy.deepcopy(self.config)
         
         if "backtest" not in stress_config:
@@ -74,9 +74,9 @@ class ValidationSuite:
         stress_config["backtest"]["spread_pips"][symbol] = current_spread * 2.0
         
         tester = BacktestEngine(stress_config, self.strategy)
-        return tester.run(symbol, h4, h1, m30, m5, d1, quiet=True)
+        return tester.run(symbol, h1, m15, m5, d1, quiet=True)
 
-    def _slippage_stress_test(self, symbol, h4, h1, m30, m5, d1):
+    def _slippage_stress_test(self, symbol, h1, m15, m5, d1):
         stress_config = copy.deepcopy(self.config)
         
         if "backtest" not in stress_config:
@@ -88,15 +88,16 @@ class ValidationSuite:
         stress_config["backtest"]["slippage_points"][symbol] = current_slip * 5.0
         
         tester = BacktestEngine(stress_config, self.strategy)
-        return tester.run(symbol, h4, h1, m30, m5, d1, quiet=True)
+        return tester.run(symbol, h1, m15, m5, d1, quiet=True)
 
-    def _random_entry_test(self, symbol, h4, h1, m30, m5, d1):
+    def _random_entry_test(self, symbol, h1, m15, m5, d1):
         """
         Replaces the strategy logic with a random number generator.
         If random entries perform nearly as well as the strategy, the strategy lacks alpha.
         """
         class RandomStrategy(StrategyEngine):
-            def analyze(self, symbol, h4, h1, m30, m5, current_price, d1_candles=None, session=None):
+            def analyze(self, symbol, h1_candles, m15_candles, m5_candles_original, current_price,
+                        d1_candles=None, session=None, preprocessed=None, circuit_breaker_safe=True):
                 if random.random() < 0.05: # 5% chance
                     from core.strategy_engine import TradeSignal
                     direction = "BUY" if random.random() > 0.5 else "SELL"
@@ -107,25 +108,36 @@ class ValidationSuite:
                 return None, "RANGING", "NEUTRAL"
         
         tester = BacktestEngine(self.config, RandomStrategy(self.config))
-        return tester.run(symbol, h4, h1, m30, m5, d1, quiet=True)
+        return tester.run(symbol, h1, m15, m5, d1, quiet=True)
 
-    def _rolling_window_stability_test(self, symbol, h4, h1, m30, m5, d1):
+    def _rolling_window_stability_test(self, symbol, h1, m15, m5, d1):
         """Split data into 3 time windows and test each independently for consistency."""
         n = len(m5)
         third = n // 3
         # Each window gets 200 extra candles of warmup from the previous period
-        windows = [
-            m5[:third + 200],
-            m5[max(0, third - 200):2 * third + 200],
-            m5[max(0, 2 * third - 200):]
+        idx_windows = [
+            (0, third + 200),
+            (max(0, third - 200), 2 * third + 200),
+            (max(0, 2 * third - 200), n)
         ]
         
         window_results = []
-        for idx, w in enumerate(windows):
-            if len(w) < 400:
+        for start_idx, end_idx in idx_windows:
+            if (end_idx - start_idx) < 400:
                 continue
+            
+            # Slice all timeframe arrays consistently to prevent lookahead bias
+            # Using timestamps from the M5 slice to mask other timeframes
+            t_start = m5.time[start_idx]
+            t_end = m5.time[min(end_idx - 1, n - 1)]
+            
+            w_h1 = self._filter_arr(h1, t_start, t_end)
+            w_m15 = self._filter_arr(m15, t_start, t_end)
+            w_m5 = m5[start_idx:end_idx]
+            w_d1 = self._filter_arr(d1, t_start, t_end)
+
             tester = BacktestEngine(self.config, self.strategy)
-            perf = tester.run(symbol, h4, h1, m30, w, d1, quiet=True)
+            perf = tester.run(symbol, w_h1, w_m15, w_m5, w_d1, quiet=True)
             window_results.append(perf)
         
         if not window_results:
@@ -143,6 +155,12 @@ class ValidationSuite:
             "sharpes": [round(s, 2) for s in sharpes],
             "profit_factors": [round(p, 2) for p in pfs]
         }
+
+    def _filter_arr(self, arr: Any, t_start: float, t_end: float) -> Any:
+        """Slices a CandleArray based on a timestamp range."""
+        if arr is None: return None
+        mask = (arr.time >= t_start) & (arr.time <= t_end)
+        return arr[mask]
 
     def _generate_report(self, results: Dict) -> Dict:
         base_perf = results['base']

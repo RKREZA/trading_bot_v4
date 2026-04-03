@@ -242,6 +242,8 @@ class StrategyEngine:
         
         in_demand = preprocessed.get("in_demand", False) if preprocessed else False
         in_supply = preprocessed.get("in_supply", False) if preprocessed else False
+        d_depth = preprocessed.get("d_depth", 50) if preprocessed else 50
+        s_depth = preprocessed.get("s_depth", 50) if preprocessed else 50
         
         last_m5 = m5[-1]; prev_m5 = m5[-2]; atr = self._calculate_atr(m5, 14)
         signal = None; reason = ""
@@ -260,27 +262,46 @@ class StrategyEngine:
         bias_bull = (bias in ["BULLISH", "NEUTRAL"]) or self.research_mode
         bias_bear = (bias in ["BEARISH", "NEUTRAL"]) or self.research_mode
         
-        d_depth = preprocessed.get("d_depth", 50) if preprocessed else 50
-        if bias_bull and (in_demand or self.research_mode) and (d_depth < depth_thresh or self.research_mode):
+        # 1. Bulls (H1 Demand Zone OR strong M15 Bullish Bias)
+        is_bullish_context = (bias == "BULLISH")
+        can_buy = bias_bull and (in_demand or is_bullish_context)
+        
+        if can_buy and (d_depth < depth_thresh or is_bullish_context):
             if last_m5['low'] < m_low and current_price > m_low and vol_expansion:
                 if self._is_rejection_candle(last_m5['open'], last_m5['high'], last_m5['low'], last_m5['close'], "BUY") or \
                    self._is_engulfing(prev_m5['open'], prev_m5['close'], last_m5['open'], last_m5['close'], "BUY"):
                     signal = TradeSignal("BUY", current_price, 0, 0, session=session)
-                    reason = "M5 Demand Snipe (Outer Zone)"
+                    reason = "M5 Demand Snipe" if in_demand else "M5 Bullish Flow"
 
-        s_depth = preprocessed.get("s_depth", 50) if preprocessed else 50
-        if not signal and bias_bear and (in_supply or self.research_mode) and (s_depth > (100 - depth_thresh) or self.research_mode):
+        # 2. Bears (H1 Supply Zone OR strong M15 Bearish Bias)
+        is_bearish_context = (bias == "BEARISH")
+        can_sell = bias_bear and (in_supply or is_bearish_context)
+        
+        if not signal and can_sell and (s_depth > (100 - depth_thresh) or is_bearish_context):
             if last_m5['high'] > m_high and current_price < m_high and vol_expansion:
                 if self._is_rejection_candle(last_m5['open'], last_m5['high'], last_m5['low'], last_m5['close'], "SELL") or \
                    self._is_engulfing(prev_m5['open'], prev_m5['close'], last_m5['open'], last_m5['close'], "SELL"):
                     signal = TradeSignal("SELL", current_price, 0, 0, session=session)
-                    reason = "M5 Supply Sniper"
+                    reason = "M5 Supply Sniper" if in_supply else "M5 Bearish Flow"
 
         if signal:
-            signal.reasons = [reason, f"Bias: {bias}"]; signal.confluence_score = 10
-            signal.confidence = 90.0
+            # Dynamic Confidence Scaling
+            conf = 60.0 # Base
+            if bias == ("BULLISH" if signal.direction == "BUY" else "BEARISH"): conf += 20.0
+            if vol_expansion: conf += 10.0
+            if (signal.direction == "BUY" and in_demand) or (signal.direction == "SELL" and in_supply): conf += 10.0
+            
+            signal.confidence = conf
+            signal.confluence_score = int(conf / 10)
+            signal.reasons = [reason, f"Bias: {bias}", f"Conf: {conf}%"]
             signal = self._setup_trade_params(signal, last_m5, atr, m_high, m_low)
-            self._log(f"SNIPER SIGNAL: {signal.direction} | {reason} | SL: {signal.stop_loss:.2f} | TP: {signal.take_profit:.2f}")
+            
+            # Final Gate: Strategic Confidence Filter
+            if signal.confidence < self.min_confidence:
+                self._log(f"SIGNAL REJECTED: Low Confidence ({signal.confidence}% < {self.min_confidence}%)")
+                return None, "LOW_CONFIDENCE", "NEUTRAL"
+
+            self._log(f"SNIPER SIGNAL: {signal.direction} | {reason} | Conf: {signal.confidence}% | SL: {signal.stop_loss:.2f} | TP: {signal.take_profit:.2f}")
 
         return signal, bias, "PA_SNIPER"
 
@@ -298,20 +319,37 @@ class StrategyEngine:
         Returns:
             TradeSignal: The fully parameterized signal.
         """
-        # TIGHT SL: Extreeme of rejection candle + 0.1 ATR (M5 needs more room than M1)
-        buffer = atr * 0.1
+        # --- STRUCTURAL + VOLATILITY SL ---
+        # Gold needs room: Use Structure (M5 Swing) + 1.0 ATR Buffer
+        session = signal.session
+        vol_buffer_mult = 1.0
+        if session in ["TOKYO", "NEW_YORK"]: vol_buffer_mult = 1.5
+        
+        buffer = atr * vol_buffer_mult
+        
         if signal.direction == "BUY":
-            signal.stop_loss = last_candle['low'] - buffer
+            # Place SL below the recent Swing Low (sl) or at least 1.0 ATR below entry
+            structural_sl = sl - buffer
+            min_sl = signal.entry_price - (atr * 4.0) # Risk cap
+            signal.stop_loss = max(structural_sl, min_sl)
+            
             risk = signal.entry_price - signal.stop_loss
-            signal.take_profit = signal.entry_price + (risk * 20.0) # Expanded range for M5
-            signal.tp1_price = signal.entry_price + risk # 1:1 BE Move
+            signal.take_profit = signal.entry_price + (risk * self.fixed_rr)
+            # Partial TP Logic: Finance risk early
+            signal.tp1_price = signal.entry_price + (risk * 1.0) # 1:1 Partial
+            signal.tp2_price = signal.take_profit
         else:
-            signal.stop_loss = last_candle['high'] + buffer
+            # Place SL above the recent Swing High (sh) or at least 1.0 ATR above entry
+            structural_sl = sh + buffer
+            max_sl = signal.entry_price + (atr * 4.0)
+            signal.stop_loss = min(structural_sl, max_sl)
+            
             risk = signal.stop_loss - signal.entry_price
-            signal.take_profit = signal.entry_price - (risk * 20.0)
-            signal.tp1_price = signal.entry_price - risk
-        signal.rr_ratio = 20.0
-        signal.tp2_price = signal.take_profit
+            signal.take_profit = signal.entry_price - (risk * self.fixed_rr)
+            signal.tp1_price = signal.entry_price - (risk * 1.0)
+            signal.tp2_price = signal.take_profit
+            
+        signal.rr_ratio = self.fixed_rr
         return signal
 
     def _check_gatekeepers(self, session: str, cp: float, cb_safe: bool = True) -> Tuple[bool, str]:
@@ -346,7 +384,8 @@ class StrategyEngine:
                 self.daily_losses += 1; self.last_stop_index = self.trade_counter
                 if session:
                     self.consecutive_losses[session] += 1
-                    if self.consecutive_losses[session] >= 2: self.session_cooldown_active[session] = True
+                    max_losses = self.config.get("risk", {}).get("max_consecutive_losses", 2)
+                    if self.consecutive_losses[session] >= max_losses: self.session_cooldown_active[session] = True
             elif result == "TP":
                 if session: self.consecutive_losses[session] = 0; self.session_cooldown_active[session] = False
 
@@ -388,14 +427,29 @@ class StrategyEngine:
             if supply_mask[i]: supply_zones.append({"high": h1_h[i], "low": h1_l[i], "time": h1_t[i]})
 
         # 2. Bias (M15)
-        m15_is_high = (m15_c == pd.Series(m15_c).rolling(window=7, center=True).max().values)
-        m15_is_low = (m15_c == pd.Series(m15_c).rolling(window=7, center=True).min().values)
+        m15_is_high = (m15_c == pd.Series(m15_c).rolling(window=7, min_periods=4).max().values)
+        m15_is_low = (m15_c == pd.Series(m15_c).rolling(window=7, min_periods=4).min().values)
         m15_biases = []
+        last_hi_indices = []
+        last_li_indices = []
         for i in range(len(m15)):
-            hi = np.where(m15_is_high[:i])[0]; li = np.where(m15_is_low[:i])[0]
-            if len(hi) < 2 or len(li) < 2: m15_biases.append("NEUTRAL")
-            elif m15_c[hi[-1]] > m15_c[hi[-2]] and m15_c[li[-1]] > m15_c[li[-2]]: m15_biases.append("BULLISH")
-            elif m15_c[hi[-1]] < m15_c[hi[-2]] and m15_c[li[-1]] < m15_c[li[-2]]: m15_biases.append("BEARISH")
+            if m15_is_high[i]:
+                last_hi_indices.append(i)
+                if len(last_hi_indices) > 2: last_hi_indices.pop(0)
+            if m15_is_low[i]:
+                last_li_indices.append(i)
+                if len(last_li_indices) > 2: last_li_indices.pop(0)
+            
+            if len(last_hi_indices) < 2 or len(last_li_indices) < 2:
+                m15_biases.append("NEUTRAL")
+                continue
+                
+            # Bias Logic: Higher Highs + Higher Lows = BULLISH, Lower Highs + Lower Lows = BEARISH
+            h_curr, h_prev = m15_c[last_hi_indices[-1]], m15_c[last_hi_indices[-2]]
+            l_curr, l_prev = m15_c[last_li_indices[-1]], m15_c[last_li_indices[-2]]
+            
+            if h_curr > h_prev and l_curr > l_prev: m15_biases.append("BULLISH")
+            elif h_curr < h_prev and l_curr < l_prev: m15_biases.append("BEARISH")
             else: m15_biases.append("NEUTRAL")
 
         # 3. M5 Sweeps & Volume

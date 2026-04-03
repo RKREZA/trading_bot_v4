@@ -121,7 +121,10 @@ class RiskManager:
             return False, "CIRCUIT_BREAKER: Max daily trades reached"
 
         # 2. Max Consecutive Losses
-        if consecutive_losses >= self.risk_config.get("max_consecutive_losses", 3):
+        # [MOD] Changed default from 3 to 4. 
+        # Statistical basis: At a 40% win rate, 3 consecutive losses happen in ~21% of sessions (normal variance).
+        # 4 consecutive losses happen in ~13%, making it a more reliable signal of a "bad day" or regime shift.
+        if consecutive_losses >= self.risk_config.get("max_consecutive_losses", 4):
             return False, "CIRCUIT_BREAKER: Max consecutive losses reached"
 
         # 3. Daily Loss Percent (Equity vs Day Start)
@@ -191,7 +194,7 @@ class RiskManager:
             self.initial_balance = current_balance
             self.day_start_balance = current_balance
             self.current_max_balance = current_balance
-            self.daily_equity_history = [current_balance] * self.equity_sma_period
+            self.daily_equity_history = [current_balance]
         
         equity = current_equity if current_equity is not None else current_balance
 
@@ -199,22 +202,24 @@ class RiskManager:
         kelly = self._calculate_kelly_fraction()
         risk_pct = (kelly * 0.25) * 100.0 # Quarter-Kelly
         
-        # [MOD] Use user setting as baseline if Kelly is low or during startup
-        if risk_pct < self.base_risk_pct:
-            risk_pct = self.base_risk_pct
+        # [FIX] Removed floor at base_risk_pct to allow Kelly to scale down properly
+        # if risk_pct < self.base_risk_pct:
+        #     risk_pct = self.base_risk_pct
             
         # Clamp based on user's sanity limits if any (defaulting to a wider range than before)
         risk_pct = max(0.1, min(risk_pct, 10.0)) 
         
         # 2. Asymmetric Risk Scaling (Equity < 20-day SMA)
         scaling_enabled = self.risk_config.get("asymmetric_risk_scaling", True)
-        if scaling_enabled and len(self.daily_equity_history) >= self.equity_sma_period:
-            equity_sma = sum(self.daily_equity_history[-self.equity_sma_period:]) / self.equity_sma_period
+        if scaling_enabled and len(self.daily_equity_history) > 1:
+            # Use a dynamic SMA that grows until it reaches the target period
+            window = min(len(self.daily_equity_history), self.equity_sma_period)
+            equity_sma = sum(self.daily_equity_history[-window:]) / window
             if equity < equity_sma:
                 old_risk = risk_pct
                 risk_pct *= 0.5
                 if not self.silent:
-                    logger.info(f"Asymmetric Risk Scaling: {old_risk:.2f}% -> {risk_pct:.2f}% (Equity ${equity:.2f} < SMA ${equity_sma:.2f})")
+                    logger.info(f"Asymmetric Risk Scaling: {old_risk:.2f}% -> {risk_pct:.2f}% (Equity ${equity:.2f} < SMA(w={window}) ${equity_sma:.2f})")
 
         # 3. Apply Session Multiplier
         if session:

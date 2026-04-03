@@ -67,6 +67,9 @@ class CandleArray:
             start = idx.start if idx.start is not None else 0
             stop = idx.stop if idx.stop is not None else len(self.time)
             return self.slice(start, stop)
+        elif isinstance(idx, (np.ndarray, list)):
+            # Support boolean masking or advanced indexing
+            return CandleArray(*(getattr(self, f.name)[idx] for f in fields(self)))
         elif isinstance(idx, int):
             return {
                 'time': int(self.time[idx]),

@@ -1,5 +1,6 @@
 import logging
 import threading
+import os
 from typing import Dict, Any, Optional
 from core.strategy_engine import StrategyEngine, TradeSignal
 from core.ai_advisor import AIAdvisor
@@ -62,7 +63,7 @@ class ExecutionPipeline:
         self.state_lock = state_lock
         self.spread_history = []
         self.last_analysis = {} # Stores latest strategy metadata for dashboard
-        self.research_mode = config.get("research_mode", False)
+        self.research_mode = os.getenv("BOT_RESEARCH_MODE", "false").lower() == "true"
         
     def execute_cycle(self, symbol: str, h1: Any, m15: Any, m5: Any, d1: Any, current_price: float, session: str) -> bool:
         """
@@ -103,12 +104,13 @@ class ExecutionPipeline:
             consecutive_losses=con_losses
         )
         
-        if not allowed and not self.research_mode:
-            logger.warning(f"CIRCUIT BREAKER HALT: {cb_reason}")
-            # We still run analyze so it can report trend/regime for dashboard, but it will return None signal
-            allowed = False # Ensure we don't take trade but let analyze run for UI
-        else:
-            allowed = True # Force allowed in research mode
+        if not allowed:
+            if self.research_mode:
+                logger.warning(f"RESEARCH MODE: Bypassing Circuit Breaker ({cb_reason})")
+                allowed = True
+            else:
+                logger.warning(f"CIRCUIT BREAKER HALT: {cb_reason}")
+                allowed = False
         
         # --- PHASE 11: ROLLING SPREAD FILTER ---
         symbol_info = self.connection.get_symbol_info(symbol)

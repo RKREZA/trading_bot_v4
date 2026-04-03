@@ -49,11 +49,20 @@ class PerformanceMetrics:
         
         equity_series = pd.Series(equity_curve)
         rolling_max = equity_series.cummax()
-        drawdown = (rolling_max - equity_series) / rolling_max * 100
-        max_drawdown = drawdown.max()
+        # Drawdown and Recovery Factor
+        equity_series = pd.Series(equity_curve)
+        rolling_max = equity_series.cummax()
+        drawdown_abs = (rolling_max - equity_series)
+        drawdown_pct = drawdown_abs / rolling_max * 100
+        max_drawdown_pct = drawdown_pct.max()
+        max_drawdown_abs = drawdown_abs.max()
+        recovery_factor = net_profit / max_drawdown_abs if max_drawdown_abs > 0 else net_profit
         
-        # Sharpe Ratio (Daily Percentage Returns)
-        df['date'] = pd.to_datetime(df['time']).dt.date
+        # Sharpe & Sortino Ratio (Daily Percentage Returns based on exit time)
+        if 'exit_time' in df.columns:
+            df['date'] = pd.to_datetime(df['exit_time']).dt.date
+        else:
+            df['date'] = pd.to_datetime(df['time']).dt.date
         daily_pnl = df.groupby('date')['pnl'].sum()
         
         # Reconstruct daily balance
@@ -64,11 +73,22 @@ class PerformanceMetrics:
         daily_bal_series = pd.Series(daily_balances)
         daily_ret = daily_bal_series.pct_change().dropna()
         
+        sharpe = 0; sortino = 0; calmar = 0
         if len(daily_ret) > 1:
-            sharpe = (daily_ret.mean() / daily_ret.std()) * np.sqrt(252) if daily_ret.std() > 0 else 0
-        else:
-            sharpe = 0
+            # Sharpe
+            std = daily_ret.std()
+            sharpe = (daily_ret.mean() / std) * np.sqrt(252) if std > 0 else 0
             
+            # Sortino (Downside deviation only)
+            downside_ret = daily_ret[daily_ret < 0]
+            downside_std = downside_ret.std()
+            sortino = (daily_ret.mean() / downside_std) * np.sqrt(252) if downside_std > 0 else sharpe
+            
+            # Calmar (Annualized Return / Max Drawdown)
+            total_days = (df.iloc[-1]['date'] - df.iloc[0]['date']).days if len(df) > 1 else 1
+            annualized_ret = (balance / initial_balance) ** (365 / max(1, total_days)) - 1
+            calmar = annualized_ret / (max_drawdown_pct / 100) if max_drawdown_pct > 0 else 0
+
         # Expectancy
         avg_win = wins['pnl'].mean() if not wins.empty else 0
         avg_loss = abs(losses['pnl'].mean()) if not losses.empty else 0
@@ -79,8 +99,12 @@ class PerformanceMetrics:
             "final_balance": round(balance, 2),
             "net_profit": round(net_profit, 2),
             "profit_factor": round(profit_factor, 2),
-            "max_drawdown": round(max_drawdown, 2),
+            "max_drawdown_pct": round(max_drawdown_pct, 2),
+            "max_drawdown_abs": round(max_drawdown_abs, 2),
+            "recovery_factor": round(recovery_factor, 2),
             "sharpe_ratio": round(sharpe, 2),
+            "sortino_ratio": round(sortino, 2),
+            "calmar_ratio": round(calmar, 2),
             "expectancy": round(expectancy, 2),
             "win_rate": round(win_rate, 2),
             "total_trades": len(df),

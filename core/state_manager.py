@@ -18,19 +18,25 @@ class SecureStateManager:
         Generates a new key if none is found in the environment.
         """
         key = os.getenv(key_env_var)
-        if not key:
-            # Fallback for development/testing: use a static development key
-            # In production, the user SHOULD set BOT_STATE_KEY
-            key = "bm90X2Ffc2VjdXJlX2tleV9mb3JfcHJvZHVjdGlvbl8xMjM0NQ==" # Valid 32-byte base64 key
-            logger.warning("[State] No encryption key found in .env. Using development fallback key.")
         
-        try:
-            self.cipher = Fernet(key.encode() if isinstance(key, str) else key)
-        except Exception:
-            # If the fallback or provided key is invalid, generate one-time key
-            temp_key = Fernet.generate_key()
-            self.cipher = Fernet(temp_key)
-            logger.critical(f"INVALID KEY! Using temporary one-time key: {temp_key.decode()}. STATE WILL BE LOST ON RESTART.")
+        if key:
+            try:
+                self.cipher = Fernet(key.encode() if isinstance(key, str) else key)
+                return
+            except Exception as e:
+                logger.error(f"Provided {key_env_var} is invalid: {e}")
+
+        # Fallback: Generate a one-time key and alert the user
+        temp_key = Fernet.generate_key().decode()
+        self.cipher = Fernet(temp_key.encode())
+        
+        logger.critical("\n" + "="*60 +
+                        f"\nCRITICAL: No valid {key_env_var} set in environment."
+                        f"\nGenerated one-time key: {temp_key}"
+                        "\n"
+                        "\nSet this in your .env to persist state across restarts:"
+                        f"\n{key_env_var}={temp_key}"
+                        "\n" + "="*60 + "\n")
 
     def save(self, data: Dict[str, Any], path: str):
         """

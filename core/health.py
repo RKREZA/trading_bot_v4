@@ -19,13 +19,22 @@ class HealthHandler(BaseHTTPRequestHandler):
         Aggregates live bot metrics into a JSON response.
         """
         try:
+            if not self.bot:
+                raise ValueError("Bot instance not initialized in HealthHandler")
+
+            def safe_getattr(attr, default):
+                if not hasattr(self.bot, attr):
+                    logger.error(f"Health check failed: Bot missing attribute '{attr}'")
+                    return default
+                return getattr(self.bot, attr)
+
             status = {
                 "alive": True,
-                "connected": self.bot.connection.connected if self.bot and hasattr(self.bot, 'connection') else False,
-                "daily_trades": getattr(self.bot, 'daily_trades', 0),
-                "daily_pnl": getattr(self.bot, 'daily_pnl', 0.0),
-                "open_positions": len(getattr(self.bot, 'position_meta', {})),
-                "uptime_seconds": time.time() - getattr(self.bot, '_start_time', time.time()),
+                "connected": self.bot.connection.connected if hasattr(self.bot, 'connection') else False,
+                "daily_trades": safe_getattr('daily_trades', 0),
+                "daily_pnl": safe_getattr('daily_pnl', 0.0),
+                "open_positions": len(safe_getattr('position_meta', {})),
+                "uptime_seconds": time.time() - safe_getattr('_start_time', time.time()),
             }
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
