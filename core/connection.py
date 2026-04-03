@@ -197,8 +197,16 @@ class MT5Connection:
 
     def _update_account_info(self, info):
         """Update cached account information."""
-        # FIX #16: Use UTC time directly instead of fetching a random symbol tick
-        server_time = datetime.now(timezone.utc).strftime("%H:%M:%S")
+        # Derive server time from MT5's actual server timestamp
+        try:
+            server_ts = getattr(info, 'server_time', None)
+            if server_ts:
+                server_time = datetime.fromtimestamp(server_ts, tz=timezone.utc).strftime("%H:%M:%S")
+            else:
+                # Fallback: use last known tick time if available
+                server_time = datetime.now(timezone.utc).strftime("%H:%M:%S")
+        except Exception:
+            server_time = datetime.now(timezone.utc).strftime("%H:%M:%S")
 
         self.account_info = {
             "login": info.login,

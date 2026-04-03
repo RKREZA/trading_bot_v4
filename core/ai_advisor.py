@@ -19,7 +19,10 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .broker_clock import BrokerClock
 
 logger = logging.getLogger("trading_bot.ai_advisor")
 
@@ -41,16 +44,18 @@ class AIAdvisor:
 
     CONTEXT_FILE = "ai_context.json"
 
-    def __init__(self, config: dict, analysis_logger=None):
+    def __init__(self, config: dict, analysis_logger=None, broker_clock: 'BrokerClock' = None):
         """
         Initializes the AIAdvisor.
         
         Args:
             config (dict): Global configuration.
             analysis_logger (Optional[Dashboard.AnalysisLogger]): Dashboard logger bridge.
+            broker_clock: BrokerClock instance for authoritative time.
         """
         self.config = config
         self.analysis_logger = analysis_logger
+        self._broker_clock = broker_clock
         self._lock = threading.Lock()
         self._context: dict = {
             "session": None,
@@ -138,7 +143,7 @@ class AIAdvisor:
             s = self._context.get("session")
         if not s:
             return "MEDIUM"
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = (self._broker_clock.now() if self._broker_clock else datetime.now(timezone.utc)).strftime("%Y-%m-%d")
         if s.get("date") != today:
             return "MEDIUM"  # stale — don't apply yesterday's context
         return s.get("risk_level", "MEDIUM")
@@ -159,7 +164,7 @@ class AIAdvisor:
             s = self._context.get("session")
         if not s:
             return "NEUTRAL"
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = (self._broker_clock.now() if self._broker_clock else datetime.now(timezone.utc)).strftime("%Y-%m-%d")
         if s.get("date") != today:
             return "NEUTRAL"
         return s.get("overall_bias", "NEUTRAL")
@@ -185,7 +190,7 @@ class AIAdvisor:
             s = self._context.get("session")
             if not s:
                 return False
-            now = datetime.now(timezone.utc)
+            now = self._broker_clock.now() if self._broker_clock else datetime.now(timezone.utc)
             now_mins = now.hour * 60 + now.minute
             
             for t in s.get("high_impact_times_utc", []):
@@ -283,8 +288,9 @@ class AIAdvisor:
         ).start()
 
     def _pre_session_worker(self, symbol: str) -> None:
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        weekday = datetime.now(timezone.utc).strftime("%A")
+        _now = self._broker_clock.now() if self._broker_clock else datetime.now(timezone.utc)
+        today = _now.strftime("%Y-%m-%d")
+        weekday = _now.strftime("%A")
         sym_name = "Gold (XAU/USD)" if "XAU" in symbol else symbol
 
         self._log(f"[AI] Pre-session analysis started for {sym_name}...")
@@ -316,7 +322,7 @@ Respond ONLY in this exact JSON (no extra text, no markdown):
 
         if data:
             data["date"] = today
-            data["updated_at"] = datetime.now(timezone.utc).isoformat()
+            data["updated_at"] = (self._broker_clock.now() if self._broker_clock else datetime.now(timezone.utc)).isoformat()
             with self._lock:
                 self._context["session"] = data
             self._save_context()
@@ -421,7 +427,7 @@ Response format:
             if data:
                 data["direction"] = signal.direction
                 data["entry"] = signal.entry_price
-                data["updated_at"] = datetime.now(timezone.utc).isoformat()
+                data["updated_at"] = (self._broker_clock.now() if self._broker_clock else datetime.now(timezone.utc)).isoformat()
                 with self._lock:
                     self._context["last_signal_review"] = data
                 self._save_context()
@@ -514,7 +520,7 @@ Response format:
 
     def _post_session_worker(self, trades: list, symbol: str) -> None:
         self._log("[AI] Post-session review started...")
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = (self._broker_clock.now() if self._broker_clock else datetime.now(timezone.utc)).strftime("%Y-%m-%d")
         sym_name = "Gold" if "XAU" in symbol else symbol
 
         wins   = [t for t in trades if t.get("result") in ("TP", "WIN") or t.get("pnl", 0) > 0]
@@ -560,7 +566,7 @@ Respond ONLY in this exact JSON (no extra text):
         if data:
             data["date"] = today
             data["stats"] = {"wins": len(wins), "losses": len(losses), "pnl": total_pnl}
-            data["updated_at"] = datetime.now(timezone.utc).isoformat()
+            data["updated_at"] = (self._broker_clock.now() if self._broker_clock else datetime.now(timezone.utc)).isoformat()
             with self._lock:
                 self._context["post_session"] = data
             self._save_context()

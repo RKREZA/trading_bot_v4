@@ -40,7 +40,8 @@ class ExecutionPipeline:
                  risk_manager: RiskManager,
                  notification_manager: NotificationManager,
                  position_meta: Dict[int, Any],
-                 state_lock: threading.Lock):
+                 state_lock: threading.Lock,
+                 broker_clock=None):
         """
         Initializes the execution pipeline with all necessary component handles.
         
@@ -54,6 +55,7 @@ class ExecutionPipeline:
             notification_manager (NotificationManager): Telegram/Webhook notifier.
             position_meta (dict): Shared state for active position metadata.
             state_lock (Lock): Thread-safety lock for position_meta access.
+            broker_clock: BrokerClock instance for authoritative time.
         """
         self.config = config
         self.connection = connection
@@ -64,6 +66,7 @@ class ExecutionPipeline:
         self.notification_manager = notification_manager
         self.position_meta = position_meta
         self.state_lock = state_lock
+        self.broker_clock = broker_clock
         self.spread_history = []
         self.last_analysis = {} # Stores latest strategy metadata for dashboard
         # FIX #9: Unified research_mode — single source of truth from config

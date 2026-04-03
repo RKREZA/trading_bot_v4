@@ -1,6 +1,9 @@
 from datetime import datetime, timezone
 import logging
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .broker_clock import BrokerClock
 
 logger = logging.getLogger("trading_bot.risk")
 
@@ -9,21 +12,29 @@ class CircuitBreaker:
     Hard-stop safety mechanisms that go beyond Kelly/drawdown scaling.
     Designed to prevent 'revenge trading' and account blowouts during extreme volatility.
     """
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, broker_clock: 'BrokerClock' = None):
         """
         Initializes the CircuitBreaker with risk thresholds.
         
         Args:
             config (dict): Global configuration dictionary.
+            broker_clock: BrokerClock instance for authoritative time.
         """
         self.risk_cfg = config.get("risk", {})
         self.max_consecutive_losses = self.risk_cfg.get("max_consecutive_losses", 4)
         self.max_hourly_trades = self.risk_cfg.get("max_hourly_trades", 3)
         self.hourly_trades: Dict[int, int] = {}  # hour -> count
+        self._broker_clock = broker_clock
     
+    def _get_hour(self) -> int:
+        """Get current hour from broker clock or fallback to UTC."""
+        if self._broker_clock:
+            return self._broker_clock.hour()
+        return datetime.now(timezone.utc).hour
+
     def record_trade(self):
-        """Increments the trade counter for the current hour."""
-        hour = datetime.now(timezone.utc).hour
+        """Increments the trade counter for the current broker hour."""
+        hour = self._get_hour()
         self.hourly_trades[hour] = self.hourly_trades.get(hour, 0) + 1
     
     def reset(self):
@@ -45,7 +56,7 @@ class CircuitBreaker:
             return False, "CIRCUIT_BREAKER: Max consecutive losses"
         
         # 2. Hourly rate limit
-        hour = datetime.now(timezone.utc).hour
+        hour = self._get_hour()
         if self.hourly_trades.get(hour, 0) >= self.max_hourly_trades:
             return False, "CIRCUIT_BREAKER: Hourly trade limit reached"
         
@@ -66,19 +77,20 @@ class RiskManager:
     - Linear Drawdown Scaling.
     - Session-specific risk multipliers.
     """
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, broker_clock: 'BrokerClock' = None):
         """
         Initializes the RiskManager.
         
         Args:
             config (dict): Global configuration dictionary.
+            broker_clock: BrokerClock instance for authoritative time.
         """
         self.full_config = config
         self.risk_config = config.get("risk", {})
         self.base_risk_pct = self.risk_config.get("risk_per_trade_pct", 1.0)
         self.max_drawdown_limit = self.risk_config.get("max_drawdown_halt_pct", 10.0)
         self.drawdown_scaling_enabled = self.risk_config.get("drawdown_scaling", True)
-        self.circuit_breaker = CircuitBreaker(config)
+        self.circuit_breaker = CircuitBreaker(config, broker_clock=broker_clock)
         self.silent = False
         
         self.max_daily_loss_limit = self.risk_config.get("max_daily_loss_pct", 2.0)

@@ -8,6 +8,7 @@ from .performance import PerformanceMetrics
 from .ai_advisor import AIAdvisor
 from .validation import ValidationSuite
 from .logger import setup_logging
+from .broker_clock import BrokerClock
 
 # Multi-Strategy Framework
 from .base_strategy import BaseStrategy, MarketData, TaggedSignal
@@ -28,6 +29,7 @@ __all__ = [
     "AIAdvisor",
     "ValidationSuite",
     "setup_logging",
+    "BrokerClock",
     # Multi-Strategy Framework
     "BaseStrategy",
     "MarketData",

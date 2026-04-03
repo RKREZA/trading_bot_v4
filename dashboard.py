@@ -3,9 +3,12 @@ TRADING BOT V3 - Dashboard
 Rich-based CLI dashboard
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from collections import deque
-from typing import Optional, List
+from typing import Optional, List, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from core.broker_clock import BrokerClock
 
 from rich.console import Console, Group
 from rich.live import Live
@@ -23,17 +26,22 @@ class AnalysisLogger:
     In-memory log buffer for the dashboard.
     Maintains a rolling queue of logs to prevent memory bloat while keeping recent history.
     """
-    def __init__(self, max_entries: int = 100):
+    def __init__(self, max_entries: int = 100, broker_clock: 'BrokerClock' = None):
         """
         Initializes the logger.
         
         Args:
             max_entries (int): Maximum number of log lines to retain.
+            broker_clock: BrokerClock instance for authoritative timestamps.
         """
         self._logs = deque(maxlen=max_entries)
+        self._broker_clock = broker_clock
 
     def log(self, message: str, level: str = "INFO"):
-        timestamp = datetime.now().strftime("%H:%M:%S")
+        if self._broker_clock:
+            timestamp = self._broker_clock.format_time("%I:%M:%S %p")
+        else:
+            timestamp = datetime.now().strftime("%I:%M:%S %p")
         self._logs.append(f"[{timestamp}] [{level}] {message}")
 
     def get_recent(self, count: int = 50) -> List[str]:
@@ -73,16 +81,18 @@ class Dashboard:
     Provides a visual representation of account status, market data, signals, 
     and AI advisory context.
     """
-    def __init__(self, config: dict, logger: Optional[AnalysisLogger] = None):
+    def __init__(self, config: dict, logger: Optional[AnalysisLogger] = None, broker_clock: 'BrokerClock' = None):
         """
         Initializes the dashboard.
         
         Args:
             config (dict): Global configuration.
             logger (Optional[AnalysisLogger]): Log buffer to display.
+            broker_clock: BrokerClock instance for authoritative time.
         """
         self.config = config
         self.logger = logger or AnalysisLogger()
+        self._broker_clock = broker_clock
         self.console = Console()
         self._live = None
         self.account_info = {}
@@ -134,10 +144,15 @@ class Dashboard:
             Group: The root layout object.
         """
         parts = []
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if self._broker_clock:
+            now = self._broker_clock.format_datetime("%Y-%m-%d %I:%M:%S %p")
+            time_label = "Broker UTC"
+        else:
+            now = datetime.now().strftime("%Y-%m-%d %I:%M:%S %p")
+            time_label = "Local"
         header = Text()
         header.append(" TRADING BOT V3", style=f"bold {ACCENT}")
-        header.append(f" | {now}", style=DIM)
+        header.append(f" | {now} ({time_label})", style=DIM)
         if self.running:
             header.append(" *", style=GREEN)
         parts.append(Panel(header, box=box.DOUBLE_EDGE, style=ACCENT, expand=True, padding=(0, 1)))
@@ -193,7 +208,7 @@ class Dashboard:
         t.add_column(style=WHITE)
         status_text = "[bold green][OPEN][/]" if self.market_open else "[bold red][CLOSED][/]"
         n_block = " [bold red][NEWS LOCK][/]" if self.news_blocked else ""
-        symbol_line = Text.from_markup(f"[bold {YELLOW}]* {self.selected_symbol}[/] {status_text}{n_block}")
+        symbol_line = Text.from_markup(f"[bold {YELLOW}]* {self.selected_symbol_title}[/] {status_text}{n_block}")
         t.add_row("SYMBOL", symbol_line)
         
         bid = tick.get('price', 0)  # Bid is usually default 'price' assignment in mt5 tick
@@ -264,6 +279,15 @@ class Dashboard:
                 content.append(" | ", style=DIM)
                 content.append("VOL: ", style=DIM)
                 content.append(f"{vol_text}", style=vol_color)
+                
+                score = ctx.get("score", 2)
+                conf = ctx.get("confidence", 20)
+                content.append("\n   ↳ ", style="dim")
+                content.append("Live Score: ", style="dim")
+                content.append(f"{score}/10", style=f"bold {ACCENT}")
+                content.append(" | ", style="dim")
+                content.append("Confidence: ", style="dim")
+                content.append(f"{conf}%", style=f"bold {ACCENT}")
             else:
                 content.append(" Initializing analysis pipeline...", style=DIM)
         return Panel(content, title="[bold cyan]SIGNAL / LIVE ANALYSIS[/]", border_style="cyan", box=box.HEAVY, expand=True, padding=(0, 1))
@@ -382,10 +406,15 @@ class Dashboard:
         if not hasattr(self, 'news_events') or not self.news_events:
             t.add_row("-", Text("CLEAR", style=GREEN), Text("No high-impact news incoming", style=DIM))
         else:
-            now = datetime.now()
+            # Use broker clock for accurate time-to-event calculation
+            if self._broker_clock:
+                now = self._broker_clock.now()
+            else:
+                now = datetime.now(timezone.utc)
             for ev in self.news_events:
                 ev_time_str = ev['time_utc'].strftime("%H:%M")
-                minutes = (ev['time_utc'].replace(tzinfo=None) - now).total_seconds() / 60
+                # Both times are now UTC-aware — correct comparison
+                minutes = (ev['time_utc'] - now).total_seconds() / 60
                 if abs(minutes) <= 30:
                     status = f"[bold red]BLOCK ({int(minutes)}m)[/]"
                 else:

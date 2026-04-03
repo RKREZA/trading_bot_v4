@@ -40,7 +40,7 @@ class TradeSignal:
     confluence_score: int = 0
     reasons: List[str] = field(default_factory=list)
     rejection_type: str = ""
-    timestamp: datetime = field(default_factory=datetime.now)
+    timestamp: Optional[datetime] = None
     rr_ratio: float = 2.0
 
 class StrategyEngine:

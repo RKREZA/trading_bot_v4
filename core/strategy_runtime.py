@@ -9,7 +9,10 @@ Zero shared mutable state between runtimes.
 import logging
 import threading
 from datetime import date
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .broker_clock import BrokerClock
 
 from .base_strategy import BaseStrategy, MarketData, TaggedSignal
 from .risk_manager import RiskManager
@@ -74,12 +77,13 @@ class StrategyRuntime:
     """
 
     def __init__(self, strategy: BaseStrategy, global_config: dict, 
-                 initial_balance: float = 1000.0):
+                 initial_balance: float = 1000.0, broker_clock: 'BrokerClock' = None):
         """
         Args:
             strategy: A concrete BaseStrategy implementation
             global_config: Full bot config (for risk defaults, session config, etc.)
             initial_balance: Starting balance for performance tracking
+            broker_clock: BrokerClock instance for authoritative time
         """
         self.strategy = strategy
         self.strategy_id = strategy.strategy_id
@@ -95,7 +99,7 @@ class StrategyRuntime:
         risk_config["risk"] = risk_cfg
         
         # Dedicated components — zero shared state
-        self.risk_manager = RiskManager(risk_config)
+        self.risk_manager = RiskManager(risk_config, broker_clock=broker_clock)
         self.risk_manager.silent = True  # Controlled logging via runtime
         self.performance = PerformanceTracker(self.strategy_id, initial_balance)
         self.positions = PositionTracker(self.strategy_id)

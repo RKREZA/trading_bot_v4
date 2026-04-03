@@ -17,6 +17,7 @@ import copy
 import pandas as pd
 import numpy as np
 from datetime import datetime, timezone, date, timedelta
+from core.broker_clock import BrokerClock
 from typing import Optional, List, Tuple, Dict, Any
 
 from rich.console import Console
@@ -69,36 +70,41 @@ class TradingBot:
 
     def __init__(self, config_path: str = "config.json"):
         self.config = self._load_config(config_path)
-        self.analysis_logger = AnalysisLogger(max_entries=100)
+
+        # ── Broker Clock: Authoritative time source ──
+        self.broker_clock = BrokerClock()
+
+        self.analysis_logger = AnalysisLogger(max_entries=100, broker_clock=self.broker_clock)
 
         # Bridge standard logging to the dashboard logger
         bridged_handler = AnalysisLoggerHandler(self.analysis_logger)
         bridged_handler.setFormatter(logging.Formatter("%(name)s: %(message)s"))
         logging.getLogger("trading_bot").addHandler(bridged_handler)
 
-        self.ai_advisor = AIAdvisor(self.config, self.analysis_logger)
+        self.ai_advisor = AIAdvisor(self.config, self.analysis_logger, broker_clock=self.broker_clock)
         self.strategy = StrategyEngine(self.config, self.analysis_logger)
-        self.dashboard = Dashboard(self.config, self.analysis_logger)
+        self.dashboard = Dashboard(self.config, self.analysis_logger, broker_clock=self.broker_clock)
         self.connection = MT5Connection()
         self.connection.config = self.config
         self.position_manager = PositionManager(self.connection)
         self.data_fetcher = DataFetcher()
-        self.risk_manager = RiskManager(self.config)
+        self.risk_manager = RiskManager(self.config, broker_clock=self.broker_clock)
         self.notification_manager = NotificationManager(self.config)
         self.state_manager = SecureStateManager()
-        self.news_filter = NewsFilter()
+        self.news_filter = NewsFilter(broker_clock=self.broker_clock)
 
         self.daily_pnl = 0.0
         self.daily_trades = 0
         self.win_count = 0
         self.loss_count = 0
         self.running = False
-        self.last_reset_day = date.today()
+        self.last_reset_day = None  # Will be set after first broker_clock sync
         self.max_drawdown_reached = 0.0
         self.last_logged_session: Optional[str] = None
         self.position_meta = {}
         self.notified_deals = set()
         self.state_file = "bot_state.json"
+        self._start_time = time.time()  # For health endpoint uptime
         self.state_lock = threading.Lock()
         self.execution_queue = queue.Queue()
         self._shutdown_event = threading.Event()
@@ -118,7 +124,8 @@ class TradingBot:
             risk_manager=self.risk_manager,
             notification_manager=self.notification_manager,
             position_meta=self.position_meta,
-            state_lock=self.state_lock
+            state_lock=self.state_lock,
+            broker_clock=self.broker_clock
         )
         self.trailing_stop_manager = TrailingStopManager(
             config=self.config,
@@ -140,7 +147,7 @@ class TradingBot:
             sid = f"{strategy_type.lower()}_v1"
             try:
                 strat = create_strategy(sid, strategy_type, self.config)
-                runtime = StrategyRuntime(strat, self.config, initial_balance)
+                runtime = StrategyRuntime(strat, self.config, initial_balance, broker_clock=self.broker_clock)
                 self.strategy_runtimes.append(runtime)
                 logger.info("Auto-created strategy runtime: %s", sid)
             except ValueError as e:
@@ -160,7 +167,7 @@ class TradingBot:
                 strat = create_strategy(sid, stype, merged)
                 if not enabled:
                     strat.enabled = False
-                runtime = StrategyRuntime(strat, self.config, initial_balance)
+                runtime = StrategyRuntime(strat, self.config, initial_balance, broker_clock=self.broker_clock)
                 self.strategy_runtimes.append(runtime)
                 logger.info("Strategy runtime created: %s (%s) enabled=%s", sid, stype, enabled)
             except ValueError as e:
@@ -174,6 +181,7 @@ class TradingBot:
                 connection=self.connection,
                 position_manager=self.position_manager,
                 notification_manager=self.notification_manager,
+                broker_clock=self.broker_clock,
             )
             logger.info(
                 "StrategyOrchestrator initialized with %d runtimes",
@@ -205,7 +213,7 @@ class TradingBot:
                     "trades": self.daily_trades,
                     "win_count": self.win_count,
                     "loss_count": self.loss_count,
-                    "last_reset": self.last_reset_day.isoformat()
+                    "last_reset": self.last_reset_day.isoformat() if self.last_reset_day else ""
                 },
                 "max_drawdown": self.max_drawdown_reached,
             }
@@ -228,7 +236,8 @@ class TradingBot:
             self.daily_trades = stats.get("trades", 0)
             self.win_count = stats.get("win_count", 0)
             self.loss_count = stats.get("loss_count", 0)
-            self.last_reset_day = date.fromisoformat(stats.get("last_reset", date.today().isoformat()))
+            last_reset_str = stats.get("last_reset", "")
+            self.last_reset_day = date.fromisoformat(last_reset_str) if last_reset_str else None
             self.max_drawdown_reached = state.get("max_drawdown", 0.0)
 
         # Restore per-strategy states
@@ -274,7 +283,7 @@ class TradingBot:
         balance = self.connection.get_account_snapshot().get('balance', 0)
         win_rate = (self.win_count / self.daily_trades * 100) if self.daily_trades > 0 else 0
         row = {
-            "Date": (date.today() - timedelta(days=1)).isoformat(),
+            "Date": (self.broker_clock.today() - timedelta(days=1)).isoformat(),
             "PnL": f"{self.daily_pnl:.2f}",
             "Trades": self.daily_trades,
             "WinRate": f"{win_rate:.1f}%",
@@ -292,7 +301,9 @@ class TradingBot:
             logger.error("Reporting failed: %s", e)
 
     def _reset_daily_stats(self):
-        today = date.today()
+        today = self.broker_clock.today()
+        if self.last_reset_day is None:
+            self.last_reset_day = today
         if today > self.last_reset_day:
             self._write_performance_report()
             with self.state_lock:
@@ -451,6 +462,7 @@ class TradingBot:
         strat_choice = Prompt.ask("Select Strategy", choices=["1", "2"], default="1")
         
         # Explicitly pass selected info to Dashboard
+        self.dashboard.selected_symbol = selected_symbol
         self.dashboard.selected_symbol_title = selected_symbol
         self.dashboard.selected_strategy_title = "Sniper V4.2" if strat_choice == "1" else "SMC V4"
         
@@ -485,14 +497,17 @@ class TradingBot:
             while not self._shutdown_event.is_set():
                 try:
                     start_cycle = time.time()
-                    self._reset_daily_stats()
 
                     if not self.connection.ensure_connected():
                         logger.warning("MT5 connection lost. Attempting reconnect...")
+                        self.dashboard.account_info = {"connected": False}
+                        self.dashboard.update()
                         self._shutdown_event.wait(10.0)
                         continue
 
-                    # Fetch fresh account and tick data
+                    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                    # PHASE 1: Always sync dashboard (real-time data)
+                    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
                     acc = self.connection.get_account_snapshot()
                     tick = None
                     try:
@@ -501,12 +516,18 @@ class TradingBot:
                     except Exception as e:
                         logger.warning("Tick fetch failed: %s", e)
 
-                    # Update Dashboard State
+                    # Sync broker clock (handles stale ticks automatically)
+                    self.broker_clock.sync(symbol, MT5Connection.MT5_LOCK)
+                    self._reset_daily_stats()
+
+                    # Update dashboard — account, price, positions, PnL
                     self.dashboard.account_info = acc
                     if tick:
+                        sym_info = mt5.symbol_info(symbol)
+                        point = sym_info.point if sym_info else 0.01
                         self.dashboard.tick = {
                             "price": tick.bid,
-                            "spread": (tick.ask - tick.bid) / (mt5.symbol_info(symbol).point or 0.01)
+                            "spread": (tick.ask - tick.bid) / point
                         }
 
                     self.dashboard.daily_pnl = self.daily_pnl
@@ -515,8 +536,29 @@ class TradingBot:
                     self.dashboard.loss_count = self.loss_count
                     self.dashboard.positions = self.connection.get_positions(symbol)
 
-                    # Detect closed trades (orchestrator routes to owning strategy)
+                    # Always detect closed trades (even during quiet periods)
                     self._detect_closed_trades(symbol)
+
+                    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                    # PHASE 2: Market open check — idle if closed
+                    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                    market_open = self.connection.get_market_status(symbol)
+                    self.dashboard.market_open = market_open
+
+                    if not market_open:
+                        self.dashboard.session = "CLOSED"
+                        self.dashboard.fetch_status = "[dim]Market closed — waiting...[/]"
+                        self.dashboard.fetch_ms = 0
+                        self.dashboard.update()
+                        self._shutdown_event.wait(30.0)  # Slow poll when market closed
+                        continue
+
+                    # Market is open — clear any stale status
+                    self.dashboard.fetch_status = ""
+
+                    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                    # PHASE 3: Active trading — analysis & execution
+                    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
                     # Fetch candles
                     h1_candles = self.data_fetcher.fetch_candles(symbol, "H1", 200)
@@ -534,7 +576,7 @@ class TradingBot:
                     if len(m5_candles) > 30:
                         current_price = m5_candles.close[-1]
                         session = self.strategy.get_session_from_hour(
-                            datetime.now(timezone.utc).hour
+                            self.broker_clock.hour()
                         )
                         self.dashboard.session = session
 

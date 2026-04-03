@@ -14,7 +14,10 @@ import logging
 import time
 import threading
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .broker_clock import BrokerClock
 
 from .base_strategy import MarketData, TaggedSignal
 from .strategy_runtime import StrategyRuntime
@@ -56,6 +59,7 @@ class StrategyOrchestrator:
         connection: Any,
         position_manager: Any,
         notification_manager: Any = None,
+        broker_clock: 'BrokerClock' = None,
     ):
         """
         Args:
@@ -70,6 +74,7 @@ class StrategyOrchestrator:
         self.connection = connection
         self.position_manager = position_manager
         self.notification_manager = notification_manager
+        self._broker_clock = broker_clock
         
         # Spread filter state (shared monitoring, not strategy state)
         self.spread_history: List[float] = []
@@ -130,19 +135,34 @@ class StrategyOrchestrator:
             d1_candles=d1,
             current_price=current_price,
             session=session,
-            timestamp=datetime.now(timezone.utc),
+            timestamp=self._broker_clock.now() if self._broker_clock else datetime.now(timezone.utc),
             preprocessed=latest_meta,
         )
 
+        bias = latest_meta.get("m_bias", "NEUTRAL")
+        in_demand = latest_meta.get("in_htf_demand", False)
+        in_supply = latest_meta.get("in_htf_supply", False)
+        vol_sma = latest_meta.get("vol_sma", 0.0)
+        current_vol = m5.tick_volume[-1] if len(m5) > 0 else 0
+        
+        # Calculate dynamic live confidence & score based on confluence
+        score = 2
+        if bias != "NEUTRAL": score += 3
+        if in_demand or in_supply: score += 3
+        if current_vol > vol_sma * 1.1: score += 2
+        confidence = min(score * 10, 95)
+
         # Update dashboard analysis cache
         self.last_analysis = {
-            "trend": latest_meta.get("m_bias", "NEUTRAL"),
+            "trend": bias,
             "regime": "MULTI_STRATEGY",
-            "bias": latest_meta.get("m_bias", "NEUTRAL"),
-            "in_demand": latest_meta.get("in_htf_demand", False),
-            "in_supply": latest_meta.get("in_htf_supply", False),
-            "vol_sma": latest_meta.get("vol_sma", 0.0),
-            "current_vol": m5.tick_volume[-1] if len(m5) > 0 else 0,
+            "bias": bias,
+            "in_demand": in_demand,
+            "in_supply": in_supply,
+            "vol_sma": vol_sma,
+            "current_vol": current_vol,
+            "score": score,
+            "confidence": confidence
         }
 
         # 2. Account snapshot (shared read-only)
