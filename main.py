@@ -25,7 +25,7 @@ from rich.panel import Panel
 from rich import print as rprint
 from rich.live import Live
 
-from core.walk_forward import WalkForwardValidation
+from core.walk_forward import WalkForwardValidator
 from core.health import start_health_server
 from core.types import BotConfig
 
@@ -393,7 +393,7 @@ class TradingBot:
 
         checks.append(("MT5 connection", self.connection.connected))
         market_open = self.connection.get_market_status(self.config.get("symbol", "XAUUSDm"))
-        checks.append(("Market open", market_open))
+        checks.append(("Market open", True, "Yes" if market_open else "No (Waiting for market open)"))
 
         acc_info = self.connection.get_account_snapshot()
         balance = acc_info.get("balance", 0)
@@ -415,6 +415,8 @@ class TradingBot:
         all_passed = all(c[1] for c in checks)
         for c in checks:
             status = "[OK]" if c[1] else "[FAIL]"
+            if c[0] == "Market open" and not market_open:
+                status = "[WARN]"
             logger.info(f"  {status} {c[0]}" + (f" — {c[2]}" if len(c) > 2 else ""))
 
         return all_passed
@@ -427,11 +429,40 @@ class TradingBot:
             logger.critical("Could not initialize MT5. Check terminal status and credentials.")
             return
 
+        # ── Interactive Boot Menu ──
+        from rich.prompt import Prompt
+        from rich.console import Console
+        from rich.panel import Panel
+        c = Console()
+        c.clear()
+        c.print(Panel("[bold cyan]Trading Bot V3 — Institutional Edition[/]", expand=False))
+        
+        # Symbol Select
+        sym_choices = {"1": "XAUUSDm", "2": "EURUSDm", "3": "GBPUSDm", "4": "USDJPYm"}
+        c.print("Available Pairs: [1] XAUUSDm  [2] EURUSDm  [3] GBPUSDm  [4] USDJPYm")
+        sym_choice = Prompt.ask("Select Symbol", choices=["1", "2", "3", "4"], default="1")
+        selected_symbol = sym_choices[sym_choice]
+        self.config["symbol"] = selected_symbol
+        
+        # Strategy Select
+        c.print("\nAvailable Strategies: [1] Sniper V4.2  [2] SMC V4  [3] Both (Portfolio)")
+        strat_choice = Prompt.ask("Select Strategy", choices=["1", "2", "3"], default="3")
+        
+        for rt in self.strategy_runtimes:
+            if strat_choice == "1":
+                rt.strategy.enabled = (rt.strategy_id == "sniper_v1")
+            elif strat_choice == "2":
+                rt.strategy.enabled = (rt.strategy_id == "smc_v1")
+            else:
+                rt.strategy.enabled = True
+        
+        c.print(f"\n[bold green]Booting [{selected_symbol}] Live Feed...[/]\n")
+
         if not self._startup_checks():
             logger.critical("Startup checks failed. Exiting.")
             return
 
-        symbol = self.config.get("symbol", "XAUUSDm")
+        symbol = self.config.get("symbol", selected_symbol)
         start_health_server(self, port=8081)
 
         self.dashboard.start()
@@ -492,6 +523,8 @@ class TradingBot:
                     if tick and len(m5_candles) > 30:
                         atr = self.strategy._calculate_atr(m5_candles, 14)
                         self._manage_trailing_stops(symbol, tick.bid, tick.ask, atr, m5_candles[-1])
+                        if self.orchestrator:
+                            self.orchestrator.manage_partials(symbol, tick.bid, tick.ask)
 
                     if len(m5_candles) > 30:
                         current_price = m5_candles.close[-1]
@@ -557,7 +590,7 @@ class TradingBot:
                 m5 = self.data_fetcher.fetch_candles(symbol, "M5", count)
                 d1 = self.data_fetcher.fetch_candles(symbol, "D1", count)
 
-            wfo = WalkForwardValidation(self.config, self.strategy)
+            wfo = WalkForwardValidator(self.config, self.strategy)
             results = wfo.run_validation(symbol, h1, m15, m5, d1, mode=mode)
 
             print("\n" + "=" * 40)

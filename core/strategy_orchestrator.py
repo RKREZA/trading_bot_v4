@@ -291,6 +291,8 @@ class StrategyOrchestrator:
                 "entry_time": time.time(),
                 "trade_id": tagged.trade_id,
                 "direction": signal.direction,
+                "tp1_price": signal.tp1_price,
+                "tp2_price": signal.tp2_price,
             })
 
             if self.notification_manager:
@@ -435,6 +437,67 @@ class StrategyOrchestrator:
                                 runtime.strategy_id, ticket, new_sl
                             )
                 break  # Ticket found, no need to check other runtimes
+
+    def manage_partials(self, symbol: str, bid: float, ask: float) -> None:
+        """
+        Dynamically cross-reference live Bid/Ask vs registered tp1_price/tp2_price.
+        Execute 50% lot closures over the API when thresholds are crossed.
+        """
+        magic = self.config.get("magic_number", 234000)
+        positions = self.connection.get_positions(symbol)
+        if not positions:
+            return
+
+        for pos in positions:
+            if pos.magic != magic:
+                continue
+
+            ticket = pos.ticket
+            is_buy = (pos.type == 0)
+            
+            for runtime in self.runtimes:
+                meta = runtime.positions.get_position(ticket)
+                if meta is None:
+                    continue
+                
+                tp1 = meta.get("tp1_price", 0.0)
+                tp2 = meta.get("tp2_price", 0.0)
+                closed_count = meta.get("partial_closed_count", 0)
+                current_vol = pos.volume
+
+                # BUY Partial Check
+                if is_buy:
+                    if closed_count == 0 and tp1 > 0 and bid >= tp1:
+                        close_vol = round(current_vol * 0.50, 2)
+                        if close_vol >= 0.01:
+                            logger.info(f"[{runtime.strategy_id}] TP1 Reached (BUY): Closing {close_vol} lots at {bid}")
+                            if self.connection.close_position_partial(ticket, close_vol):
+                                runtime.positions.update_position(ticket, {"partial_closed_count": 1})
+                    
+                    elif closed_count == 1 and tp2 > 0 and bid >= tp2:
+                        close_vol = round(current_vol * 0.50, 2)
+                        if close_vol >= 0.01:
+                            logger.info(f"[{runtime.strategy_id}] TP2 Reached (BUY): Closing {close_vol} lots at {bid}")
+                            if self.connection.close_position_partial(ticket, close_vol):
+                                runtime.positions.update_position(ticket, {"partial_closed_count": 2})
+
+                # SELL Partial Check
+                else:
+                    if closed_count == 0 and tp1 > 0 and ask <= tp1:
+                        close_vol = round(current_vol * 0.50, 2)
+                        if close_vol >= 0.01:
+                            logger.info(f"[{runtime.strategy_id}] TP1 Reached (SELL): Closing {close_vol} lots at {ask}")
+                            if self.connection.close_position_partial(ticket, close_vol):
+                                runtime.positions.update_position(ticket, {"partial_closed_count": 1})
+                    
+                    elif closed_count == 1 and tp2 > 0 and ask <= tp2:
+                        close_vol = round(current_vol * 0.50, 2)
+                        if close_vol >= 0.01:
+                            logger.info(f"[{runtime.strategy_id}] TP2 Reached (SELL): Closing {close_vol} lots at {ask}")
+                            if self.connection.close_position_partial(ticket, close_vol):
+                                runtime.positions.update_position(ticket, {"partial_closed_count": 2})
+                
+                break  # Processed for this ticket
 
     def get_all_positions(self) -> Dict[str, list]:
         """Get positions grouped by strategy_id."""
