@@ -51,7 +51,7 @@ class BacktestEngine:
         self.results_dir = "backtest_results"
         if not os.path.exists(self.results_dir): os.makedirs(self.results_dir)
 
-    def run(self, symbol: str, h1_candles: Any, m15_candles: Any, m5_candles: Any, 
+    def run(self, symbol: str, htf_candles: Any, m15_candles: Any, m5_candles: Any, 
             d1_candles: Any, ticks: Optional[List[dict]] = None, quiet: bool = False):
         """
         Executes the backtest simulation.
@@ -82,7 +82,7 @@ class BacktestEngine:
         m5_tr[1:] = np.maximum(m5_highs[1:] - m5_lows[1:], np.maximum(np.abs(m5_highs[1:] - m5_closes[:-1]), np.abs(m5_lows[1:] - m5_closes[:-1])))
         m5_atr_series = pd.Series(m5_tr).rolling(14).mean().values
         
-        pre_ctx = self.strategy.preprocess_history(h1_candles, m15_candles, m5_candles, m5_candles)
+        pre_ctx = self.strategy.preprocess_history(htf_candles, m15_candles, m5_candles, m5_candles)
         m5_meta = pre_ctx.get("m5", [])
         
         trades_list = []
@@ -166,8 +166,8 @@ class BacktestEngine:
 
             # 3. Analyze for new signals (Available for entry at NEXT candle O)
             if not open_trade and not pending_signal and is_enabled:
-                h1_idx, m15_idx = np.searchsorted(h1_candles.time, t, side='right')-1, np.searchsorted(m15_candles.time, t, side='right')-1
-                signal, _, _ = self.strategy.analyze(symbol, h1_candles[:h1_idx+1], m15_candles[:m15_idx+1], m5_candles[:i+1], m5_closes[i], session=session, preprocessed=m5_meta[i])
+                htf_idx, m15_idx = np.searchsorted(htf_candles.time, t, side='right')-1, np.searchsorted(m15_candles.time, t, side='right')-1
+                signal, _, _ = self.strategy.analyze(symbol, htf_candles[:htf_idx+1], m15_candles[:m15_idx+1], m5_candles[:i+1], m5_closes[i], session=session, preprocessed=m5_meta[i])
                 if signal: pending_signal = signal
 
             pbar.set_postfix({"bal": f"${self.balance:.0f}", "trades": len(trades_list)})

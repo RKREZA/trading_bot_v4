@@ -25,11 +25,16 @@ class PerformanceMetrics:
                 "final_balance": initial_balance,
                 "net_profit": 0,
                 "profit_factor": 0,
-                "max_drawdown": 0,
+                "max_drawdown_pct": 0,
+                "max_drawdown_abs": 0,
+                "recovery_factor": 0,
                 "sharpe_ratio": 0,
+                "sortino_ratio": 0,
+                "calmar_ratio": 0,
                 "expectancy": 0,
                 "win_rate": 0,
-                "total_trades": 0
+                "total_trades": 0,
+                "equity_curve": [initial_balance]
             }
 
         df = pd.DataFrame(trades)
