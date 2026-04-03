@@ -127,23 +127,28 @@ class BacktestEngine:
                 ask_l, ask_h = bid_l + spread, bid_h + spread
                 closed = False; result = "SL"; exit_p = open_trade.sl
                 
+                # FIX #4: Check SL FIRST (worst-case assumption when both hit same candle)
                 if open_trade.direction == "BUY":
-                    # Partial TP Check
-                    if open_trade.partial_closed_count == 0 and bid_h >= open_trade.signal.tp1_price:
+                    # SL check first (conservative)
+                    if bid_l <= open_trade.sl:
+                        closed = True
+                    elif bid_h >= open_trade.tp:
+                        exit_p, result, closed = open_trade.tp, "TP", True
+                    # FIX #17: Apply spread-adjusted price for TP1 partial close
+                    elif open_trade.partial_closed_count == 0 and bid_h >= open_trade.signal.tp1_price:
                         p_lot = round(open_trade.lot * 0.25, 2)
                         p_pnl = ((open_trade.signal.tp1_price - open_trade.entry_price) / open_trade.tick_size) * open_trade.tick_value * p_lot
                         self.balance += p_pnl; open_trade.lot -= p_lot; open_trade.partial_closed_count += 1
-
-                    if bid_l <= open_trade.sl: closed = True
-                    elif bid_h >= open_trade.tp: exit_p, result, closed = open_trade.tp, "TP", True
                 else:
-                    if open_trade.partial_closed_count == 0 and ask_l <= open_trade.signal.tp1_price:
+                    # SELL: SL check first
+                    if ask_h >= open_trade.sl:
+                        closed = True
+                    elif ask_l <= open_trade.tp:
+                        exit_p, result, closed = open_trade.tp, "TP", True
+                    elif open_trade.partial_closed_count == 0 and ask_l <= open_trade.signal.tp1_price:
                         p_lot = round(open_trade.lot * 0.25, 2)
                         p_pnl = ((open_trade.entry_price - open_trade.signal.tp1_price) / open_trade.tick_size) * open_trade.tick_value * p_lot
                         self.balance += p_pnl; open_trade.lot -= p_lot; open_trade.partial_closed_count += 1
-
-                    if ask_h >= open_trade.sl: closed = True
-                    elif ask_l <= open_trade.tp: exit_p, result, closed = open_trade.tp, "TP", True
                 
                 if closed:
                     pnl = ((exit_p - open_trade.entry_price) / open_trade.tick_size) * open_trade.tick_value * open_trade.lot if open_trade.direction == "BUY" \

@@ -199,7 +199,7 @@ class ValidationSuite:
             checks['failed'] = True
             checks['reasons'].append("Suspected Curve Fitting: Win rate > 85% is typically unrealistic for this strategy")
             
-        if perf.get('max_drawdown', 0) > 30:
+        if perf.get('max_drawdown_pct', 0) > 30:
             checks['failed'] = True
             checks['reasons'].append("High Max Drawdown (>30%) detected in base backtest")
             

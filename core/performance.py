@@ -55,8 +55,6 @@ class PerformanceMetrics:
         equity_series = pd.Series(equity_curve)
         rolling_max = equity_series.cummax()
         # Drawdown and Recovery Factor
-        equity_series = pd.Series(equity_curve)
-        rolling_max = equity_series.cummax()
         drawdown_abs = (rolling_max - equity_series)
         drawdown_pct = drawdown_abs / rolling_max * 100
         max_drawdown_pct = drawdown_pct.max()

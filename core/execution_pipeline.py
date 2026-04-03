@@ -1,6 +1,6 @@
 import logging
 import threading
-import os
+import time
 from typing import Dict, Any, Optional
 from core.strategy_engine import StrategyEngine, TradeSignal
 from core.ai_advisor import AIAdvisor
@@ -15,6 +15,9 @@ try:
     import MetaTrader5 as mt5
 except ImportError:
     mt5 = None
+
+# Minimum SL distance in price units to prevent undefined-risk trades
+_MIN_SL_DISTANCE_POINTS = 50  # 50 points (e.g., 0.50 for gold)
 
 class ExecutionPipeline:
     """
@@ -63,7 +66,11 @@ class ExecutionPipeline:
         self.state_lock = state_lock
         self.spread_history = []
         self.last_analysis = {} # Stores latest strategy metadata for dashboard
-        self.research_mode = os.getenv("BOT_RESEARCH_MODE", "false").lower() == "true"
+        # FIX #9: Unified research_mode — single source of truth from config
+        self.research_mode = config.get("research_mode", False)
+        # FIX #8: Preprocessing cache to avoid O(n²) per-cycle recomputation
+        self._last_preprocessed_time = 0
+        self._cached_pre_ctx = None
         
     def execute_cycle(self, symbol: str, h1: Any, m15: Any, m5: Any, d1: Any, current_price: float, session: str) -> bool:
         """
@@ -83,13 +90,7 @@ class ExecutionPipeline:
         acc_info = self.connection.get_account_snapshot()
         current_balance = acc_info.get("balance", 0.0)
         current_equity = acc_info.get("equity", 0.0)
-        
-        # [FIX]: Trigger daily reset for Risk Manager at midnight in LIVE trading
-        from datetime import datetime, timezone
-        current_date = datetime.now(timezone.utc).date()
-        if not hasattr(self, '_last_reset_date') or self._last_reset_date != current_date:
-            self.risk_manager.reset_daily_stats(current_balance)
-            self._last_reset_date = current_date
+        # FIX #7: Removed duplicate daily reset — TradingBot.main owns this lifecycle
         
         daily_trades = self.strategy.daily_trades
         daily_losses = self.strategy.daily_losses
@@ -133,12 +134,16 @@ class ExecutionPipeline:
                     return False
 
         # Start Latency Tracking
-        import time
         start_time = time.time()
         
         # --- PHASE 12: M5 SNIPER PREPROCESSING ---
-        # Fetch institutional context (H1 zones, M15 bias, M5 sweeps) for the latest candle
-        pre_ctx = self.strategy.preprocess_history(h1, m15, m5, m5)
+        # FIX #8: Cache preprocessing — only recompute when a new M5 candle arrives
+        current_m5_time = int(m5.time[-1]) if len(m5) > 0 else 0
+        if current_m5_time != self._last_preprocessed_time:
+            self._cached_pre_ctx = self.strategy.preprocess_history(h1, m15, m5, m5)
+            self._last_preprocessed_time = current_m5_time
+        
+        pre_ctx = self._cached_pre_ctx or {}
         latest_meta = pre_ctx.get("m5", [{}])[-1] if pre_ctx.get("m5") else {}
 
         # 1. Generate Signal
@@ -214,10 +219,17 @@ class ExecutionPipeline:
         risk_dollar = current_balance * (risk_pct / 100.0)
         sl_dist = abs(signal.entry_price - signal.stop_loss)
         
+        # FIX #11: Validate SL distance to prevent undefined-risk trades
+        point = sym_info.get("point", 0.01)
+        sl_points = sl_dist / point if point > 0 else 0
+        if sl_points < _MIN_SL_DISTANCE_POINTS:
+            logger.warning("SL distance too small (%.1f points). Signal rejected.", sl_points)
+            return False
+        
         lot = LotCalculator.calculate(
             risk_amount=risk_dollar,
             sl_distance=sl_dist,
-            tick_size=sym_info.get("point", 0.01),
+            tick_size=point,
             tick_value=sym_info.get("trade_tick_value", 1.0),
             volume_min=sym_info.get("volume_min", 0.01),
             volume_max=sym_info.get("volume_max", 100.0),
@@ -227,7 +239,7 @@ class ExecutionPipeline:
         # 7. Order Execution
         logger.info("Executing %s %s | Lot: %s | SL: %s | TP: %s", signal.direction, symbol, lot, signal.stop_loss, signal.take_profit)
         
-        ticket = self.connection.place_order(
+        result = self.connection.place_order(
             symbol=symbol,
             signal=signal,
             lot_size=lot
@@ -236,13 +248,16 @@ class ExecutionPipeline:
         latency_ms = (time.time() - start_time) * 1000
         logger.info(f"Execution Latency: {latency_ms:.2f}ms")
         
-        if ticket:
+        # FIX #3: Extract ticket ID (int) from result dict — was storing dict as key
+        if result:
+            ticket_id = result["ticket"]
             with self.state_lock:
-                self.position_meta[ticket] = {
-                    "ticket": ticket,
+                self.position_meta[ticket_id] = {
+                    "ticket": ticket_id,
                     "session": session,
                     "best_price": current_price,
                     "partial_closed_count": 0,
+                    "risk": sl_dist,
                     "entry_time": time.time()
                 }
                 

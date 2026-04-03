@@ -94,10 +94,11 @@ class BacktestCLI:
                 dt_from = datetime.fromisoformat(start).replace(tzinfo=timezone.utc)
                 dt_to = datetime.fromisoformat(end).replace(tzinfo=timezone.utc)
                 
-                m30 = self.data_fetcher.fetch_candles_range(symbol, "M30", dt_from, dt_to)
                 m15 = self.data_fetcher.fetch_candles_range(symbol, "M15", dt_from, dt_to)
                 m5 = self.data_fetcher.fetch_candles_range(symbol, "M5", dt_from, dt_to)
                 d1 = self.data_fetcher.fetch_candles_range(symbol, "D1", dt_from, dt_to)
+                # FIX #21: Fetch H1 (not M30) to match live trading HTF hierarchy
+                h1 = self.data_fetcher.fetch_candles_range(symbol, "H1", dt_from, dt_to)
                 progress.update(t1, completed=100)
 
             # Symbol Injection
@@ -114,19 +115,19 @@ class BacktestCLI:
                 # Run Sniper
                 rprint("[yellow]Phase 1: Simulating SNIPER Strategy...[/]")
                 cfg_sniper = {**self.config, "strategy_type": "SNIPER"}
-                res_sniper = BacktestEngine(cfg_sniper, StrategyEngine(cfg_sniper)).run(symbol, m30, m15, m5, d1, quiet=True)
+                res_sniper = BacktestEngine(cfg_sniper, StrategyEngine(cfg_sniper)).run(symbol, h1, m15, m5, d1, quiet=True)
                 
                 # Run SMC
                 rprint("[yellow]Phase 2: Simulating SMC Strategy (OB+FVG+LIQ)...[/]")
                 cfg_smc = {**self.config, "strategy_type": "SMC"}
-                res_smc = BacktestEngine(cfg_smc, StrategyEngine(cfg_smc)).run(symbol, m30, m15, m5, d1, quiet=True)
+                res_smc = BacktestEngine(cfg_smc, StrategyEngine(cfg_smc)).run(symbol, h1, m15, m5, d1, quiet=True)
                 
                 self._display_comparison(res_sniper, res_smc)
             else:
                 cfg = {**self.config, "strategy_type": strategy_type}
                 engine = BacktestEngine(cfg, StrategyEngine(cfg))
                 rprint(f"[yellow]Simulating {len(m5)} candles using {strategy_type}...[/]")
-                results = engine.run(symbol, m30, m15, m5, d1, quiet=False)
+                results = engine.run(symbol, h1, m15, m5, d1, quiet=False)
                 self._display_final_results(results)
 
         finally:

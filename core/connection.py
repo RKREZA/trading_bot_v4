@@ -197,18 +197,8 @@ class MT5Connection:
 
     def _update_account_info(self, info):
         """Update cached account information."""
-        # Use MT5 server time if available, fall back to local time
-        try:
-            # We use the time of the last received tick as a proxy for server time
-            # Since TerminalInfo doesn't have it in Python, we fetch any liquid symbol
-            with self.MT5_LOCK:
-                tick = mt5.symbol_info_tick(info.login_symbol if hasattr(info, 'login_symbol') else "BTCUSDm")
-            if tick:
-                server_time = datetime.fromtimestamp(tick.time, tz=timezone.utc).strftime("%H:%M:%S")
-            else:
-                server_time = datetime.now().strftime("%H:%M:%S")
-        except Exception:
-            server_time = datetime.now().strftime("%H:%M:%S")
+        # FIX #16: Use UTC time directly instead of fetching a random symbol tick
+        server_time = datetime.now(timezone.utc).strftime("%H:%M:%S")
 
         self.account_info = {
             "login": info.login,
@@ -354,11 +344,16 @@ class MT5Connection:
         stops_level = symbol_info.trade_stops_level
         point = symbol_info.point
         
+        # FIX #2: Work with LOCAL copies of SL/TP — never mutate the input signal
+        local_sl = float(signal.stop_loss)
+        local_tp = float(signal.take_profit)
+        local_entry = float(signal.entry_price)
+        
         for attempt in range(max_retries):
             # Recalculate stops if needed to respect stops_level
             min_dist = stops_level * point
-            sl = float(signal.stop_loss)
-            tp = float(signal.take_profit)
+            sl = local_sl
+            tp = local_tp
             
             # Clamp SL/TP to minimum stops_level distance
             if abs(price - sl) < min_dist:
@@ -415,20 +410,16 @@ class MT5Connection:
                     
                     if tick and sym_info:
                         price = tick.ask if signal.direction == "BUY" else tick.bid
-                        # Absolute minimum distance allowed by broker
                         min_stop_distance = sym_info.trade_stops_level * sym_info.point
-                        
-                        # Calculate original intended risk
-                        calculated_risk = abs(signal.entry_price - signal.stop_loss)
-                        # Force SL to be at least the broker's minimum distance
+                        calculated_risk = abs(local_entry - local_sl)
                         safe_risk_distance = max(calculated_risk, min_stop_distance)
                         
+                        # Update LOCAL copies only — signal object is untouched
                         if signal.direction == "BUY":
-                            signal.stop_loss = price - safe_risk_distance
+                            local_sl = price - safe_risk_distance
                         else:
-                            signal.stop_loss = price + safe_risk_distance
-                        
-                        signal.entry_price = price
+                            local_sl = price + safe_risk_distance
+                        local_entry = price
                     continue
                     
                 time.sleep(delay)

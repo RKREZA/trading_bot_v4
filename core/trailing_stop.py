@@ -62,9 +62,10 @@ class TrailingStopManager:
             is_buy = (pos.type == 0)
             current_price = current_bid if is_buy else current_ask
             
-            # 1. High-Water Mark Update
-            if (is_buy and current_price > meta["best_price"]) or (not is_buy and current_price < meta["best_price"]):
-                meta["best_price"] = current_price
+            # FIX #15: Update best_price under state_lock to prevent race conditions
+            with self.state_lock:
+                if (is_buy and current_price > meta["best_price"]) or (not is_buy and current_price < meta["best_price"]):
+                    meta["best_price"] = current_price
                 
             # 2. Optimized Trailing Logic (Shared with Backtest)
             new_sl = self.calculate_new_sl(

@@ -21,6 +21,11 @@ logger = logging.getLogger("trading_bot.strategy")
 
 _DEFAULT_SESSIONS = {"LONDON", "NEW_YORK", "LONDON/NY", "TOKYO"}
 
+# Named constants for magic numbers
+_SECONDS_PER_DAY = 86400
+_SECONDS_PER_5MIN = 300
+_HTF_ZONE_LOOKBACK_DAYS = 5
+
 @dataclass
 class TradeSignal:
     direction: str
@@ -97,6 +102,10 @@ class StrategyEngine:
                 d1_candles: Optional['CandleArray'] = None, session: Optional[str] = None,
                 preprocessed: Optional[dict] = None, circuit_breaker_safe: bool = True) -> Tuple[Optional[TradeSignal], str, str]:
         
+        # FIX #5: Guard against empty CandleArrays
+        if len(m5_candles_original) < 2:
+            return None, "NEUTRAL", "INSUFFICIENT_DATA"
+        
         raw_ts = m5_candles_original.time[-1]
         timestamp = datetime.fromtimestamp(float(raw_ts), tz=timezone.utc)
         if self.last_loss_date != timestamp.date():
@@ -112,6 +121,7 @@ class StrategyEngine:
 
     def _analyze_smc(self, symbol: str, m5_candles: 'CandleArray', current_price: float, 
                      session: str, preprocessed: dict) -> Tuple[Optional[TradeSignal], str, str]:
+        """Smart Money Concepts strategy: HTF Zone + LTF Rejection + Volume Spike."""
         m5_ctx = preprocessed if preprocessed else {}
         htf_demand = m5_ctx.get("in_htf_demand", False)
         htf_supply = m5_ctx.get("in_htf_supply", False)
@@ -119,16 +129,16 @@ class StrategyEngine:
         rej_bear = m5_ctx.get("rej_bear", False)
         bias = m5_ctx.get("m_bias", "NEUTRAL")
         
-        last_m5 = m5_candles[-1]; atr = self._calculate_atr(m5_candles, 14)
-        signal = None; reason = ""
+        # FIX #18: Removed duplicate variable declarations (was declared twice)
+        last_m5 = m5_candles[-1]
+        atr = self._calculate_atr(m5_candles, 14)
+        signal = None
+        reason = ""
 
         vol_sma = m5_ctx.get("vol_sma", 0.0)
         vol_expansion = m5_candles.tick_volume[-1] > vol_sma * 1.25
         sweep_bull = m5_ctx.get("sweep_bull", False)
         sweep_bear = m5_ctx.get("sweep_bear", False)
-
-        last_m5 = m5_candles[-1]; atr = self._calculate_atr(m5_candles, 14)
-        signal = None; reason = ""
 
         # Hardened Logic: In HTF Zone + LTF Rejection + Volume Spike
         if htf_demand and rej_bull and bias != "BEARISH" and vol_expansion:
@@ -156,9 +166,9 @@ class StrategyEngine:
     def _analyze_sniper(self, symbol: str, htf_candles: 'CandleArray', m15_candles: 'CandleArray', 
                         m5_candles_original: 'CandleArray', current_price: float, 
                         session: str, preprocessed: dict) -> Tuple[Optional[TradeSignal], str, str]:
-        self.trade_counter += 1
+        """Pure Price Action Sniper: M15 bias + M5 liquidity sweep/rejection entries."""
         if not self.research_mode and self.trade_counter - self.last_stop_index < self.cooldown_candles: return None, "NEUTRAL", "COOLDOWN"
-
+        self.trade_counter += 1
         m5 = m5_candles_original[-100:]
         if len(m5) < 20: return None, "NEUTRAL", "INSUFFICIENT_DATA"
 
@@ -296,9 +306,9 @@ class StrategyEngine:
         
         for i in range(len(m5_original)):
             t = m5_t[i]; cp = m5_c[i]; cl = m5_l[i]; ch = m5_h[i]
-            m15_idx = np.searchsorted(m15_t, t - 300, side='right') - 1; m15_idx = max(0, m15_idx)
-            relevant_demand = [z for z in demand_zones if z["time"] < t and z["time"] > t - 86400 * 5]
-            relevant_supply = [z for z in supply_zones if z["time"] < t and z["time"] > t - 86400 * 5]
+            m15_idx = np.searchsorted(m15_t, t - _SECONDS_PER_5MIN, side='right') - 1; m15_idx = max(0, m15_idx)
+            relevant_demand = [z for z in demand_zones if z["time"] < t and z["time"] > t - _SECONDS_PER_DAY * _HTF_ZONE_LOOKBACK_DAYS]
+            relevant_supply = [z for z in supply_zones if z["time"] < t and z["time"] > t - _SECONDS_PER_DAY * _HTF_ZONE_LOOKBACK_DAYS]
             in_d = any((cl <= z["high"] and ch >= z["low"]) for z in relevant_demand)
             in_s = any((ch >= z["low"] and cl <= z["high"]) for z in relevant_supply)
             

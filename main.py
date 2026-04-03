@@ -201,9 +201,12 @@ class TradingBot:
         win_rate = (self.win_count / self.daily_trades * 100) if self.daily_trades > 0 else 0
         row = {"Date": (date.today() - timedelta(days=1)).isoformat(), "PnL": f"{self.daily_pnl:.2f}", "Trades": self.daily_trades, "WinRate": f"{win_rate:.1f}%", "MaxDrawdown": f"{self.max_drawdown_reached:.2f}", "EndingBalance": f"{balance:.2f}"}
         try:
+            # FIX #1: Check file existence BEFORE opening to correctly write headers
+            write_header = not os.path.exists(file_path) or os.stat(file_path).st_size == 0
             with open(file_path, "a", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
-                if not os.path.exists(file_path) or os.stat(file_path).st_size == 0: writer.writeheader()
+                if write_header:
+                    writer.writeheader()
                 writer.writerow(row)
         except Exception as e:
             logger.error("Reporting failed: %s", e)
@@ -213,11 +216,63 @@ class TradingBot:
         if today > self.last_reset_day:
             self._write_performance_report()
             with self.state_lock:
-                self.daily_pnl = 0.0; self.daily_trades = 0; self.win_count = 0; self.loss_count = 0; self.last_reset_day = today
+                self.daily_pnl = 0.0
+                self.daily_trades = 0
+                self.win_count = 0
+                self.loss_count = 0
+                self.last_reset_day = today
                 # Reset RiskManager stats (Equity tracking)
                 acc = self.connection.get_account_snapshot()
                 self.risk_manager.reset_daily_stats(acc.get("balance", 0.0))
             self._save_state()
+
+    def _detect_closed_trades(self, symbol: str):
+        """Arch C: Detect when positions close and update daily stats accordingly."""
+        if mt5 is None:
+            return
+        try:
+            magic = int(self.config.get("magic_number", 234000))
+            with MT5Connection.MT5_LOCK:
+                active = mt5.positions_get()
+            live_tickets = {p.ticket for p in active if p.magic == magic} if active else set()
+            
+            with self.state_lock:
+                closed_tickets = [t for t in self.position_meta if t not in live_tickets]
+            
+            for ticket in closed_tickets:
+                # Fetch the deal history for this ticket to get P&L
+                try:
+                    with MT5Connection.MT5_LOCK:
+                        deals = mt5.history_deals_get(position=ticket)
+                    if deals:
+                        # Sum all deals for this position
+                        total_pnl = sum(d.profit + d.commission + d.swap for d in deals)
+                        with self.state_lock:
+                            self.daily_pnl += total_pnl
+                            self.daily_trades += 1
+                            if total_pnl >= 0:
+                                self.win_count += 1
+                            else:
+                                self.loss_count += 1
+                            del self.position_meta[ticket]
+                        meta = self.position_meta.get(ticket, {})
+                        direction = "BUY" if total_pnl >= 0 else "SELL"  # approximate
+                        self.notification_manager.notify_trade_close(
+                            symbol=symbol, direction=direction,
+                            exit_price=0, pnl=total_pnl,
+                            result="WIN" if total_pnl >= 0 else "LOSS"
+                        )
+                        logger.info("Trade closed: ticket=%s pnl=$%.2f", ticket, total_pnl)
+                except Exception as e:
+                    logger.error("Error processing closed ticket %s: %s", ticket, e)
+                    with self.state_lock:
+                        if ticket in self.position_meta:
+                            del self.position_meta[ticket]
+            
+            if closed_tickets:
+                self._save_state()
+        except Exception as e:
+            logger.error("Trade close detection failed: %s", e)
 
     def _manage_trailing_stops(self, symbol: str, current_bid: float, current_ask: float, atr: float, last_candle: dict) -> None:
         self.trailing_stop_manager.manage_positions(symbol, current_bid, current_ask, atr, last_candle)
@@ -286,55 +341,74 @@ class TradingBot:
         
         try:
             while not self._shutdown_event.is_set():
-                start_cycle = time.time()
-                self._reset_daily_stats()
-                
-                # Fetch fresh account and tick data
-                acc = self.connection.get_account_snapshot()
-                tick = mt5.symbol_info_tick(symbol) if mt5 else None
-                
-                # Update Dashboard State
-                self.dashboard.account_info = acc
-                if tick:
-                    self.dashboard.tick = {"price": tick.bid, "spread": (tick.ask - tick.bid) / (mt5.symbol_info(symbol).point or 0.01)}
-                
-                self.dashboard.daily_pnl = self.daily_pnl
-                self.dashboard.daily_trades = self.daily_trades
-                self.dashboard.win_count = self.win_count
-                self.dashboard.loss_count = self.loss_count
-                self.dashboard.positions = self.connection.get_positions(symbol)
-                
-                # Fetch candles securely
-                h1_candles = self.data_fetcher.fetch_candles(symbol, "H1", 200)
-                m15_candles = self.data_fetcher.fetch_candles(symbol, "M15", 200)
-                m5_candles = self.data_fetcher.fetch_candles(symbol, "M5", 500)
-                d1_candles = self.data_fetcher.fetch_candles(symbol, "D1", 50)
+                try:
+                    start_cycle = time.time()
+                    self._reset_daily_stats()
+                    
+                    # FIX #6: Ensure MT5 connection is alive before each cycle
+                    if not self.connection.ensure_connected():
+                        logger.warning("MT5 connection lost. Attempting reconnect...")
+                        self._shutdown_event.wait(10.0)
+                        continue
+                    
+                    # Fetch fresh account and tick data
+                    acc = self.connection.get_account_snapshot()
+                    tick = None
+                    try:
+                        with MT5Connection.MT5_LOCK:
+                            tick = mt5.symbol_info_tick(symbol) if mt5 else None
+                    except Exception as e:
+                        logger.warning("Tick fetch failed: %s", e)
+                    
+                    # Update Dashboard State
+                    self.dashboard.account_info = acc
+                    if tick:
+                        self.dashboard.tick = {"price": tick.bid, "spread": (tick.ask - tick.bid) / (mt5.symbol_info(symbol).point or 0.01)}
+                    
+                    self.dashboard.daily_pnl = self.daily_pnl
+                    self.dashboard.daily_trades = self.daily_trades
+                    self.dashboard.win_count = self.win_count
+                    self.dashboard.loss_count = self.loss_count
+                    self.dashboard.positions = self.connection.get_positions(symbol)
+                    
+                    # Arch C: Detect closed trades and update stats
+                    self._detect_closed_trades(symbol)
+                    
+                    # Fetch candles securely
+                    h1_candles = self.data_fetcher.fetch_candles(symbol, "H1", 200)
+                    m15_candles = self.data_fetcher.fetch_candles(symbol, "M15", 200)
+                    m5_candles = self.data_fetcher.fetch_candles(symbol, "M5", 500)
+                    d1_candles = self.data_fetcher.fetch_candles(symbol, "D1", 50)
 
-                # 4. Trailing Stops (Sniper Mode M5)
-                if tick and len(m5_candles) > 30:
-                    atr = self.strategy._calculate_atr(m5_candles, 14) 
-                    self._manage_trailing_stops(symbol, tick.bid, tick.ask, atr, m5_candles[-1])
-                
-                if len(m5_candles) > 30:
-                    current_price = m5_candles.close[-1]
-                    # Dynamic Session Lookup (P0 Fix)
-                    session = self.strategy.get_session_from_hour(datetime.now(timezone.utc).hour)
+                    # 4. Trailing Stops (Sniper Mode M5)
+                    if tick and len(m5_candles) > 30:
+                        atr = self.strategy._calculate_atr(m5_candles, 14) 
+                        self._manage_trailing_stops(symbol, tick.bid, tick.ask, atr, m5_candles[-1])
                     
-                    self.dashboard.session = session
+                    if len(m5_candles) > 30:
+                        current_price = m5_candles.close[-1]
+                        # Dynamic Session Lookup (P0 Fix)
+                        session = self.strategy.get_session_from_hour(datetime.now(timezone.utc).hour)
                         
-                    self.execution_pipeline.execute_cycle(
-                        symbol, h1_candles, m15_candles, m5_candles, d1_candles, current_price, session
-                    )
+                        self.dashboard.session = session
+                            
+                        self.execution_pipeline.execute_cycle(
+                            symbol, h1_candles, m15_candles, m5_candles, d1_candles, current_price, session
+                        )
+                        
+                        # Update Dashboard with latest analysis context
+                        analysis = self.execution_pipeline.last_analysis
+                        self.dashboard.h4_trend = analysis.get("trend", "NEUTRAL")
+                        self.dashboard.m30_structure = analysis.get("regime", "NEUTRAL")
+                        self.dashboard.analysis_context = analysis
                     
-                    # Update Dashboard with latest analysis context
-                    analysis = self.execution_pipeline.last_analysis
-                    self.dashboard.h4_trend = analysis.get("trend", "NEUTRAL")
-                    self.dashboard.m30_structure = analysis.get("regime", "NEUTRAL")
-                    self.dashboard.analysis_context = analysis
-                
-                # Final Dashboard update for the cycle
-                self.dashboard.fetch_ms = int((time.time() - start_cycle) * 1000)
-                self.dashboard.update()
+                    # Final Dashboard update for the cycle
+                    self.dashboard.fetch_ms = int((time.time() - start_cycle) * 1000)
+                    self.dashboard.update()
+                    
+                except Exception as cycle_err:
+                    logger.error("Cycle error (recovering): %s", cycle_err, exc_info=True)
+                    self._save_state()
                 
                 self._shutdown_event.wait(5.0)  # Sleep 5 seconds between signal checks
         except KeyboardInterrupt:

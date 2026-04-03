@@ -92,7 +92,7 @@ class Dashboard:
         self.daily_trades = 0
         self.win_count = 0
         self.loss_count = 0
-        self.selected_symbol = config.get("symbol", "BTCUSDm")
+        self.selected_symbol = config.get("symbol", "XAUUSDm")
         self.session = "CLOSED"
         self.running = True
         self.h4_trend = "RANGING"

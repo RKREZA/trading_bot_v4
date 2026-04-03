@@ -2,6 +2,8 @@ import logging
 import requests
 import os
 import time
+import threading
+from queue import Queue
 from typing import Optional
 
 logger = logging.getLogger("trading_bot.notifications")
@@ -22,17 +24,36 @@ class NotificationManager:
         self.enabled = self.config.get("enabled", False)
         self.telegram_token = os.getenv("TELEGRAM_BOT_TOKEN")
         self.chat_id = os.getenv("TELEGRAM_CHAT_ID")
+        # FIX #10: Bounded queue + daemon thread for non-blocking notifications
+        self._queue = Queue(maxsize=50)
+        self._worker = threading.Thread(target=self._dispatch_loop, daemon=True, name="Notifier")
+        self._worker.start()
         
+    def _dispatch_loop(self):
+        """Background worker that processes the notification queue."""
+        while True:
+            msg = self._queue.get()
+            if msg is None:
+                break
+            self._send_telegram_sync(msg)
+            self._queue.task_done()
+
     def send_telegram(self, message: str):
         """
-        Sends a generic markdown-formatted message to the Telegram chat.
+        Queues a message for async delivery. Non-blocking.
         
         Args:
             message (str): Text content of the message.
         """
         if not self.enabled or not self.telegram_token or not self.chat_id:
             return
+        try:
+            self._queue.put_nowait(message)
+        except Exception:
+            logger.warning("Notification queue full - dropping message")
 
+    def _send_telegram_sync(self, message: str):
+        """Synchronous send with retries - runs in background thread only."""
         max_retries = 3
         backoff_factor = 2
         
@@ -41,7 +62,7 @@ class NotificationManager:
                 url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
                 payload = {
                     "chat_id": self.chat_id,
-                    "text": f"🤖 *TRADING BOT V3+*\n\n{message}",
+                    "text": f"\U0001f916 *TRADING BOT V3+*\n\n{message}",
                     "parse_mode": "Markdown"
                 }
                 response = requests.post(url, json=payload, timeout=10)

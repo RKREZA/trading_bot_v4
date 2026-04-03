@@ -143,7 +143,16 @@ class WalkForwardValidation:
             tester = BacktestEngine(tmp_config, strat)
             perf = tester.run(symbol, data["h1"], data["m15"], data["m5"], data["d1"], quiet=True)
             
-            score = perf.get("net_profit", 0)
+            # FIX #13: Composite score to reduce curve-fitting (was pure net_profit)
+            net = perf.get("net_profit", 0)
+            pf = min(perf.get("profit_factor", 0), 5.0)  # Cap PF to prevent outlier bias
+            dd = perf.get("max_drawdown_pct", 50.0)
+            trades = perf.get("total_trades", 0)
+            # Require minimum 10 trades for statistical relevance
+            if trades < 10:
+                score = -999999
+            else:
+                score = net * min(1.0, pf / 2.0) * (1 - min(dd, 50) / 50)
             if score > best_metric:
                 best_metric = score; best_params = params; self.last_train_perf = perf
         

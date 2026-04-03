@@ -118,7 +118,7 @@ class DataFetcher:
             if not select_res:
                 error = mt5.last_error()
                 logger.error("symbol_select failed for %s: %s", symbol, error)
-                return []
+                return CandleArray.from_dicts([])
             
             logger.debug("MT5 Fetch (%s): %s %s (%d candles)...", 
                          "INC" if is_incremental else "FULL", symbol, timeframe, fetch_count)
