@@ -145,10 +145,36 @@ class RiskManager:
             return False, f"CIRCUIT_BREAKER: Daily loss limit hit ({daily_loss_pct:.2f}%)"
 
         # 4. Max Drawdown Halt (Equity vs Current Max Balance)
-        if self.current_max_balance == 0: self.current_max_balance = current_balance
+        if self.current_max_balance <= 0: self.current_max_balance = current_balance
         max_drawdown_pct = (self.current_max_balance - current_equity) / self.current_max_balance * 100
         if max_drawdown_pct >= self.risk_config.get("max_drawdown_halt_pct", 10.0):
             return False, f"CIRCUIT_BREAKER: Max drawdown halt ({max_drawdown_pct:.2f}%)"
+
+        return True, "OK"
+
+    def check_portfolio_risk(self, portfolio_equity: float, portfolio_balance: float) -> Tuple[bool, str]:
+        """
+        Global Portfolio-level Circuit Breakers.
+        Used to stop ALL strategies if the overall account is in danger.
+        """
+        p_cfg = self.full_config.get("portfolio_risk", {})
+        if not p_cfg:
+            return True, "OK"
+
+        # 1. Global Max Drawdown
+        if self.current_max_balance <= 0: self.current_max_balance = portfolio_balance
+        if portfolio_balance > self.current_max_balance:
+            self.current_max_balance = portfolio_balance
+            
+        p_drawdown_pct = (self.current_max_balance - portfolio_equity) / self.current_max_balance * 100
+        if p_drawdown_pct >= p_cfg.get("max_drawdown_halt_pct", 12.0):
+            return False, f"PORTFOLIO_HALT: Max Drawdown ({p_drawdown_pct:.2f}%)"
+
+        # 2. Global Daily Loss
+        if self.day_start_balance:
+            p_daily_loss_pct = (self.day_start_balance - portfolio_equity) / self.day_start_balance * 100
+            if p_daily_loss_pct >= p_cfg.get("max_daily_loss_pct", 6.0):
+                return False, f"PORTFOLIO_HALT: Daily Loss ({p_daily_loss_pct:.2f}%)"
 
         return True, "OK"
 

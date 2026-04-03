@@ -180,6 +180,16 @@ class StrategyOrchestrator:
         current_balance = acc.get("balance", 0.0)
         current_equity = acc.get("equity", 0.0)
 
+        # 2.1 Global Portfolio Circuit Breaker
+        # Use first runtime's risk manager as a proxy for global state if not dedicated manager exists
+        # In multi-strategy, they share the same account stats.
+        if self.runtimes:
+            allowed, rs = self.runtimes[0].risk_manager.check_portfolio_risk(current_equity, current_balance)
+            if not allowed:
+                if not self.research_mode:
+                    logger.critical(f"PORTFOLIO HALTED: {rs}")
+                    return executed_signals
+
         # 3. Per-strategy signal generation and execution
         for runtime in self.runtimes:
             if not runtime.enabled:

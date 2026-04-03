@@ -175,10 +175,27 @@ class MultiStrategyBacktestEngine:
         )
 
         # ── Main simulation loop ──────────────────────────────────
+        portfolio_halted_today = False
+        
         for i in range(50, len(m5_times)):
             pbar.update(1)
             t = m5_times[i]
             candle_dt = datetime.fromtimestamp(t, tz=timezone.utc)
+
+            # Daily boundary & reset
+            is_new_day = False
+            for st in states:
+                if st.last_date != candle_dt.date():
+                    st.risk_manager.record_daily_close(st.balance)
+                    st.risk_manager.reset_daily_stats(st.balance)
+                    st.daily_trades = 0
+                    st.consecutive_losses = 0
+                    st.last_date = candle_dt.date()
+                    st.strategy.reset_daily_stats()
+                    is_new_day = True
+            
+            if is_new_day:
+                portfolio_halted_today = False
 
             from core.strategy_engine import StrategyEngine
             session = StrategyEngine.get_session_from_hour(None, candle_dt.hour, self.utc_offset)
@@ -190,17 +207,24 @@ class MultiStrategyBacktestEngine:
                 is_enabled = self.config.get("session_config", {}).get(session, {}).get("enabled", True)
             spread = self.config.get("backtest", {}).get("session_spreads", {}).get(session, 1.5) * point
 
+            # Global Portfolio Circuit Breaker (Account Level)
+            if states:
+                if portfolio_halted_today:
+                    # Daily pause - skip taking new trades, but allow managing open ones
+                    pass 
+                else:
+                    allowed, rs = states[0].risk_manager.check_portfolio_risk(states[0].balance, states[0].balance)
+                    if not allowed:
+                        if "Daily Loss" in rs:
+                            portfolio_halted_today = True
+                            pbar.set_postfix({"SOFT_HALT": rs})
+                        else:
+                            # Hard stop for Max Drawdown
+                            pbar.set_postfix({"HARD_HALT": rs})
+                            break
+
             # Process each strategy independently
             for st in states:
-                # Daily boundary
-                if st.last_date != candle_dt.date():
-                    st.risk_manager.record_daily_close(st.balance)
-                    st.risk_manager.reset_daily_stats(st.balance)
-                    st.daily_trades = 0
-                    st.consecutive_losses = 0
-                    st.last_date = candle_dt.date()
-                    st.strategy.reset_daily_stats()
-
                 # 1. Handle pending signals (Anti-Lookahead)
                 if st.pending_signal and not st.open_trade:
                     entry_price = m5_opens[i] + (spread if st.pending_signal.direction == "BUY" else -spread)
@@ -241,7 +265,7 @@ class MultiStrategyBacktestEngine:
                         st.open_trade = None
 
                 # 3. Generate new signals (for entry at NEXT candle)
-                if not st.open_trade and not st.pending_signal and is_enabled:
+                if not st.open_trade and not st.pending_signal and is_enabled and not portfolio_halted_today:
                     pre_ctx = pre_ctx_map.get(st.strategy_id)
                     m5_meta = pre_ctx.get("m5", []) if pre_ctx else []
                     meta_i = m5_meta[i] if i < len(m5_meta) else {}
@@ -462,6 +486,7 @@ class MultiStrategyBacktestEngine:
                 "exit":          round(exit_p, 5),
                 "lot":           trade.lot,
                 "pnl":           total_pnl,
+                "balance":       round(st.balance, 2),
                 "close_pnl":     round(pnl, 2),
                 "partial_pnl":   round(trade.partial_pnl, 2),
                 "commission":    round(commission, 2),
