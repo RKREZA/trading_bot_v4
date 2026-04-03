@@ -45,10 +45,7 @@ from core.strategy_engine import StrategyEngine, TradeSignal
 from core.ai_advisor import AIAdvisor
 from core.risk_manager import RiskManager
 from core.notifications import NotificationManager
-from core.regime import MarketRegime
 from core.state_manager import SecureStateManager
-from core.execution_pipeline import ExecutionPipeline
-from core.trailing_stop import TrailingStopManager
 from core.strategy_orchestrator import StrategyOrchestrator
 from core.strategy_runtime import StrategyRuntime
 from core.news_filter import NewsFilter
@@ -82,13 +79,11 @@ class TradingBot:
         logging.getLogger("trading_bot").addHandler(bridged_handler)
 
         self.ai_advisor = AIAdvisor(self.config, self.analysis_logger, broker_clock=self.broker_clock)
-        self.strategy = StrategyEngine(self.config, self.analysis_logger)
         self.dashboard = Dashboard(self.config, self.analysis_logger, broker_clock=self.broker_clock)
         self.connection = MT5Connection()
         self.connection.config = self.config
         self.position_manager = PositionManager(self.connection)
         self.data_fetcher = DataFetcher()
-        self.risk_manager = RiskManager(self.config, broker_clock=self.broker_clock)
         self.notification_manager = NotificationManager(self.config)
         self.state_manager = SecureStateManager()
         self.news_filter = NewsFilter(broker_clock=self.broker_clock)
@@ -101,7 +96,6 @@ class TradingBot:
         self.last_reset_day = None  # Will be set after first broker_clock sync
         self.max_drawdown_reached = 0.0
         self.last_logged_session: Optional[str] = None
-        self.position_meta = {}
         self.notified_deals = set()
         self.state_file = "bot_state.json"
         self._start_time = time.time()  # For health endpoint uptime
@@ -109,69 +103,36 @@ class TradingBot:
         self.execution_queue = queue.Queue()
         self._shutdown_event = threading.Event()
 
-        # ── Multi-Strategy Framework ─────────────────────
         self.strategy_runtimes: List[StrategyRuntime] = []
         self.orchestrator: Optional[StrategyOrchestrator] = None
         self._build_strategy_runtimes()
 
-        # Legacy ExecutionPipeline (kept for --legacy mode)
-        self.execution_pipeline = ExecutionPipeline(
-            config=self.config,
-            connection=self.connection,
-            position_manager=self.position_manager,
-            strategy=self.strategy,
-            ai_advisor=self.ai_advisor,
-            risk_manager=self.risk_manager,
-            notification_manager=self.notification_manager,
-            position_meta=self.position_meta,
-            state_lock=self.state_lock,
-            broker_clock=self.broker_clock
-        )
-        self.trailing_stop_manager = TrailingStopManager(
-            config=self.config,
-            connection=self.connection,
-            position_meta=self.position_meta,
-            state_lock=self.state_lock
-        )
-
         self._load_state()
 
     def _build_strategy_runtimes(self):
-        """Build StrategyRuntime instances from config."""
-        strategies_cfg = self.config.get("strategies", [])
-        initial_balance = self.config.get("backtest", {}).get("initial_balance", 1000.0)
+        # Instantiate global shared RiskManager
+        self.risk_manager = RiskManager(self.config, broker_clock=self.broker_clock)
+        self.risk_manager.silent = True
 
-        if not strategies_cfg:
-            # Auto-generate from legacy config
-            strategy_type = self.config.get("strategy_type", "SNIPER")
-            sid = f"{strategy_type.lower()}_v1"
-            try:
-                strat = create_strategy(sid, strategy_type, self.config)
-                runtime = StrategyRuntime(strat, self.config, initial_balance, broker_clock=self.broker_clock)
-                self.strategy_runtimes.append(runtime)
-                logger.info("Auto-created strategy runtime: %s", sid)
-            except ValueError as e:
-                logger.warning("Could not auto-create strategy: %s", e)
-            return
+        strategies_config = self.config.get("strategies", [])
+        for strat_cfg in strategies_config:
+            sid = strat_cfg.get("id")
+            if sid == "sniper_v1":
+                from strategies.sniper_strategy import SniperStrategy
+                strategy = SniperStrategy(self.config, self.analysis_logger)
+            elif sid == "smc_v1":
+                from strategies.smc_strategy import SMCStrategy
+                strategy = SMCStrategy(self.config, self.analysis_logger)
+            else:
+                continue
 
-        for s_cfg in strategies_cfg:
-            sid = s_cfg["id"]
-            stype = s_cfg["type"]
-            enabled = s_cfg.get("enabled", True)
-
-            # Merge global config with strategy-specific overrides
-            merged = dict(self.config)
-            merged.update(s_cfg)
-
-            try:
-                strat = create_strategy(sid, stype, merged)
-                if not enabled:
-                    strat.enabled = False
-                runtime = StrategyRuntime(strat, self.config, initial_balance, broker_clock=self.broker_clock)
-                self.strategy_runtimes.append(runtime)
-                logger.info("Strategy runtime created: %s (%s) enabled=%s", sid, stype, enabled)
-            except ValueError as e:
-                logger.error("Failed to create strategy '%s': %s", sid, e)
+            runtime = StrategyRuntime(
+                strategy=strategy,
+                global_config=self.config,
+                broker_clock=self.broker_clock,
+                risk_manager=self.risk_manager
+            )
+            self.strategy_runtimes.append(runtime)
 
         # Build orchestrator
         if self.strategy_runtimes:
@@ -206,7 +167,6 @@ class TradingBot:
     def _save_state(self):
         with self.state_lock:
             state = {
-                "position_meta": self.position_meta,
                 "notified_deals": list(self.notified_deals),
                 "daily_stats": {
                     "pnl": self.daily_pnl,
@@ -229,7 +189,6 @@ class TradingBot:
             return
 
         with self.state_lock:
-            self.position_meta = {int(k): v for k, v in state.get("position_meta", {}).items()}
             self.notified_deals = set(state.get("notified_deals", []))
             stats = state.get("daily_stats", {})
             self.daily_pnl = stats.get("pnl", 0.0)
@@ -245,7 +204,7 @@ class TradingBot:
             self.orchestrator.load_states(state["strategy_states"])
 
     def _reconcile_positions(self) -> None:
-        if mt5 is None:
+        if mt5 is None or not self.orchestrator:
             return
         try:
             magic = int(self.config.get("magic_number", 234000))
@@ -253,24 +212,10 @@ class TradingBot:
                 active = mt5.positions_get()
             live_tickets = {p.ticket: p for p in active if p.magic == magic} if active else {}
 
-            # Reconcile legacy position_meta
-            with self.state_lock:
-                for t in list(self.position_meta.keys()):
-                    if t not in live_tickets:
-                        del self.position_meta[t]
-                for t, p in live_tickets.items():
-                    if t not in self.position_meta:
-                        risk = abs(p.price_open - p.sl) if p.sl > 0 else 0
-                        self.position_meta[t] = {
-                            "ticket": t, "best_price": p.price_current,
-                            "partial_closed_count": 0, "risk": risk, "ai_score": 0.5
-                        }
-
-            # Reconcile per-strategy position trackers
-            if self.orchestrator:
-                live_set = set(live_tickets.keys())
-                for runtime in self.strategy_runtimes:
-                    runtime.positions.reconcile(live_set)
+            # Delegate strictly to orchestrator runtimes
+            live_set = set(live_tickets.keys())
+            for runtime in self.strategy_runtimes:
+                runtime.positions.reconcile(live_set)
 
             self._save_state()
         except Exception as e:
@@ -319,82 +264,6 @@ class TradingBot:
                 if self.orchestrator:
                     self.orchestrator.reset_daily(balance)
             self._save_state()
-
-    def _detect_closed_trades(self, symbol: str):
-        """Detect closed trades — routes to orchestrator for strategy attribution."""
-        if self.orchestrator:
-            self.orchestrator.detect_closed_trades(symbol)
-            # Aggregate stats for dashboard
-            total_pnl = 0.0
-            total_trades = 0
-            total_wins = 0
-            total_losses = 0
-            for rt in self.strategy_runtimes:
-                summary = rt.performance.get_summary()
-                total_pnl += summary.get("daily_pnl", 0)
-                total_trades += summary.get("daily_trades", 0)
-                total_wins += rt.performance.win_count
-                total_losses += rt.performance.loss_count
-            self.daily_pnl = total_pnl
-            self.daily_trades = total_trades
-            self.win_count = total_wins
-            self.loss_count = total_losses
-            return
-
-        # Legacy fallback
-        self._detect_closed_trades_legacy(symbol)
-
-    def _detect_closed_trades_legacy(self, symbol: str):
-        """Legacy closed-trade detection without strategy attribution."""
-        if mt5 is None:
-            return
-        try:
-            magic = int(self.config.get("magic_number", 234000))
-            with MT5Connection.MT5_LOCK:
-                active = mt5.positions_get()
-            live_tickets = {p.ticket for p in active if p.magic == magic} if active else set()
-
-            with self.state_lock:
-                closed_tickets = [t for t in self.position_meta if t not in live_tickets]
-
-            for ticket in closed_tickets:
-                try:
-                    with MT5Connection.MT5_LOCK:
-                        deals = mt5.history_deals_get(position=ticket)
-                    if deals:
-                        total_pnl = sum(d.profit + d.commission + d.swap for d in deals)
-                        with self.state_lock:
-                            self.daily_pnl += total_pnl
-                            self.daily_trades += 1
-                            if total_pnl >= 0:
-                                self.win_count += 1
-                            else:
-                                self.loss_count += 1
-                            del self.position_meta[ticket]
-                        self.notification_manager.notify_trade_close(
-                            symbol=symbol, direction="BUY",
-                            exit_price=0, pnl=total_pnl,
-                            result="WIN" if total_pnl >= 0 else "LOSS"
-                        )
-                        logger.info("Trade closed: ticket=%s pnl=$%.2f", ticket, total_pnl)
-                except Exception as e:
-                    logger.error("Error processing closed ticket %s: %s", ticket, e)
-                    with self.state_lock:
-                        if ticket in self.position_meta:
-                            del self.position_meta[ticket]
-
-            if closed_tickets:
-                self._save_state()
-        except Exception as e:
-            logger.error("Trade close detection failed: %s", e)
-
-    def _manage_trailing_stops(self, symbol: str, current_bid: float,
-                                current_ask: float, atr: float, last_candle: dict) -> None:
-        """Route trailing stop management to orchestrator or legacy manager."""
-        if self.orchestrator:
-            self.orchestrator.manage_trailing_stops(symbol, current_bid, current_ask, atr, last_candle)
-        else:
-            self.trailing_stop_manager.manage_positions(symbol, current_bid, current_ask, atr, last_candle)
 
     def _startup_checks(self) -> bool:
         checks = []
@@ -496,7 +365,7 @@ class TradingBot:
         try:
             while not self._shutdown_event.is_set():
                 try:
-                    start_cycle = time.time()
+                    start_cycle = self.broker_clock.timestamp()
 
                     if not self.connection.ensure_connected():
                         logger.warning("MT5 connection lost. Attempting reconnect...")
@@ -537,7 +406,8 @@ class TradingBot:
                     self.dashboard.positions = self.connection.get_positions(symbol)
 
                     # Always detect closed trades (even during quiet periods)
-                    self._detect_closed_trades(symbol)
+                    if self.orchestrator:
+                        self.orchestrator.detect_closed_trades(symbol)
 
                     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
                     # PHASE 2: Market open check — idle if closed
@@ -550,7 +420,7 @@ class TradingBot:
                         self.dashboard.fetch_status = "[dim]Market closed — waiting...[/]"
                         self.dashboard.fetch_ms = 0
                         self.dashboard.update()
-                        self._shutdown_event.wait(30.0)  # Slow poll when market closed
+                        self._shutdown_event.wait(5.0)  # Faster poll to catch exactly on open
                         continue
 
                     # Market is open — clear any stale status
@@ -568,14 +438,14 @@ class TradingBot:
 
                     # Trailing Stops (per-strategy via orchestrator)
                     if tick and len(m5_candles) > 30:
-                        atr = self.strategy._calculate_atr(m5_candles, 14)
-                        self._manage_trailing_stops(symbol, tick.bid, tick.ask, atr, m5_candles[-1])
                         if self.orchestrator:
+                            atr = self.orchestrator._preprocessing_engine._calculate_atr(m5_candles, 14)
+                            self.orchestrator.manage_trailing_stops(symbol, tick.bid, tick.ask, atr, m5_candles[-1])
                             self.orchestrator.manage_partials(symbol, tick.bid, tick.ask)
 
                     if len(m5_candles) > 30:
                         current_price = m5_candles.close[-1]
-                        session = self.strategy.get_session_from_hour(
+                        session = self.orchestrator._preprocessing_engine.get_session_from_hour(
                             self.broker_clock.hour()
                         )
                         self.dashboard.session = session
@@ -587,7 +457,7 @@ class TradingBot:
                         self.dashboard.news_reason = news_reason
 
                         if blocked:
-                            self.dashboard.fetch_ms = int((time.time() - start_cycle) * 1000)
+                            self.dashboard.fetch_ms = int((self.broker_clock.timestamp() - start_cycle) * 1000)
                             self.dashboard.update()
                             self._shutdown_event.wait(5.0)
                             continue
@@ -600,18 +470,13 @@ class TradingBot:
                             )
                             analysis = self.orchestrator.last_analysis
                         else:
-                            # Legacy fallback
-                            self.execution_pipeline.execute_cycle(
-                                symbol, h1_candles, m15_candles, m5_candles,
-                                d1_candles, current_price, session
-                            )
-                            analysis = self.execution_pipeline.last_analysis
+                            analysis = {}
 
                         self.dashboard.h4_trend = analysis.get("trend", "NEUTRAL")
                         self.dashboard.m30_structure = analysis.get("regime", "NEUTRAL")
                         self.dashboard.analysis_context = analysis
 
-                    self.dashboard.fetch_ms = int((time.time() - start_cycle) * 1000)
+                    self.dashboard.fetch_ms = int((self.broker_clock.timestamp() - start_cycle) * 1000)
                     self.dashboard.update()
 
                 except Exception as cycle_err:
@@ -649,7 +514,8 @@ class TradingBot:
                 m5 = self.data_fetcher.fetch_candles(symbol, "M5", count)
                 d1 = self.data_fetcher.fetch_candles(symbol, "D1", count)
 
-            wfo = WalkForwardValidator(self.config, self.strategy)
+            engine = StrategyEngine(self.config, self.analysis_logger)
+            wfo = WalkForwardValidator(self.config, engine)
             results = wfo.run_validation(symbol, h1, m15, m5, d1, mode=mode)
 
             print("\n" + "=" * 40)

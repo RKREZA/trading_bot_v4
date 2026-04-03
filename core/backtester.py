@@ -101,7 +101,7 @@ class MultiStrategyBacktestEngine:
 
     def run(self, symbol: str, htf_candles: Any, m15_candles: Any,
             m5_candles: Any, d1_candles: Any, quiet: bool = False,
-            monte_carlo: bool = False) -> Dict[str, dict]:
+            monte_carlo: bool = False, data_fetcher: Any = None) -> Dict[str, dict]:
         """
         Execute multi-strategy backtest simulation.
 
@@ -222,7 +222,7 @@ class MultiStrategyBacktestEngine:
                 if st.open_trade:
                     closed, trade_record = self._manage_open_trade(
                         st.open_trade, i, m5_highs, m5_lows, m5_opens,
-                        spread, candle_dt, m5_atr_series, st
+                        spread, candle_dt, m5_atr_series, st, data_fetcher, symbol, t
                     )
                     if closed and trade_record:
                         st.trades.append(trade_record)
@@ -294,7 +294,8 @@ class MultiStrategyBacktestEngine:
     def _manage_open_trade(
         self, trade: _OpenTrade, i: int,
         m5_highs, m5_lows, m5_opens, spread: float,
-        candle_dt: datetime, m5_atr_series, st: _StrategyBacktestState
+        candle_dt: datetime, m5_atr_series, st: _StrategyBacktestState,
+        data_fetcher: Any = None, symbol: str = "", t: int = 0
     ) -> Tuple[bool, Optional[dict]]:
         """
         Bias-corrected SL/TP/Trailing logic for a single open trade.
@@ -320,7 +321,25 @@ class MultiStrategyBacktestEngine:
             sl_hit = bid_l <= trade.sl
             tp_hit = use_fixed_tp and bid_h >= trade.tp
 
-            # [1] Pessimistic intra-candle resolution: SL beats TP
+            # Ultra-fidelity intra-candle chronologic check
+            if sl_hit and tp_hit and data_fetcher:
+                try:
+                    # Fetch M1 data for this specific 5-min block to resolve priority
+                    m1_candles = data_fetcher.fetch_candles_range(symbol, "M1", t, t + 300)
+                    if m1_candles and len(m1_candles.low) > 0:
+                        sl_hit = False
+                        tp_hit = False
+                        for j in range(len(m1_candles.time)):
+                            # Check if price hit TP level before SL level within the M5 bar
+                            if m1_candles.high[j] >= trade.tp:
+                                tp_hit = True
+                                break
+                            if m1_candles.low[j] <= trade.sl:
+                                sl_hit = True
+                                break
+                except Exception as e:
+                    pass # Fallback to pessimistic SL logic
+                    
             if sl_hit:
                 # [2] Gap slippage on SL — exit below the SL level
                 gap = random.uniform(0, atr * self._sl_gap_atr_pct)
@@ -357,6 +376,24 @@ class MultiStrategyBacktestEngine:
         else:  # SELL
             sl_hit = ask_h >= trade.sl
             tp_hit = use_fixed_tp and ask_l <= trade.tp
+
+            # Ultra-fidelity intra-candle chronologic check
+            if sl_hit and tp_hit and data_fetcher:
+                try:
+                    m1_candles = data_fetcher.fetch_candles_range(symbol, "M1", t, t + 300)
+                    if m1_candles and len(m1_candles.high) > 0:
+                        sl_hit = False
+                        tp_hit = False
+                        for j in range(len(m1_candles.time)):
+                            # Check if price hit TP level before SL level within the M5 bar
+                            if m1_candles.low[j] + spread <= trade.tp:
+                                tp_hit = True
+                                break
+                            if m1_candles.high[j] + spread >= trade.sl:
+                                sl_hit = True
+                                break
+                except Exception as e:
+                    pass # Fallback to pessimistic SL logic
 
             if sl_hit:
                 gap    = random.uniform(0, atr * self._sl_gap_atr_pct)

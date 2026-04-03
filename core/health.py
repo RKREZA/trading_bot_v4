@@ -28,12 +28,19 @@ class HealthHandler(BaseHTTPRequestHandler):
                     return default
                 return getattr(self.bot, attr)
 
+            # Calculate total positions from all strategy runtimes
+            orchestrator = getattr(self.bot, 'orchestrator', None)
+            total_positions = 0
+            if orchestrator:
+                for positions in orchestrator.get_all_positions().values():
+                    total_positions += len(positions)
+
             status = {
                 "alive": True,
                 "connected": self.bot.connection.connected if hasattr(self.bot, 'connection') else False,
                 "daily_trades": safe_getattr('daily_trades', 0),
                 "daily_pnl": safe_getattr('daily_pnl', 0.0),
-                "open_positions": len(safe_getattr('position_meta', {})),
+                "open_positions": total_positions,
                 "uptime_seconds": time.time() - safe_getattr('_start_time', time.time()),
             }
             self.send_response(200)

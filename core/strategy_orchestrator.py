@@ -32,8 +32,7 @@ except ImportError:
 
 logger = logging.getLogger("trading_bot.orchestrator")
 
-# Minimum SL distance in price units to prevent undefined-risk trades
-_MIN_SL_DISTANCE_POINTS = 50
+
 
 
 class StrategyOrchestrator:
@@ -241,7 +240,7 @@ class StrategyOrchestrator:
             return None
 
         # Execute the order
-        return self._execute_tagged_order(tagged, runtime, symbol, balance, risk_pct)
+        return self._execute_tagged_order(tagged, runtime, symbol, balance, risk_pct, market_data)
 
     def _execute_tagged_order(
         self,
@@ -250,6 +249,7 @@ class StrategyOrchestrator:
         symbol: str,
         balance: float,
         risk_pct: float,
+        market_data: MarketData,
     ) -> Optional[TaggedSignal]:
         """
         Execute an order on MT5 with strategy attribution tagging.
@@ -260,14 +260,20 @@ class StrategyOrchestrator:
         if not sym_info:
             return None
 
-        # Validate SL distance
+        # Validate SL distance dynamically using pre-calculated ATR from context
         point = sym_info.get("point", 0.01)
         sl_dist = abs(signal.entry_price - signal.stop_loss)
         sl_points = sl_dist / point if point > 0 else 0
-        if sl_points < _MIN_SL_DISTANCE_POINTS:
+        
+        # FIX: Dynamic SL distance based on ATR instead of hard-coded 50 points
+        # We fetch the latest ATR from the pre-processing engine
+        atr = self._preprocessing_engine._calculate_atr(market_data.m5_candles, 14)
+        min_sl_points = (atr * 0.5) / point if point > 0 else 10.0
+
+        if sl_points < min_sl_points:
             logger.warning(
-                "[%s] SL distance too small (%.1f points). Rejected.",
-                runtime.strategy_id, sl_points
+                "[%s] SL too tight (%.1f < %.1f min). Rejected.",
+                runtime.strategy_id, sl_points, min_sl_points
             )
             return None
 
@@ -303,12 +309,13 @@ class StrategyOrchestrator:
         if result:
             ticket_id = result["ticket"]
             # Register position in the owning runtime ONLY
+            now_ts = self._broker_clock.now().timestamp() if self._broker_clock else time.time()
             runtime.on_trade_opened(ticket_id, {
                 "session": signal.session,
                 "best_price": signal.entry_price,
                 "partial_closed_count": 0,
                 "risk": sl_dist,
-                "entry_time": time.time(),
+                "entry_time": now_ts,
                 "trade_id": tagged.trade_id,
                 "direction": signal.direction,
                 "tp1_price": signal.tp1_price,

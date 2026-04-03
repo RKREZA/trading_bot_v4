@@ -77,30 +77,39 @@ class StrategyRuntime:
     """
 
     def __init__(self, strategy: BaseStrategy, global_config: dict, 
-                 initial_balance: float = 1000.0, broker_clock: 'BrokerClock' = None):
+                 initial_balance: float = 1000.0, broker_clock: 'BrokerClock' = None,
+                 risk_manager: 'RiskManager' = None):
         """
         Args:
             strategy: A concrete BaseStrategy implementation
             global_config: Full bot config (for risk defaults, session config, etc.)
             initial_balance: Starting balance for performance tracking
             broker_clock: BrokerClock instance for authoritative time
+            risk_manager: Optional shared RiskManager. If provided, all runtimes
+                          share a single instance to prevent double-counting of
+                          daily losses across strategies.
         """
         self.strategy = strategy
         self.strategy_id = strategy.strategy_id
 
-        # Build strategy-specific risk config by merging:
-        # global risk defaults <- strategy-specific overrides
-        risk_cfg = dict(global_config.get("risk", {}))
-        strategy_risk = strategy.config.get("risk", {})
-        risk_cfg.update(strategy_risk)
+        if risk_manager is not None:
+            # Use the shared global RiskManager (production mode)
+            self.risk_manager = risk_manager
+        else:
+            # Build strategy-specific risk config by merging:
+            # global risk defaults <- strategy-specific overrides
+            risk_cfg = dict(global_config.get("risk", {}))
+            strategy_risk = strategy.config.get("risk", {})
+            risk_cfg.update(strategy_risk)
 
-        # Create a merged config for the risk manager
-        risk_config = dict(global_config)
-        risk_config["risk"] = risk_cfg
-        
-        # Dedicated components — zero shared state
-        self.risk_manager = RiskManager(risk_config, broker_clock=broker_clock)
-        self.risk_manager.silent = True  # Controlled logging via runtime
+            # Create a merged config for the risk manager
+            risk_config = dict(global_config)
+            risk_config["risk"] = risk_cfg
+            
+            # Dedicated components — isolated risk manager (backtest mode)
+            self.risk_manager = RiskManager(risk_config, broker_clock=broker_clock)
+            self.risk_manager.silent = True
+
         self.performance = PerformanceTracker(self.strategy_id, initial_balance)
         self.positions = PositionTracker(self.strategy_id)
         self.state = StrategyState()
