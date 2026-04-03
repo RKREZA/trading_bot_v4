@@ -156,7 +156,7 @@ class BacktestCLI:
                 cfg = {**self.config, "strategy_type": legacy_type}
                 engine = BacktestEngine(cfg, StrategyEngine(cfg))
                 rprint(f"[yellow]Simulating {len(m5)} candles using {legacy_type}...[/]")
-                results = engine.run(symbol, h1, m15, m5, d1, quiet=False)
+                results = engine.run(symbol, h1, m15, m5, d1, quiet=False, data_fetcher=self.data_fetcher)
                 self._display_single_result(results)
                 return
 
@@ -182,7 +182,7 @@ class BacktestCLI:
             engine = MultiStrategyBacktestEngine(self.config, strategies)
             rprint(f"[yellow]Simulating {len(m5)} candles across {len(strategies)} strategies...[/]")
             results = engine.run(symbol, h1, m15, m5, d1, quiet=False,
-                                 monte_carlo=monte_carlo)
+                                 data_fetcher=self.data_fetcher, monte_carlo=monte_carlo)
 
             # Walk-Forward validation
             if walk_forward:

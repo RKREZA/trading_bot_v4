@@ -111,7 +111,7 @@ class StrategyEngine:
         if self.last_loss_date != timestamp.date():
             self.reset_daily_stats(); self.last_loss_date = timestamp.date()
 
-        gate_status, gate_reason = self._check_gatekeepers(session, current_price, circuit_breaker_safe)
+        gate_status, gate_reason = self._check_gatekeepers(symbol, session, circuit_breaker_safe)
         if not self.research_mode and not gate_status: return None, "NEUTRAL", gate_reason
 
         if self.strategy_type == "SMC":
@@ -234,9 +234,22 @@ class StrategyEngine:
             signal.tp1_price = signal.entry_price - (risk * 1.0)
         return signal
 
-    def _check_gatekeepers(self, session: str, price: float, cb_safe: bool) -> Tuple[bool, str]:
+    def _check_gatekeepers(self, symbol: str, session: str, cb_safe: bool) -> Tuple[bool, str]:
         if not cb_safe: return False, "CIRCUIT_BREAKER"
         if not session or session not in _DEFAULT_SESSIONS: return False, "OFF_SESSION"
+        
+        # 1. Check symbol-specific override
+        sym_sessions = self.config.get("symbols_config", {}).get(symbol, {}).get("sessions", {})
+        if session in sym_sessions:
+            if not sym_sessions[session].get("enabled", True):
+                return False, f"SESSION_DISABLED_{symbol}"
+        
+        # 2. Check global session config
+        global_sessions = self.config.get("session_config", {})
+        if session in global_sessions:
+            if not global_sessions[session].get("enabled", True):
+                return False, "SESSION_DISABLED_GLOBAL"
+
         return True, ""
 
     def reset_daily_stats(self):

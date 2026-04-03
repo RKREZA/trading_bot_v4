@@ -158,10 +158,10 @@ class StrategyRuntime:
         )
 
     def calculate_risk_pct(self, balance: float, equity: float = None, 
-                           session: str = None) -> float:
+                           symbol: str = None, session: str = None) -> float:
         """Calculate scaled risk percentage for this strategy."""
         return self.risk_manager.calculate_scaled_risk(
-            balance, current_equity=equity, session=session
+            balance, current_equity=equity, symbol=symbol, session=session
         )
 
     def on_trade_opened(self, ticket: int, metadata: dict) -> None:

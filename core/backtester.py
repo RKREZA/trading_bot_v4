@@ -182,7 +182,12 @@ class MultiStrategyBacktestEngine:
 
             from core.strategy_engine import StrategyEngine
             session = StrategyEngine.get_session_from_hour(None, candle_dt.hour, self.utc_offset)
-            is_enabled = self.config.get("session_config", {}).get(session, {}).get("enabled", True)
+            # Session enablement: Symbol-specific override takes precedence
+            sym_sessions = self.config.get("symbols_config", {}).get(symbol, {}).get("sessions", {})
+            if session in sym_sessions:
+                is_enabled = sym_sessions[session].get("enabled", True)
+            else:
+                is_enabled = self.config.get("session_config", {}).get(session, {}).get("enabled", True)
             spread = self.config.get("backtest", {}).get("session_spreads", {}).get(session, 1.5) * point
 
             # Process each strategy independently
@@ -203,7 +208,7 @@ class MultiStrategyBacktestEngine:
                         st.balance, st.balance, st.daily_trades, 0, st.consecutive_losses
                     )
                     if allowed:
-                        risk_pct = st.risk_manager.calculate_scaled_risk(st.balance, session=session)
+                        risk_pct = st.risk_manager.calculate_scaled_risk(st.balance, symbol=symbol, session=session)
                         risk_val = st.balance * (risk_pct / 100.0)
                         sl_dist = abs(entry_price - st.pending_signal.stop_loss)
                         lot = LotCalculator.calculate(
@@ -476,7 +481,8 @@ class MultiStrategyBacktestEngine:
                 trade.direction == "BUY",
                 trade.entry_price, trade.sl, trade.best_price,
                 atr, risk, self.config,
-                {"low": m5_lows[i - 1], "high": m5_highs[i - 1]}
+                {"low": m5_lows[i - 1], "high": m5_highs[i - 1]},
+                symbol=symbol, session=trade.session
             )
             if new_sl:
                 trade.sl = new_sl
@@ -614,14 +620,19 @@ class BacktestEngine:
                 last_date = candle_dt.date()
 
             session = self.strategy.get_session_from_hour(candle_dt.hour, utc_offset)
-            is_enabled = self.config.get("session_config", {}).get(session, {}).get("enabled", True)
+            # Session enablement: Symbol-specific override takes precedence
+            sym_sessions = self.config.get("symbols_config", {}).get(symbol, {}).get("sessions", {})
+            if session in sym_sessions:
+                is_enabled = sym_sessions[session].get("enabled", True)
+            else:
+                is_enabled = self.config.get("session_config", {}).get(session, {}).get("enabled", True)
             spread = self.config.get("backtest", {}).get("session_spreads", {}).get(session, 1.5) * point
 
             if pending_signal and not open_trade:
                 entry_price = m5_opens[i] + (spread if pending_signal.direction == "BUY" else -spread)
                 allowed, _ = risk_manager.check_circuit_breakers(self.balance, self.balance, daily_trades, 0, consecutive_losses)
                 if allowed:
-                    risk_pct = risk_manager.calculate_scaled_risk(self.balance, session=session)
+                    risk_pct = risk_manager.calculate_scaled_risk(self.balance, symbol=symbol, session=session)
                     risk_val = self.balance * (risk_pct / 100.0)
                     sl_dist = abs(entry_price - pending_signal.stop_loss)
                     lot = LotCalculator.calculate(risk_val, sl_dist, point, symbol_cfg.get("tick_value", 1.0),
@@ -681,7 +692,8 @@ class BacktestEngine:
                     risk = abs(open_trade.entry_price - open_trade.signal.stop_loss)
                     new_sl = TrailingStopManager.calculate_new_sl(open_trade.direction == "BUY", open_trade.entry_price, open_trade.sl,
                                                                    open_trade.best_price, m5_atr_series[i], risk, self.config,
-                                                                   {"low": m5_lows[i-1], "high": m5_highs[i-1]})
+                                                                   {"low": m5_lows[i-1], "high": m5_highs[i-1]},
+                                                                   symbol=symbol, session=open_trade.session)
                     if new_sl:
                         open_trade.sl = new_sl
 

@@ -188,7 +188,8 @@ class RiskManager:
         
         return max(0.0, kelly)
 
-    def calculate_scaled_risk(self, current_balance: float, current_equity: float = None, session: Optional[str] = None) -> float:
+    def calculate_scaled_risk(self, current_balance: float, current_equity: float = None, 
+                              symbol: Optional[str] = None, session: Optional[str] = None) -> float:
         """
         Main entry point for risk calculation.
         Applies a cascading reduction series:
@@ -235,8 +236,19 @@ class RiskManager:
 
         # 3. Apply Session Multiplier
         if session:
-            session_data = self.session_cfg.get(session, {})
-            multiplier = session_data.get("risk_multiplier", 1.0)
+            multiplier = 1.0
+            # A. Check symbol-specific override
+            if symbol:
+                sym_sessions = self.full_config.get("symbols_config", {}).get(symbol, {}).get("sessions", {})
+                if session in sym_sessions:
+                    multiplier = sym_sessions[session].get("risk_multiplier", 1.0)
+                else:
+                    # B. Fallback to global session config
+                    multiplier = self.session_cfg.get(session, {}).get("risk_multiplier", 1.0)
+            else:
+                # B. Map directly to global session config
+                multiplier = self.session_cfg.get(session, {}).get("risk_multiplier", 1.0)
+            
             risk_pct *= multiplier
             
         # 4. Handle Drawdown Tracking

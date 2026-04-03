@@ -110,7 +110,18 @@ class StrategyOrchestrator:
         """
         executed_signals = []
         
-        # 0. Spread Filter (shared read-only check, not strategy state)
+        # 0. Global & Symbol-specific Session Filter
+        sym_sessions = self.config.get("symbols_config", {}).get(symbol, {}).get("sessions", {})
+        if session in sym_sessions:
+            if not sym_sessions[session].get("enabled", True):
+                return executed_signals  # Symbol override: session disabled
+        
+        global_sessions = self.config.get("session_config", {})
+        if session in global_sessions:
+            if not global_sessions[session].get("enabled", True):
+                return executed_signals  # Global setting: session disabled
+
+        # 1. Spread Filter (shared read-only check, not strategy state)
         if not self._check_spread(symbol):
             return executed_signals
 
@@ -234,7 +245,7 @@ class StrategyOrchestrator:
             return None
 
         # Risk scaling
-        risk_pct = runtime.calculate_risk_pct(balance, equity, session)
+        risk_pct = runtime.calculate_risk_pct(balance, equity, symbol=symbol, session=session)
         if risk_pct <= 0.0:
             logger.warning("[%s] Risk scaling returned 0 — halting", runtime.strategy_id)
             return None
@@ -418,7 +429,7 @@ class StrategyOrchestrator:
             logger.error("Error processing closed ticket %d for %s: %s", ticket, runtime.strategy_id, e)
 
     def manage_trailing_stops(self, symbol: str, bid: float, ask: float, 
-                               atr: float, last_candle: dict) -> None:
+                              atr: float, last_candle: dict, session: str) -> None:
         """Per-strategy trailing stop management."""
         from .trailing_stop import TrailingStopManager
 
@@ -454,7 +465,8 @@ class StrategyOrchestrator:
 
                 new_sl = TrailingStopManager.calculate_new_sl(
                     is_buy, pos.price_open, pos.sl, meta["best_price"],
-                    atr, risk, self.config, last_candle
+                    atr, risk, self.config, last_candle,
+                    symbol=symbol, session=session
                 )
                 if new_sl and new_sl != pos.sl:
                     if (is_buy and new_sl > pos.sl) or (not is_buy and (pos.sl == 0 or new_sl < pos.sl)):

@@ -22,9 +22,10 @@ class TrailingStopManager:
 
     @staticmethod
     def calculate_new_sl(is_buy: bool, entry: float, current_sl: float,
-                         best_price: float, atr: float, risk: float,
-                         config: dict, last_candle: Optional[dict] = None
-                         ) -> Optional[float]:
+                          best_price: float, atr: float, risk: float,
+                          config: dict, last_candle: Optional[dict] = None,
+                          symbol: Optional[str] = None, session: Optional[str] = None
+                          ) -> Optional[float]:
         """
         5-Phase adaptive trailing stop calculation.
 
@@ -42,8 +43,26 @@ class TrailingStopManager:
 
         # ── Phase 1: Wide Chandelier (0 → Phase2 threshold) ──────────────
         p1_threshold = ts.get("phase1_rr_threshold", 1.5)
-        c_mult = ts.get("phase1_wider_mult", 4.0) if rr < p1_threshold \
-                 else ts.get("phase1_tighter_mult", 2.5)
+        
+        # Determine multiplier: Symbol Session -> Common Session -> Global TS
+        c_mult = ts.get("phase1_wider_mult", 4.0) # Default
+        
+        if session:
+            # Check symbol-specific override
+            if symbol:
+                sym_sessions = config.get("symbols_config", {}).get(symbol, {}).get("sessions", {})
+                if session in sym_sessions:
+                    c_mult = sym_sessions[session].get("trailing_atr_mult", c_mult)
+                else:
+                    # Fallback to global session config
+                    c_mult = config.get("session_config", {}).get(session, {}).get("trailing_atr_mult", c_mult)
+            else:
+                # Use global session config directly
+                c_mult = config.get("session_config", {}).get(session, {}).get("trailing_atr_mult", c_mult)
+
+        if rr >= p1_threshold:
+            c_mult = ts.get("phase1_tighter_mult", 2.5)
+            
         chandelier = (best_price - atr * c_mult) if is_buy \
                      else (best_price + atr * c_mult)
 

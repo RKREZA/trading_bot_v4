@@ -440,7 +440,7 @@ class TradingBot:
                     if tick and len(m5_candles) > 30:
                         if self.orchestrator:
                             atr = self.orchestrator._preprocessing_engine._calculate_atr(m5_candles, 14)
-                            self.orchestrator.manage_trailing_stops(symbol, tick.bid, tick.ask, atr, m5_candles[-1])
+                            self.orchestrator.manage_trailing_stops(symbol, tick.bid, tick.ask, atr, m5_candles[-1], session)
                             self.orchestrator.manage_partials(symbol, tick.bid, tick.ask)
 
                     if len(m5_candles) > 30:
