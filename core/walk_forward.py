@@ -1,159 +1,178 @@
-import itertools
-import copy
+"""
+TRADING BOT V3 — Walk-Forward Validation Engine
+================================================
+Separates In-Sample (IS) parameter "evaluation" from Out-of-Sample (OOS)
+performance to detect overfitting.
+
+How it works:
+    1. Split the full date range into IS (70%) + OOS (30%)
+    2. Run the backtest independently on each segment
+    3. Compare IS vs OOS key metrics
+    4. Flag degradation > 40% as a sign of overfitting
+
+Usage:
+    python backtest.py --from 2025-10-01 --to 2026-03-31 --walk-forward
+"""
+
 import logging
-from typing import List, Dict, Tuple, Any
-from core.backtester import BacktestEngine
-from core.strategy_engine import StrategyEngine
-from core.types import CandleArray
+import numpy as np
 from datetime import datetime, timezone
-import pandas as pd
+from typing import List, Dict, Any, Tuple
 
 logger = logging.getLogger("trading_bot.walk_forward")
 
-class WalkForwardValidation:
-    """
-    Implements Walk-Forward Optimization (WFO) to validate strategy robustness.
-    WFO involves optimizing parameters on a training window (In-Sample) 
-    and testing them on a subsequent unseen window (Out-of-Sample).
-    
-    This technique helps detect curve-fitting by ensuring that 'best' 
-    parameters from the past remain profitable in the immediate future.
-    """
-    def __init__(self, config: dict, strategy: StrategyEngine):
-        """
-        Initializes the WFO suite.
-        
-        Args:
-            config (dict): Bot configuration.
-            strategy (StrategyEngine): Base strategy instance.
-        """
-        self.config = config
-        self.strategy = strategy
-        self.last_train_perf = {}
 
-    def run_validation(self, symbol: str, h1: Any, m15: Any, m5: Any, d1: Any, 
-                       train_days: int = 14, test_days: int = 7, mode: str = "anchored") -> List[Dict]:
-        """
-        Executes the walk-forward simulation across historical data.
-        
-        Args:
-            symbol (str): Symbol name.
-            h1, m15, m5, d1 (CandleArray): Multi-timeframe data.
-            train_days (int): Length of the IS optimization window.
-            test_days (int): Length of the OOS validation window.
-            mode (str): 'anchored' (growing train window) or 'rolling' (fixed train window).
-            
-        Returns:
-            List[Dict]: List of results for each walk-forward window.
-        """
-        results = []
-        if not m5: return []
-        
-        # M5 is now the primary time-base for windows
-        m5_list = [{"time": t} for t in m5.time] # for time filtering
-        start_date = datetime.fromtimestamp(m5.time[0], tz=timezone.utc)
-        end_date = datetime.fromtimestamp(m5.time[-1], tz=timezone.utc)
-        
-        current_train_start = start_date
-        param_popularity = {} 
-        
-        while True:
-            current_train_end = current_train_start + pd.DateOffset(days=train_days)
-            current_test_end = current_train_end + pd.DateOffset(days=test_days)
-            
-            if current_test_end > end_date: break
-                
-            logger.info(f"--- WFO WINDOW: Train {current_train_start.date()} -> {current_train_end.date()} | Test {current_train_end.date()} -> {current_test_end.date()} ---")
-            
-            train_data = {
-                "h1": self._filter_arr(h1, current_train_start, current_train_end),
-                "m15": self._filter_arr(m15, current_train_start, current_train_end),
-                "m5": self._filter_arr(m5, current_train_start, current_train_end),
-                "d1": self._filter_arr(d1, current_train_start, current_train_end)
-            }
-            
-            test_data = {
-                "h1": self._filter_arr(h1, current_train_end, current_test_end),
-                "m15": self._filter_arr(m15, current_train_end, current_test_end),
-                "m5": self._filter_arr(m5, current_train_end, current_test_end),
-                "d1": self._filter_arr(d1, current_train_end, current_test_end)
-            }
+class WalkForwardValidator:
+    """
+    Runs IS + OOS split validation on a fixed strategy configuration.
+    Does NOT re-optimize parameters — only evaluates pre-configured strategies.
 
-            if len(train_data["m5"].time) < 100 or len(test_data["m5"].time) < 50:
-                if mode == "rolling": current_train_start += pd.DateOffset(days=test_days)
-                else: train_days += test_days
+    "Walk-Forward" in this context = holdout validation:
+        - The parameters were NOT changed after seeing the OOS data
+        - OOS results are genuinely unseen performance
+    """
+
+    def __init__(self, config: dict, strategies: List[Any],
+                 engine_class: Any, is_pct: float = 0.70):
+        self.config      = config
+        self.strategies  = strategies
+        self.EngineClass = engine_class
+        self.is_pct      = is_pct
+        self.oos_pct     = 1.0 - is_pct
+
+    def run(self, symbol: str, htf: Any, m15: Any, m5: Any, d1: Any,
+            quiet: bool = False) -> Dict:
+        """
+        Execute IS + OOS split validation.
+        Returns dict with 'is', 'oos', 'degradation', 'verdict'.
+        """
+        m5_times = m5.time
+        total    = len(m5_times)
+        split_i  = int(total * self.is_pct)
+        split_ts = float(m5_times[split_i])
+
+        if not quiet:
+            is_end_dt  = datetime.fromtimestamp(float(m5_times[split_i - 1]), tz=timezone.utc)
+            oos_st_dt  = datetime.fromtimestamp(split_ts, tz=timezone.utc)
+            oos_end_dt = datetime.fromtimestamp(float(m5_times[-1]), tz=timezone.utc)
+            print(f"\n{'='*55}")
+            print(f"  WALK-FORWARD VALIDATION")
+            print(f"  In-Sample  (IS):  start → {is_end_dt.date()}  ({split_i} candles, {self.is_pct*100:.0f}%)")
+            print(f"  Out-Sample (OOS): {oos_st_dt.date()} → {oos_end_dt.date()}  ({total - split_i} candles, {self.oos_pct*100:.0f}%)")
+            print(f"{'='*55}")
+
+        # Slice candle arrays at split point
+        htf_is,  htf_oos  = self._slice(htf,  split_ts)
+        m15_is,  m15_oos  = self._slice(m15,  split_ts)
+        m5_is,   m5_oos   = self._slice(m5,   split_ts)
+        d1_is,   d1_oos   = self._slice(d1,   split_ts)
+
+        # IS backtest
+        if not quiet:
+            print(f"\n  Running IN-SAMPLE backtest ({split_i} candles)...")
+        is_engine  = self.EngineClass(self.config, self._clone_strategies())
+        is_results = is_engine.run(symbol, htf_is, m15_is, m5_is, d1_is, quiet=True)
+
+        # OOS backtest — fresh strategy instances (no IS state leakage)
+        if not quiet:
+            print(f"  Running OUT-OF-SAMPLE backtest ({total - split_i} candles)...")
+        oos_engine  = self.EngineClass(self.config, self._clone_strategies())
+        oos_results = oos_engine.run(symbol, htf_oos, m15_oos, m5_oos, d1_oos, quiet=True)
+
+        # Compute degradation
+        key_metrics = ["win_rate", "profit_factor", "net_profit", "max_drawdown_pct", "total_trades"]
+        degradation = {}
+        for sid in is_results:
+            if sid == "portfolio":
                 continue
+            is_m  = is_results.get(sid, {})
+            oos_m = oos_results.get(sid, {})
+            deg   = {}
+            for m in key_metrics:
+                is_val  = float(is_m.get(m, 0) or 0.001)
+                oos_val = float(oos_m.get(m, 0))
+                deg[m]  = round((oos_val - is_val) / max(abs(is_val), 0.001) * 100, 1)
+            degradation[sid] = deg
 
-            # 1. OPTIMIZATION (IS)
-            param_grid = {
-                "swing_lookback": [7, 12, 18],
-                "min_wick_pct": [30.0, 40.0, 50.0],
-                "min_body_pct": [15.0, 25.0],
-                "fixed_rr": [2.0, 3.0, 5.0]
-            }
-            
-            best_params = self._optimize(symbol, train_data, param_grid)
-            
-            # 2. VALIDATION (OOS)
-            test_config = copy.deepcopy(self.config)
-            if "price_action" not in test_config["strategy_defaults"]:
-                test_config["strategy_defaults"]["price_action"] = {}
-            test_config["strategy_defaults"]["price_action"].update(best_params)
-            
-            test_strategy = StrategyEngine(test_config)
-            tester = BacktestEngine(test_config, test_strategy)
-            test_perf = tester.run(symbol, test_data["h1"], test_data["m15"], 
-                                   test_data["m5"], test_data["d1"], quiet=True)
-            
-            # 3. SCORE & RECORD
-            results.append({
-                "window": f"{current_train_end.date()} to {current_test_end.date()}",
-                "best_params": best_params,
-                "is_metrics": self.last_train_perf,
-                "oos_metrics": test_perf,
-                "consistency": 1.0 # placeholder
-            })
-            
-            if mode == "rolling": current_train_start += pd.DateOffset(days=test_days)
-            else: train_days += test_days 
+        verdict = self._verdict(degradation)
 
-        return results
+        if not quiet:
+            self._print_report(is_results, oos_results, degradation, verdict)
 
-    def _filter_arr(self, arr: CandleArray, start: datetime, end: datetime) -> CandleArray:
-        """Slices a CandleArray based on a datetime range."""
-        mask = (arr.time >= start.timestamp()) & (arr.time < end.timestamp())
-        return arr[mask]
+        return {"is": is_results, "oos": oos_results,
+                "degradation": degradation, "verdict": verdict}
 
-    def _optimize(self, symbol, data, grid) -> dict:
-        """
-        Performs a brute-force grid search on the training data.
-        Returns the parameter set that maximized Net Profit within the window.
-        """
-        best_metric = -999999; best_params = {}
-        keys, values = zip(*grid.items())
-        
-        for v in itertools.product(*values):
-            params = dict(zip(keys, v))
-            tmp_config = copy.deepcopy(self.config)
-            if "price_action" not in tmp_config["strategy_defaults"]:
-                tmp_config["strategy_defaults"]["price_action"] = {}
-            tmp_config["strategy_defaults"]["price_action"].update(params)
-            
-            strat = StrategyEngine(tmp_config)
-            tester = BacktestEngine(tmp_config, strat)
-            perf = tester.run(symbol, data["h1"], data["m15"], data["m5"], data["d1"], quiet=True)
-            
-            # FIX #13: Composite score to reduce curve-fitting (was pure net_profit)
-            net = perf.get("net_profit", 0)
-            pf = min(perf.get("profit_factor", 0), 5.0)  # Cap PF to prevent outlier bias
-            dd = perf.get("max_drawdown_pct", 50.0)
-            trades = perf.get("total_trades", 0)
-            # Require minimum 10 trades for statistical relevance
-            if trades < 10:
-                score = -999999
-            else:
-                score = net * min(1.0, pf / 2.0) * (1 - min(dd, 50) / 50)
-            if score > best_metric:
-                best_metric = score; best_params = params; self.last_train_perf = perf
-        
-        return best_params
+    def _slice(self, candles: Any, split_ts: float) -> Tuple[Any, Any]:
+        idx = int(np.searchsorted(candles.time, split_ts, side="left"))
+        return candles[:idx], candles[idx:]
+
+    def _clone_strategies(self) -> List[Any]:
+        from strategies import create_strategy
+        fresh = []
+        for s in self.strategies:
+            cfg  = dict(s.config)
+            stype = type(s).__name__.replace("Strategy", "").upper()
+            # Map class name to registry key used in create_strategy
+            stype_map = {"SNIPER": "SNIPER", "SMC": "SMC"}
+            s2 = create_strategy(s.strategy_id, stype_map.get(stype, stype), cfg)
+            fresh.append(s2)
+        return fresh
+
+    def _verdict(self, degradation: Dict) -> str:
+        """ROBUST / SUSPECT / OVERFITTED based on worst metric degradation."""
+        penalty_scores = []
+        for sid, deg in degradation.items():
+            for m, d in deg.items():
+                if m == "max_drawdown_pct":
+                    if d > 0: penalty_scores.append(d)  # Drawdown INCREASE is bad
+                elif m == "total_trades":
+                    pass
+                else:
+                    if d < 0: penalty_scores.append(-d) # Only DECREASE is bad for profit/winrate
+
+        if not penalty_scores:
+            return "ROBUST"
+        worst = max(penalty_scores)
+        if worst > 60: return "OVERFITTED"
+        if worst > 30: return "SUSPECT"
+        return "ROBUST"
+
+    def _print_report(self, is_r, oos_r, degradation, verdict) -> None:
+        icons = {"ROBUST": "✅", "SUSPECT": "⚠️", "OVERFITTED": "❌"}
+        icon  = icons.get(verdict, "?")
+        print(f"\n{'='*55}")
+        print(f"  WALK-FORWARD RESULTS — {icon} {verdict}")
+        print(f"{'='*55}")
+
+        labels = {
+            "win_rate":         "Win Rate %",
+            "profit_factor":    "Profit Factor",
+            "net_profit":       "Net Profit $",
+            "max_drawdown_pct": "Max Drawdown %",
+            "total_trades":     "Total Trades",
+        }
+
+        for sid in degradation:
+            print(f"\n  Strategy: {sid}")
+            print(f"  {'Metric':<20} {'IS':>10} {'OOS':>10} {'Δ':>10}")
+            print(f"  {'-'*52}")
+            is_m  = is_r.get(sid, {})
+            oos_m = oos_r.get(sid, {})
+            deg   = degradation.get(sid, {})
+
+            for m, label in labels.items():
+                is_v  = round(float(is_m.get(m, 0)), 2)
+                oos_v = round(float(oos_m.get(m, 0)), 2)
+                chg   = deg.get(m, 0)
+                warn  = " ⚠️" if abs(chg) > 30 else ""
+                warn  = " ❌" if abs(chg) > 60 else warn
+                print(f"  {label:<20} {str(is_v):>10} {str(oos_v):>10}   {chg:>+6.1f}%{warn}")
+
+        print(f"\n  Verdict: {icon} {verdict}")
+        descriptions = {
+            "ROBUST":     "IS/OOS metrics align — genuine edge detected.",
+            "SUSPECT":    "Moderate OOS degradation — check session sensitivity.",
+            "OVERFITTED": "Heavy OOS degradation — parameters overfit to history.",
+        }
+        print(f"  {descriptions.get(verdict, '')}")
+        print(f"{'='*55}")

@@ -9,6 +9,14 @@ from .ai_advisor import AIAdvisor
 from .validation import ValidationSuite
 from .logger import setup_logging
 
+# Multi-Strategy Framework
+from .base_strategy import BaseStrategy, MarketData, TaggedSignal
+from .strategy_runtime import StrategyRuntime
+from .strategy_orchestrator import StrategyOrchestrator
+from .position_tracker import PositionTracker
+from .performance_tracker import PerformanceTracker
+from .order_tagger import OrderTagger
+
 __all__ = [
     "StrategyEngine",
     "TradeSignal",
@@ -20,4 +28,13 @@ __all__ = [
     "AIAdvisor",
     "ValidationSuite",
     "setup_logging",
+    # Multi-Strategy Framework
+    "BaseStrategy",
+    "MarketData",
+    "TaggedSignal",
+    "StrategyRuntime",
+    "StrategyOrchestrator",
+    "PositionTracker",
+    "PerformanceTracker",
+    "OrderTagger",
 ]

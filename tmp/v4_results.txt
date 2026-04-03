@@ -1,0 +1,47 @@
+﻿Strategy:          sniper_v1
+Net Profit:        $31.0
+Final Balance:     $1031.0
+Profit Factor:     5.11
+Win Rate:          75.0%
+Total Trades:      4
+Max Drawdown:      0.73%
+Sharpe Ratio:      0.0
+Expectancy:        $7.75
+Avg Win:           $12.85
+Avg Loss:          $-7.55
+Best Trade:        $34.56
+Worst Trade:       $-7.55
+Max Consec Losses: 1
+Commission paid:   $0.28
+Swap paid:         $0.0
+Session Breakdown:
+  LONDON       Trades:  2  WR:100.0%  PnL:$36.35
+  LONDON/NY    Trades:  2  WR:50.0%  PnL:$-5.35
+
+Strategy:          smc_v1
+Net Profit:        $343.99
+Final Balance:     $1343.99
+Profit Factor:     1.17
+Win Rate:          42.64%
+Total Trades:      197
+Max Drawdown:      29.79%
+Sharpe Ratio:      1.51
+Expectancy:        $1.75
+Avg Win:           $27.59
+Avg Loss:          $-17.47
+Best Trade:        $173.62
+Worst Trade:       $-198.05
+Max Consec Losses: 6
+Commission paid:   $19.95
+Swap paid:         $-0.18
+Session Breakdown:
+  TOKYO        Trades: 52  WR:46.2%  PnL:$80.77
+  LONDON       Trades: 37  WR:35.1%  PnL:$59.62
+  LONDON/NY    Trades: 52  WR:40.4%  PnL:$-315.13
+  NEW_YORK     Trades: 56  WR:46.4%  PnL:$518.73
+
+COMBINED PORTFOLIO
+Net Profit:        $374.99
+Total Trades:      201
+Win Rate:          43.28%
+Max Drawdown:      29.07%

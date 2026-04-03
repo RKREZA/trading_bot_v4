@@ -1,0 +1,30 @@
+﻿M5 candles: 34867
+Preprocessed rows: 34867
+
+--- Backtest Signal Walk ---
+  total_candles: 34817
+  session_skip: 0
+  bias_neutral_tokyo: 0
+  cooldown_block: 0
+  consec_loss_block: 0
+  session_traded_block: 0
+  t1_hit: 0
+  t2_hit: 0
+  t3_hit: 0
+  no_signal: 32690
+  conf_fail: 0
+  final_signal: 2127
+
+--- Active-Session Meta Analysis ---
+  Total active-session candles: 34817
+  Bias BEARISH: 5577 (16.0%)
+  Bias BULLISH: 7250 (20.8%)
+  Bias NEUTRAL: 21990 (63.2%)
+  rej_bull (active sessions): 2286
+  vol_ok (1.15x, active sessions): 9463
+  T2 BUY estimate (BULLISH*rej_bull*vol_ok): ~4504553
+
+--- Tick Volume Stats ---
+  Volume == 0: 0
+  Volume mean: 1783.9
+  Volume > vol_sma*1.15 (sample): 9463/34817

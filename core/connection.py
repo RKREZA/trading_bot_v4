@@ -289,7 +289,7 @@ class MT5Connection:
         else:
             return mt5.ORDER_FILLING_RETURN
 
-    def place_order(self, symbol: str, signal, lot_size: float, max_retries: int = 3, delay: float = 1.0) -> Optional[dict]:
+    def place_order(self, symbol: str, signal, lot_size: float, max_retries: int = 3, delay: float = 1.0, comment: str = "Bot V3") -> Optional[dict]:
         """
         Sends a trade request to the MT5 server.
         Includes automatic retries for requotes and price changes,
@@ -301,6 +301,7 @@ class MT5Connection:
             lot_size (float): The volume to trade.
             max_retries (int): Number of retries on transient errors.
             delay (float): Wait time between retries.
+            comment (str): Order comment for trade attribution (default: "Bot V3").
             
         Returns:
             Optional[dict]: Dict containing 'ticket', 'volume', and 'price' if successful.
@@ -374,7 +375,7 @@ class MT5Connection:
                 "tp": float(tp),
                 "deviation": deviation,
                 "magic": magic,
-                "comment": "Bot V3",
+                "comment": comment,
                 "type_time": mt5.ORDER_TIME_GTC,
                 "type_filling": self.get_filling_mode(symbol),
             }

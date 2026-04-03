@@ -4,132 +4,147 @@ from typing import Dict, Any, Optional
 
 logger = logging.getLogger("trading_bot.trailing_stop")
 
+
 class TrailingStopManager:
     """
-    Manages adaptive trailing stops for active positions.
-    Implements a 3-phase risk reduction strategy:
-    1. Chandelier: Initial buffer based on ATR.
-    2. Break-Even: Moved to entry + buffer after 1.5R profit.
-    3. Structural: Locked in using candle extremes after 3.0R profit.
+    Adaptive 5-Phase Trailing Stop — targets 1:5 to 1:15 R:R.
+
+    Phase 1 (0 → 1.5R):   Wide Chandelier (ATR*4.0) — lets trade breathe
+    Phase 2 (≥ 1.5R):     Break-even lock-in (+small offset)
+    Phase 3 (≥ 3.0R):     Structural trail — prior candle low/high
+    Phase 4 (≥ 5.0R):     Momentum runner — ATR*1.5 tight trail
+    Phase 5 (≥ 10.0R):    Ultra-tight ATR*0.8 — milk the full run
     """
-    
-    def __init__(self, config: dict, connection: Any, position_meta: Dict[int, Any], state_lock: threading.Lock):
-        """
-        Initializes the TrailingStopManager.
-        
-        Args:
-            config (dict): Global configuration.
-            connection (MT5Connection): terminal connection.
-            position_meta (dict): Shared position metadata.
-            state_lock (Lock): Thread-safety lock for metadata access.
-        """
-        self.config = config
-        self.connection = connection
+
+    def __init__(self, config: dict, connection: Any,
+                 position_meta: Dict[int, Any], state_lock: threading.Lock):
+        self.config        = config
+        self.connection    = connection
         self.position_meta = position_meta
-        self.state_lock = state_lock
-        
-    def manage_positions(self, symbol: str, current_bid: float, current_ask: float, atr: float, last_candle: Optional[dict] = None):
+        self.state_lock    = state_lock
+
+    def manage_positions(self, symbol: str, current_bid: float,
+                         current_ask: float, atr: float,
+                         last_candle: Optional[dict] = None):
         """
         Performs trailing stop logic for all active positions on a symbol.
-        
-        Args:
-            symbol (str): Symbol name.
-            current_bid (float): Current bid price.
-            current_ask (float): Current ask price.
-            atr (float): Current ATR for buffer calculation.
-            last_candle (Optional[dict]): Most recent closed candle for structural stops.
         """
         if not self.config.get("trailing_stop_enabled", True):
             return
 
         positions = self.connection.get_positions(symbol)
-        if not positions: return
-            
+        if not positions:
+            return
+
         magic = self.config.get("magic_number", 234000)
-        
+
         for pos in positions:
-            if pos.magic != magic: continue
-            
+            if pos.magic != magic:
+                continue
+
             ticket = pos.ticket
             with self.state_lock:
                 if ticket not in self.position_meta:
                     self.position_meta[ticket] = {
-                        "ticket": ticket, "best_price": pos.price_current,
-                        "risk": abs(pos.price_open - pos.sl) if pos.sl > 0 else 0
+                        "ticket":     ticket,
+                        "best_price": pos.price_current,
+                        "risk":       abs(pos.price_open - pos.sl) if pos.sl > 0 else 0,
                     }
                 meta = self.position_meta[ticket]
-                
-            is_buy = (pos.type == 0)
+
+            is_buy        = (pos.type == 0)
             current_price = current_bid if is_buy else current_ask
-            
-            # FIX #15: Update best_price under state_lock to prevent race conditions
+
             with self.state_lock:
-                if (is_buy and current_price > meta["best_price"]) or (not is_buy and current_price < meta["best_price"]):
+                if (is_buy  and current_price > meta["best_price"]) or \
+                   (not is_buy and current_price < meta["best_price"]):
                     meta["best_price"] = current_price
-                
-            # 2. Optimized Trailing Logic (Shared with Backtest)
+
             new_sl = self.calculate_new_sl(
-                is_buy, pos.price_open, pos.sl, meta["best_price"], atr, meta["risk"], self.config, last_candle
+                is_buy, pos.price_open, pos.sl,
+                meta["best_price"], atr, meta["risk"],
+                self.config, last_candle
             )
-            
+
             if new_sl and new_sl != pos.sl:
-                if (is_buy and new_sl > pos.sl) or (not is_buy and (pos.sl == 0 or new_sl < pos.sl)):
+                if (is_buy and new_sl > pos.sl) or \
+                   (not is_buy and (pos.sl == 0 or new_sl < pos.sl)):
                     if self.connection.modify_sl_tp(ticket, symbol, new_sl, pos.tp):
-                        logger.info(f"[Trailing] Trade {ticket} -> {new_sl:.2f}")
+                        rr = (abs(new_sl - pos.price_open) / meta["risk"]) if meta["risk"] > 0 else 0
+                        logger.info(
+                            "[Trailing] #%d → SL=%.2f (Phase at ~%.1fR)",
+                            ticket, new_sl, rr
+                        )
 
     @staticmethod
-    def calculate_new_sl(is_buy: bool, entry: float, current_sl: float, best_price: float, 
-                         atr: float, risk: float, config: dict, last_candle: Optional[dict] = None) -> Optional[float]:
+    def calculate_new_sl(is_buy: bool, entry: float, current_sl: float,
+                         best_price: float, atr: float, risk: float,
+                         config: dict, last_candle: Optional[dict] = None
+                         ) -> Optional[float]:
         """
-        Calculates the new Stop Loss level based on the adaptive 3-phase logic.
-        
-        Args:
-            is_buy (bool): Trade direction.
-            entry (float): Entry price.
-            current_sl (float): Current Stop Loss.
-            best_price (float): Highest price reached (for BUY) or lowest (for SELL).
-            atr (float): ATR value.
-            risk (float): Initial risk amount (points).
-            config (dict): Global configuration.
-            last_candle (Optional[dict]): Structured candle for Phase 3.
-            
-        Returns:
-            Optional[float]: The new SL level if it should be moved, else None.
+        5-Phase adaptive trailing stop calculation.
+
+        Returns the new SL price if it should be moved, else None.
+        The SL can only ever improve (never widen).
         """
-        if risk <= 0: return None
-        
+        if risk <= 0 or atr <= 0:
+            return None
+
         profit_points = (best_price - entry) if is_buy else (entry - best_price)
         rr = profit_points / risk
-        
+
+        ts = config.get("trailing_stop", {})
         new_sl = current_sl
-        
-        ts_cfg = config.get("trailing_stop", {})
 
-        # Phase 1: Institutional Chandelier (Room to Breathe)
-        p1_threshold = ts_cfg.get("phase1_rr_threshold", 1.5)
-        p1_wider = ts_cfg.get("phase1_wider_mult", 4.0)
-        p1_tighter = ts_cfg.get("phase1_tighter_mult", 2.5)
-        
-        c_mult = p1_wider if rr < p1_threshold else p1_tighter
-        chandelier_sl = (best_price - (atr * c_mult)) if is_buy else (best_price + (atr * c_mult))
-        
-        if (is_buy and chandelier_sl > new_sl) or (not is_buy and (new_sl == 0 or chandelier_sl < new_sl)):
-            new_sl = chandelier_sl
+        # ── Phase 1: Wide Chandelier (0 → Phase2 threshold) ──────────────
+        p1_threshold = ts.get("phase1_rr_threshold", 1.5)
+        c_mult = ts.get("phase1_wider_mult", 4.0) if rr < p1_threshold \
+                 else ts.get("phase1_tighter_mult", 2.5)
+        chandelier = (best_price - atr * c_mult) if is_buy \
+                     else (best_price + atr * c_mult)
 
-        # Phase 2: Delayed Break-Even (Configurable threshold)
-        p2_threshold = ts_cfg.get("phase2_rr_threshold", 1.5)
-        p2_offset = ts_cfg.get("phase2_be_offset_pct", 0.1)
-        
+        if (is_buy and chandelier > new_sl) or \
+           (not is_buy and (new_sl == 0 or chandelier < new_sl)):
+            new_sl = chandelier
+
+        # ── Phase 2: Break-Even ───────────────────────────────────────────
+        p2_threshold = ts.get("phase2_rr_threshold", 1.5)
+        p2_offset    = ts.get("phase2_be_offset_pct", 0.1)
         if rr >= p2_threshold:
-            be_sl = entry + (risk * p2_offset) if is_buy else entry - (risk * p2_offset)
-            if (is_buy and be_sl > new_sl) or (not is_buy and (new_sl == 0 or be_sl < new_sl)):
-                new_sl = be_sl
+            be = entry + risk * p2_offset if is_buy \
+                 else entry - risk * p2_offset
+            if (is_buy and be > new_sl) or \
+               (not is_buy and (new_sl == 0 or be < new_sl)):
+                new_sl = be
 
-        # Phase 3: Structural Lock-in (Configurable threshold)
-        p3_threshold = ts_cfg.get("phase3_rr_threshold", 3.0)
+        # ── Phase 3: Structural Lock-in (prior candle extreme) ───────────
+        p3_threshold = ts.get("phase3_rr_threshold", 3.0)
         if rr >= p3_threshold and last_candle:
-            structural_sl = last_candle['low'] if is_buy else last_candle['high']
-            if (is_buy and structural_sl > new_sl) or (not is_buy and (new_sl == 0 or structural_sl < new_sl)):
-                new_sl = structural_sl
-                
+            structural = last_candle['low'] if is_buy else last_candle['high']
+            if (is_buy and structural > new_sl) or \
+               (not is_buy and (new_sl == 0 or structural < new_sl)):
+                new_sl = structural
+
+        # ── Phase 4: Momentum Runner Trail ───────────────────────────────
+        # Activates at 5R+: tight chandelier (ATR*1.5) — rides big moves
+        p4_threshold  = ts.get("phase4_rr_threshold", 5.0)
+        p4_trail_mult = ts.get("phase4_trail_mult", 1.5)
+        if rr >= p4_threshold:
+            p4_sl = (best_price - atr * p4_trail_mult) if is_buy \
+                    else (best_price + atr * p4_trail_mult)
+            if (is_buy and p4_sl > new_sl) or \
+               (not is_buy and (new_sl == 0 or p4_sl < new_sl)):
+                new_sl = p4_sl
+
+        # ── Phase 5: Ultra-Tight Milk Trail ──────────────────────────────
+        # Activates at 10R+: ATR*0.8 — squeezes every last pip
+        p5_threshold  = ts.get("phase5_rr_threshold", 10.0)
+        p5_trail_mult = ts.get("phase5_trail_mult", 0.8)
+        if rr >= p5_threshold:
+            p5_sl = (best_price - atr * p5_trail_mult) if is_buy \
+                    else (best_price + atr * p5_trail_mult)
+            if (is_buy and p5_sl > new_sl) or \
+               (not is_buy and (new_sl == 0 or p5_sl < new_sl)):
+                new_sl = p5_sl
+
         return new_sl if new_sl != current_sl else None

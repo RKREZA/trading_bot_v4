@@ -1,6 +1,7 @@
 """
 TRADING BOT V3 - Main Entry Point
-Orchestrates MT5 connection, data fetching, strategy analysis, and dashboard.
+Multi-Strategy Execution Framework.
+Orchestrates MT5 connection, data fetching, strategy runtimes, and dashboard.
 """
 
 import argparse
@@ -12,7 +13,6 @@ import sys
 import time
 import threading
 import queue
-import itertools
 import copy
 import pandas as pd
 import numpy as np
@@ -48,9 +48,13 @@ from core.regime import MarketRegime
 from core.state_manager import SecureStateManager
 from core.execution_pipeline import ExecutionPipeline
 from core.trailing_stop import TrailingStopManager
+from core.strategy_orchestrator import StrategyOrchestrator
+from core.strategy_runtime import StrategyRuntime
 from dashboard import Dashboard, AnalysisLogger, AnalysisLoggerHandler
 
-# Load .env file if it exists
+# Multi-Strategy
+from strategies import create_strategy
+
 load_dotenv()
 
 logger = logging.getLogger("trading_bot.main")
@@ -59,26 +63,18 @@ logger = logging.getLogger("trading_bot.main")
 class TradingBot:
     """
     The central orchestrator of the Trading Bot V3 system.
-    Responsible for initializing all core components, managing the life cycle 
-    of the trading process (Live, Backtest, or Optimization), and ensuring 
-    state persistence and thread safety.
+    Supports multi-strategy execution with fully isolated strategy runtimes.
     """
 
     def __init__(self, config_path: str = "config.json"):
-        """
-        Initializes the TradingBot and all its sub-components.
-        
-        Args:
-            config_path (str): Path to the JSON configuration file.
-        """
         self.config = self._load_config(config_path)
         self.analysis_logger = AnalysisLogger(max_entries=100)
-        
+
         # Bridge standard logging to the dashboard logger
         bridged_handler = AnalysisLoggerHandler(self.analysis_logger)
         bridged_handler.setFormatter(logging.Formatter("%(name)s: %(message)s"))
         logging.getLogger("trading_bot").addHandler(bridged_handler)
-        
+
         self.ai_advisor = AIAdvisor(self.config, self.analysis_logger)
         self.strategy = StrategyEngine(self.config, self.analysis_logger)
         self.dashboard = Dashboard(self.config, self.analysis_logger)
@@ -104,7 +100,13 @@ class TradingBot:
         self.state_lock = threading.Lock()
         self.execution_queue = queue.Queue()
         self._shutdown_event = threading.Event()
-        
+
+        # ── Multi-Strategy Framework ─────────────────────
+        self.strategy_runtimes: List[StrategyRuntime] = []
+        self.orchestrator: Optional[StrategyOrchestrator] = None
+        self._build_strategy_runtimes()
+
+        # Legacy ExecutionPipeline (kept for --legacy mode)
         self.execution_pipeline = ExecutionPipeline(
             config=self.config,
             connection=self.connection,
@@ -122,25 +124,73 @@ class TradingBot:
             position_meta=self.position_meta,
             state_lock=self.state_lock
         )
-        
+
         self._load_state()
 
+    def _build_strategy_runtimes(self):
+        """Build StrategyRuntime instances from config."""
+        strategies_cfg = self.config.get("strategies", [])
+        initial_balance = self.config.get("backtest", {}).get("initial_balance", 1000.0)
+
+        if not strategies_cfg:
+            # Auto-generate from legacy config
+            strategy_type = self.config.get("strategy_type", "SNIPER")
+            sid = f"{strategy_type.lower()}_v1"
+            try:
+                strat = create_strategy(sid, strategy_type, self.config)
+                runtime = StrategyRuntime(strat, self.config, initial_balance)
+                self.strategy_runtimes.append(runtime)
+                logger.info("Auto-created strategy runtime: %s", sid)
+            except ValueError as e:
+                logger.warning("Could not auto-create strategy: %s", e)
+            return
+
+        for s_cfg in strategies_cfg:
+            sid = s_cfg["id"]
+            stype = s_cfg["type"]
+            enabled = s_cfg.get("enabled", True)
+
+            # Merge global config with strategy-specific overrides
+            merged = dict(self.config)
+            merged.update(s_cfg)
+
+            try:
+                strat = create_strategy(sid, stype, merged)
+                if not enabled:
+                    strat.enabled = False
+                runtime = StrategyRuntime(strat, self.config, initial_balance)
+                self.strategy_runtimes.append(runtime)
+                logger.info("Strategy runtime created: %s (%s) enabled=%s", sid, stype, enabled)
+            except ValueError as e:
+                logger.error("Failed to create strategy '%s': %s", sid, e)
+
+        # Build orchestrator
+        if self.strategy_runtimes:
+            self.orchestrator = StrategyOrchestrator(
+                runtimes=self.strategy_runtimes,
+                config=self.config,
+                connection=self.connection,
+                position_manager=self.position_manager,
+                notification_manager=self.notification_manager,
+            )
+            logger.info(
+                "StrategyOrchestrator initialized with %d runtimes",
+                len(self.strategy_runtimes)
+            )
+
     def _load_config(self, config_path: str) -> dict:
-        # Priority: config_optimized.json > passed config_path > default
         paths_to_check = ["config_optimized.json", config_path]
         for path in paths_to_check:
             if os.path.exists(path):
                 try:
                     with open(path, "r") as f:
                         content = f.read()
-                        # Remove # comments for user-friendliness
                         cleaned_content = re.sub(r'#.*$', '', content, flags=re.MULTILINE)
                         cfg = json.loads(cleaned_content)
                         logger.info(f"Configuration loaded from {path}")
                         return cfg
                 except Exception as e:
                     logger.error(f"Failed to load {path}: {e}")
-                    
         return {"symbol": "XAUUSDm", "magic_number": 234000}
 
     def _save_state(self):
@@ -155,15 +205,19 @@ class TradingBot:
                     "loss_count": self.loss_count,
                     "last_reset": self.last_reset_day.isoformat()
                 },
-                "max_drawdown": self.max_drawdown_reached
+                "max_drawdown": self.max_drawdown_reached,
             }
+            # Save per-strategy runtime states
+            if self.orchestrator:
+                state["strategy_states"] = self.orchestrator.get_states()
+
         self.state_manager.save(state, self.state_file)
 
     def _load_state(self):
         state = self.state_manager.load(self.state_file)
         if not state:
             return
-            
+
         with self.state_lock:
             self.position_meta = {int(k): v for k, v in state.get("position_meta", {}).items()}
             self.notified_deals = set(state.get("notified_deals", []))
@@ -175,20 +229,38 @@ class TradingBot:
             self.last_reset_day = date.fromisoformat(stats.get("last_reset", date.today().isoformat()))
             self.max_drawdown_reached = state.get("max_drawdown", 0.0)
 
+        # Restore per-strategy states
+        if self.orchestrator and "strategy_states" in state:
+            self.orchestrator.load_states(state["strategy_states"])
+
     def _reconcile_positions(self) -> None:
-        if mt5 is None: return
+        if mt5 is None:
+            return
         try:
             magic = int(self.config.get("magic_number", 234000))
             with MT5Connection.MT5_LOCK:
                 active = mt5.positions_get()
             live_tickets = {p.ticket: p for p in active if p.magic == magic} if active else {}
+
+            # Reconcile legacy position_meta
             with self.state_lock:
                 for t in list(self.position_meta.keys()):
-                    if t not in live_tickets: del self.position_meta[t]
+                    if t not in live_tickets:
+                        del self.position_meta[t]
                 for t, p in live_tickets.items():
                     if t not in self.position_meta:
                         risk = abs(p.price_open - p.sl) if p.sl > 0 else 0
-                        self.position_meta[t] = {"ticket": t, "best_price": p.price_current, "partial_closed_count": 0, "risk": risk, "ai_score": 0.5}
+                        self.position_meta[t] = {
+                            "ticket": t, "best_price": p.price_current,
+                            "partial_closed_count": 0, "risk": risk, "ai_score": 0.5
+                        }
+
+            # Reconcile per-strategy position trackers
+            if self.orchestrator:
+                live_set = set(live_tickets.keys())
+                for runtime in self.strategy_runtimes:
+                    runtime.positions.reconcile(live_set)
+
             self._save_state()
         except Exception as e:
             logger.error("Reconciliation failed: %s", e)
@@ -199,9 +271,15 @@ class TradingBot:
         fieldnames = ["Date", "PnL", "Trades", "WinRate", "MaxDrawdown", "EndingBalance"]
         balance = self.connection.get_account_snapshot().get('balance', 0)
         win_rate = (self.win_count / self.daily_trades * 100) if self.daily_trades > 0 else 0
-        row = {"Date": (date.today() - timedelta(days=1)).isoformat(), "PnL": f"{self.daily_pnl:.2f}", "Trades": self.daily_trades, "WinRate": f"{win_rate:.1f}%", "MaxDrawdown": f"{self.max_drawdown_reached:.2f}", "EndingBalance": f"{balance:.2f}"}
+        row = {
+            "Date": (date.today() - timedelta(days=1)).isoformat(),
+            "PnL": f"{self.daily_pnl:.2f}",
+            "Trades": self.daily_trades,
+            "WinRate": f"{win_rate:.1f}%",
+            "MaxDrawdown": f"{self.max_drawdown_reached:.2f}",
+            "EndingBalance": f"{balance:.2f}"
+        }
         try:
-            # FIX #1: Check file existence BEFORE opening to correctly write headers
             write_header = not os.path.exists(file_path) or os.stat(file_path).st_size == 0
             with open(file_path, "a", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -221,13 +299,40 @@ class TradingBot:
                 self.win_count = 0
                 self.loss_count = 0
                 self.last_reset_day = today
-                # Reset RiskManager stats (Equity tracking)
                 acc = self.connection.get_account_snapshot()
-                self.risk_manager.reset_daily_stats(acc.get("balance", 0.0))
+                balance = acc.get("balance", 0.0)
+                self.risk_manager.reset_daily_stats(balance)
+                # Reset all strategy runtimes
+                if self.orchestrator:
+                    self.orchestrator.reset_daily(balance)
             self._save_state()
 
     def _detect_closed_trades(self, symbol: str):
-        """Arch C: Detect when positions close and update daily stats accordingly."""
+        """Detect closed trades — routes to orchestrator for strategy attribution."""
+        if self.orchestrator:
+            self.orchestrator.detect_closed_trades(symbol)
+            # Aggregate stats for dashboard
+            total_pnl = 0.0
+            total_trades = 0
+            total_wins = 0
+            total_losses = 0
+            for rt in self.strategy_runtimes:
+                summary = rt.performance.get_summary()
+                total_pnl += summary.get("daily_pnl", 0)
+                total_trades += summary.get("daily_trades", 0)
+                total_wins += rt.performance.win_count
+                total_losses += rt.performance.loss_count
+            self.daily_pnl = total_pnl
+            self.daily_trades = total_trades
+            self.win_count = total_wins
+            self.loss_count = total_losses
+            return
+
+        # Legacy fallback
+        self._detect_closed_trades_legacy(symbol)
+
+    def _detect_closed_trades_legacy(self, symbol: str):
+        """Legacy closed-trade detection without strategy attribution."""
         if mt5 is None:
             return
         try:
@@ -235,17 +340,15 @@ class TradingBot:
             with MT5Connection.MT5_LOCK:
                 active = mt5.positions_get()
             live_tickets = {p.ticket for p in active if p.magic == magic} if active else set()
-            
+
             with self.state_lock:
                 closed_tickets = [t for t in self.position_meta if t not in live_tickets]
-            
+
             for ticket in closed_tickets:
-                # Fetch the deal history for this ticket to get P&L
                 try:
                     with MT5Connection.MT5_LOCK:
                         deals = mt5.history_deals_get(position=ticket)
                     if deals:
-                        # Sum all deals for this position
                         total_pnl = sum(d.profit + d.commission + d.swap for d in deals)
                         with self.state_lock:
                             self.daily_pnl += total_pnl
@@ -255,10 +358,8 @@ class TradingBot:
                             else:
                                 self.loss_count += 1
                             del self.position_meta[ticket]
-                        meta = self.position_meta.get(ticket, {})
-                        direction = "BUY" if total_pnl >= 0 else "SELL"  # approximate
                         self.notification_manager.notify_trade_close(
-                            symbol=symbol, direction=direction,
+                            symbol=symbol, direction="BUY",
                             exit_price=0, pnl=total_pnl,
                             result="WIN" if total_pnl >= 0 else "LOSS"
                         )
@@ -268,42 +369,46 @@ class TradingBot:
                     with self.state_lock:
                         if ticket in self.position_meta:
                             del self.position_meta[ticket]
-            
+
             if closed_tickets:
                 self._save_state()
         except Exception as e:
             logger.error("Trade close detection failed: %s", e)
 
-    def _manage_trailing_stops(self, symbol: str, current_bid: float, current_ask: float, atr: float, last_candle: dict) -> None:
-        self.trailing_stop_manager.manage_positions(symbol, current_bid, current_ask, atr, last_candle)
+    def _manage_trailing_stops(self, symbol: str, current_bid: float,
+                                current_ask: float, atr: float, last_candle: dict) -> None:
+        """Route trailing stop management to orchestrator or legacy manager."""
+        if self.orchestrator:
+            self.orchestrator.manage_trailing_stops(symbol, current_bid, current_ask, atr, last_candle)
+        else:
+            self.trailing_stop_manager.manage_positions(symbol, current_bid, current_ask, atr, last_candle)
 
     def _startup_checks(self) -> bool:
-        """
-        Performs a set of critical health checks (Config, MT5, Market, Balance) 
-        before allowing the bot to enter the live trading loop.
-        
-        Returns:
-            bool: True if all critical checks pass.
-        """
         checks = []
         try:
             BotConfig(**self.config)
             checks.append(("Config validation", True))
         except Exception as e:
             checks.append(("Config validation", False, str(e)))
-            
+
         checks.append(("MT5 connection", self.connection.connected))
         market_open = self.connection.get_market_status(self.config.get("symbol", "XAUUSDm"))
         checks.append(("Market open", market_open))
-        
+
         acc_info = self.connection.get_account_snapshot()
         balance = acc_info.get("balance", 0)
         checks.append(("Balance > $100", balance > 100))
-        
+
         research = self.config.get("research_mode", False)
         if research:
             checks.append(("RESEARCH MODE", True, "Restrictions Disabled"))
-        
+
+        # Multi-strategy status
+        enabled_count = sum(1 for rt in self.strategy_runtimes if rt.enabled)
+        total_count = len(self.strategy_runtimes)
+        checks.append(("Strategy Runtimes", enabled_count > 0,
+                        f"{enabled_count}/{total_count} enabled"))
+
         logger.info("-" * 30)
         logger.info(" STARTUP HEALTH CHECKS")
         logger.info("-" * 30)
@@ -311,46 +416,46 @@ class TradingBot:
         for c in checks:
             status = "[OK]" if c[1] else "[FAIL]"
             logger.info(f"  {status} {c[0]}" + (f" — {c[2]}" if len(c) > 2 else ""))
-            
+
         return all_passed
 
     def run_live(self):
         """
-        The main entry point for live trading.
-        Initializes the dashboard, health server, and runs the continuous 
-        polling loop for signal generation and trade management.
+        The main entry point for live multi-strategy trading.
         """
-        if not self.connection.connect(): 
+        if not self.connection.connect():
             logger.critical("Could not initialize MT5. Check terminal status and credentials.")
             return
-            
+
         if not self._startup_checks():
             logger.critical("Startup checks failed. Exiting.")
             return
 
         symbol = self.config.get("symbol", "XAUUSDm")
         start_health_server(self, port=8081)
-        
-        # Start the CLI Dashboard
+
         self.dashboard.start()
         self.running = True
-        logger.info("Bot starting LIVE EXECUTIONS")
-        
-        # Phase 13: Position Reconciliation (at startup & reconnection)
+        logger.info("Bot starting LIVE EXECUTIONS — %d strategy runtimes",
+                     len(self.strategy_runtimes))
+
+        # Log individual strategies
+        for rt in self.strategy_runtimes:
+            logger.info("  → %s (enabled=%s)", rt.strategy_id, rt.enabled)
+
         self._reconcile_positions()
-        
+
         try:
             while not self._shutdown_event.is_set():
                 try:
                     start_cycle = time.time()
                     self._reset_daily_stats()
-                    
-                    # FIX #6: Ensure MT5 connection is alive before each cycle
+
                     if not self.connection.ensure_connected():
                         logger.warning("MT5 connection lost. Attempting reconnect...")
                         self._shutdown_event.wait(10.0)
                         continue
-                    
+
                     # Fetch fresh account and tick data
                     acc = self.connection.get_account_snapshot()
                     tick = None
@@ -359,58 +464,69 @@ class TradingBot:
                             tick = mt5.symbol_info_tick(symbol) if mt5 else None
                     except Exception as e:
                         logger.warning("Tick fetch failed: %s", e)
-                    
+
                     # Update Dashboard State
                     self.dashboard.account_info = acc
                     if tick:
-                        self.dashboard.tick = {"price": tick.bid, "spread": (tick.ask - tick.bid) / (mt5.symbol_info(symbol).point or 0.01)}
-                    
+                        self.dashboard.tick = {
+                            "price": tick.bid,
+                            "spread": (tick.ask - tick.bid) / (mt5.symbol_info(symbol).point or 0.01)
+                        }
+
                     self.dashboard.daily_pnl = self.daily_pnl
                     self.dashboard.daily_trades = self.daily_trades
                     self.dashboard.win_count = self.win_count
                     self.dashboard.loss_count = self.loss_count
                     self.dashboard.positions = self.connection.get_positions(symbol)
-                    
-                    # Arch C: Detect closed trades and update stats
+
+                    # Detect closed trades (orchestrator routes to owning strategy)
                     self._detect_closed_trades(symbol)
-                    
-                    # Fetch candles securely
+
+                    # Fetch candles
                     h1_candles = self.data_fetcher.fetch_candles(symbol, "H1", 200)
                     m15_candles = self.data_fetcher.fetch_candles(symbol, "M15", 200)
                     m5_candles = self.data_fetcher.fetch_candles(symbol, "M5", 500)
                     d1_candles = self.data_fetcher.fetch_candles(symbol, "D1", 50)
 
-                    # 4. Trailing Stops (Sniper Mode M5)
+                    # Trailing Stops (per-strategy via orchestrator)
                     if tick and len(m5_candles) > 30:
-                        atr = self.strategy._calculate_atr(m5_candles, 14) 
+                        atr = self.strategy._calculate_atr(m5_candles, 14)
                         self._manage_trailing_stops(symbol, tick.bid, tick.ask, atr, m5_candles[-1])
-                    
+
                     if len(m5_candles) > 30:
                         current_price = m5_candles.close[-1]
-                        # Dynamic Session Lookup (P0 Fix)
-                        session = self.strategy.get_session_from_hour(datetime.now(timezone.utc).hour)
-                        
-                        self.dashboard.session = session
-                            
-                        self.execution_pipeline.execute_cycle(
-                            symbol, h1_candles, m15_candles, m5_candles, d1_candles, current_price, session
+                        session = self.strategy.get_session_from_hour(
+                            datetime.now(timezone.utc).hour
                         )
-                        
-                        # Update Dashboard with latest analysis context
-                        analysis = self.execution_pipeline.last_analysis
+                        self.dashboard.session = session
+
+                        # ── Multi-Strategy Execution ──
+                        if self.orchestrator:
+                            self.orchestrator.execute_cycle(
+                                symbol, h1_candles, m15_candles, m5_candles,
+                                d1_candles, current_price, session
+                            )
+                            analysis = self.orchestrator.last_analysis
+                        else:
+                            # Legacy fallback
+                            self.execution_pipeline.execute_cycle(
+                                symbol, h1_candles, m15_candles, m5_candles,
+                                d1_candles, current_price, session
+                            )
+                            analysis = self.execution_pipeline.last_analysis
+
                         self.dashboard.h4_trend = analysis.get("trend", "NEUTRAL")
                         self.dashboard.m30_structure = analysis.get("regime", "NEUTRAL")
                         self.dashboard.analysis_context = analysis
-                    
-                    # Final Dashboard update for the cycle
+
                     self.dashboard.fetch_ms = int((time.time() - start_cycle) * 1000)
                     self.dashboard.update()
-                    
+
                 except Exception as cycle_err:
                     logger.error("Cycle error (recovering): %s", cycle_err, exc_info=True)
                     self._save_state()
-                
-                self._shutdown_event.wait(5.0)  # Sleep 5 seconds between signal checks
+
+                self._shutdown_event.wait(5.0)
         except KeyboardInterrupt:
             logger.info("Ctrl+C received — shutting down gracefully")
         finally:
@@ -421,22 +537,12 @@ class TradingBot:
             self.connection.disconnect()
             logger.info("Shutdown complete.")
 
-    # Backtesting has been DECOUPLED to backtest.py
-
-    def run_optimization(self, symbol="XAUUSDm", start_date=None, end_date=None, count=10000, mode="anchored"):
-        """
-        Performs Walk-Forward Optimization to find stable parameters.
-        Iterates through historical windows to vet parameter consistency.
-        
-        Args:
-            symbol (str): Trading instrument.
-            start_date, end_date (Optional[str]): Date range.
-            count (int): Candle count fallback.
-            mode (str): 'anchored' or 'rolling' WFO.
-        """
+    def run_optimization(self, symbol="XAUUSDm", start_date=None, end_date=None,
+                         count=10000, mode="anchored"):
         logger.info(f"Starting WFO Optimization for {symbol} (Mode: {mode})")
-        if not self.connection.connect(): return
-        
+        if not self.connection.connect():
+            return
+
         try:
             if start_date and end_date:
                 dt_from = datetime.fromisoformat(start_date).replace(tzinfo=timezone.utc)
@@ -453,11 +559,10 @@ class TradingBot:
 
             wfo = WalkForwardValidation(self.config, self.strategy)
             results = wfo.run_validation(symbol, h1, m15, m5, d1, mode=mode)
-            
-            # Print Summary
-            print("\n" + "="*40)
+
+            print("\n" + "=" * 40)
             print(" WFO OPTIMIZATION COMPLETE ")
-            print("="*40)
+            print("=" * 40)
             print(f"Windows Validated: {len(results)}")
             avg_cons = sum(r['consistency'] for r in results) / len(results) if results else 0
             print(f"Aggregate OOS Consistency: {avg_cons:.2f}")
@@ -466,9 +571,10 @@ class TradingBot:
             else:
                 print("[WARNING] Robustness below target. Further calibration required.")
             print("Best parameters saved to config_optimized.json")
-            
+
         finally:
             self.connection.disconnect()
+
 
 if __name__ == "__main__":
     setup_logging(console=True)
