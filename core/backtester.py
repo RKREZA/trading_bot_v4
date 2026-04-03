@@ -332,10 +332,10 @@ class MultiStrategyBacktestEngine:
                 exit_p = trade.tp - slip
                 result, closed = "TP", True
             else:
-                # Partial 1: 25% at tp1_price
+                # Partial 1: 50% at tp1_price
                 if (trade.partial_closed_count == 0 and
                         trade.signal.tp1_price > 0 and bid_h >= trade.signal.tp1_price):
-                    p_lot = round(trade.lot * 0.25, 2)
+                    p_lot = round(trade.lot * 0.50, 2)
                     if p_lot >= 0.01:
                         p_pnl = ((trade.signal.tp1_price - trade.entry_price)
                                   / trade.tick_size) * trade.tick_value * p_lot
@@ -343,10 +343,10 @@ class MultiStrategyBacktestEngine:
                         trade.partial_pnl += p_pnl
                         trade.lot = max(0.01, round(trade.lot - p_lot, 2))
                         trade.partial_closed_count += 1
-                # Partial 2: 25% at tp2_price
+                # Partial 2: 50% at tp2_price
                 if (trade.partial_closed_count == 1 and
                         trade.signal.tp2_price > 0 and bid_h >= trade.signal.tp2_price):
-                    p_lot = round(trade.lot * 0.25, 2)
+                    p_lot = round(trade.lot * 0.50, 2)
                     if p_lot >= 0.01:
                         p_pnl = ((trade.signal.tp2_price - trade.entry_price)
                                   / trade.tick_size) * trade.tick_value * p_lot
@@ -363,13 +363,15 @@ class MultiStrategyBacktestEngine:
                 exit_p = trade.sl + gap
                 result, closed = "SL", True
             elif tp_hit:
+                # [3] TP slippage — slight adverse fill
                 slip   = random.uniform(0, atr * self._tp_slip_atr_pct)
                 exit_p = trade.tp + slip
                 result, closed = "TP", True
             else:
+                # Partial 1: 50% at tp1_price
                 if (trade.partial_closed_count == 0 and
                         trade.signal.tp1_price > 0 and ask_l <= trade.signal.tp1_price):
-                    p_lot = round(trade.lot * 0.25, 2)
+                    p_lot = round(trade.lot * 0.50, 2)
                     if p_lot >= 0.01:
                         p_pnl = ((trade.entry_price - trade.signal.tp1_price)
                                   / trade.tick_size) * trade.tick_value * p_lot
@@ -377,9 +379,10 @@ class MultiStrategyBacktestEngine:
                         trade.partial_pnl += p_pnl
                         trade.lot = max(0.01, round(trade.lot - p_lot, 2))
                         trade.partial_closed_count += 1
+                # Partial 2: 50% at tp2_price
                 if (trade.partial_closed_count == 1 and
                         trade.signal.tp2_price > 0 and ask_l <= trade.signal.tp2_price):
-                    p_lot = round(trade.lot * 0.25, 2)
+                    p_lot = round(trade.lot * 0.50, 2)
                     if p_lot >= 0.01:
                         p_pnl = ((trade.entry_price - trade.signal.tp2_price)
                                   / trade.tick_size) * trade.tick_value * p_lot

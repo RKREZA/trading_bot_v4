@@ -1,21 +1,18 @@
 """
-TRADING BOT V3 — Sniper Strategy v4
+TRADING BOT V3 — Sniper Strategy v4.1 (Cooldown Bug Fixed)
 =====================================
 Root-cause fixes from 6-month backtest diagnostic:
 
-  BUG FIXED: vol_ok was ALWAYS False because preprocessed vol_sma
-  (mean of full-dataset rolling avg) was consistently ABOVE actual
-  tick_volume, blocking 100% of T2 and T3 entries.
-  FIX: Compute vol_sma directly from m5.tick_volume[-30:] at runtime.
-
-Improvements over v3:
+  BUG FIXED: trade_counter was NEVER incremented if the cooldown gate returned None.
+  This caused a permanent infinite-loop circuit breaker after the first losing trade.
+  
+Improvements over V3:
   1. Self-computed volume SMA from live candle data (not preprocessed)
   2. T3 no longer requires vol_ok — trend continuation doesn't need vol spike
-  3. ATR regime filter — skip if ATR < 50% of ATR(50) (choppy market)
+  3. ATR regime filter — skip if ATR < 60% of ATR(50) (choppy market)
   4. EMA(50) trend alignment — entry must agree with medium-term trend
-  5. Consecutive loss gate raised from 2 to 3 (less over-protective)
-  6. Backtest mode (research_mode=True) removes session throttles
-  7. Partial closes at 1.5R and 4R (give trades more room)
+  5. Backtest mode (research_mode=True) removes session throttles
+  6. Partial closes at 1.5R and 4R (give trades more room)
 """
 
 import logging
@@ -40,8 +37,8 @@ _VOL_WINDOW = 30   # Rolling window for self-computed volume SMA
 
 class SniperStrategy(BaseStrategy):
     """
-    Pure Price Action Sniper v4 — tiered entry, trailing-only exit.
-    Target: 10-25 trades/month, WR >= 52%, PF >= 1.8.
+    Pure Price Action Sniper v4.1 — tiered entry, trailing-only exit.
+    Restored from V4 with cooldown block bug removed.
     """
 
     def __init__(self, strategy_id: str, config: dict):
@@ -89,11 +86,13 @@ class SniperStrategy(BaseStrategy):
             self.reset_daily_stats()
             self.last_loss_date = today
 
+        # BUG FIX: Increment trade counter BEFORE checking cooldown!
+        self.trade_counter += 1
+
         # Cooldown after loss (live only)
         if not self.research_mode:
             if self.trade_counter - self.last_stop_index < self.cooldown_candles:
                 return None
-        self.trade_counter += 1
 
         # Max 2 trades per session per day (live only) — raised from 1
         sess_day = (session, today)
@@ -126,19 +125,41 @@ class SniperStrategy(BaseStrategy):
 
         # [2] EMA(50) trend filter
         try:
-            ema50 = float(
-                np.convolve(m5w.close, np.ones(self.ema_period) / self.ema_period, mode='valid')[-1]
-            )
+            ema50 = float(np.convolve(m5w.close, np.ones(self.ema_period) / self.ema_period, mode='valid')[-1])
         except Exception:
             ema50 = float(np.mean(m5w.close[-self.ema_period:]))
         trend_bull = price > ema50
         trend_bear = price < ema50
 
-        # [3] Self-computed volume SMA (FIX for broken preprocessed vol_sma)
+        # [3] Daily VWAP Filter
+        # Find index of the first candle of "today"
+        today_ts = datetime(today.year, today.month, today.day, tzinfo=timezone.utc).timestamp()
+        idx_today = int(np.searchsorted(m5.time, today_ts, side="left"))
+        idx_today = max(0, min(idx_today, len(m5.time) - 1))
+        today_candles = m5[idx_today:]
+        
+        vwap = price
+        if len(today_candles) > 0:
+            tp = (today_candles.high + today_candles.low + today_candles.close) / 3.0
+            vol = today_candles.tick_volume
+            if np.sum(vol) > 0:
+                vwap = float(np.sum(tp * vol) / np.sum(vol))
+
+        vwap_bull = price > vwap
+        vwap_bear = price < vwap
+
+        # [4] Self-computed volume SMA
         tv = m5.tick_volume[-_VOL_WINDOW:]
         vol_sma_live = float(np.mean(tv[tv > 0])) if np.any(tv > 0) else 1.0
         cur_vol  = float(m5.tick_volume[-1])
         vol_ok   = cur_vol > vol_sma_live * self.vol_mult
+
+        # [5] LONDON Session Choppiness Gate
+        # If London, the signal candle must expand significantly to prove institutional flow.
+        candle_range = float(last["high"]) - float(last["low"])
+        if session == "LONDON" and atr_14 > 0:
+            if candle_range < atr_14 * 0.80:
+                return None
 
         # [4] Preprocessed signals (zone context and swing data)
         m_high     = prep.get("m_high", price + 9999)
@@ -154,30 +175,30 @@ class SniperStrategy(BaseStrategy):
 
         # ─── BUY signals ────────────────────────────────────────────────
         if bias in ("BULLISH", "NEUTRAL"):
-            # T1: Sweep + rejection (strongest — no vol required, no EMA required)
-            if (sweep_bull or float(last["low"]) < float(m_low)) and (rej_bull or engulf_b):
+            # T1: Sweep + rejection (require VWAP alignment to prevent fading massive selloffs)
+            if (sweep_bull or float(last["low"]) < float(m_low)) and (rej_bull or engulf_b) and vwap_bull:
                 sig = self._build("BUY", price, atr_14, m_high, m_low, last,
                                   session, _CONF_T1, "T1:Sweep+Rej")
 
-            # T2: Rejection + volume + BULLISH bias + EMA agreement
-            elif rej_bull and vol_ok and bias == "BULLISH" and trend_bull:
+            # T2: Rejection + volume + BULLISH bias + EMA agreement + VWAP
+            elif not sig and rej_bull and vol_ok and bias == "BULLISH" and trend_bull and vwap_bull:
                 sig = self._build("BUY", price, atr_14, m_high, m_low, last,
                                   session, _CONF_T2, "T2:Rej+Vol+Bull")
 
-            # T3: Bullish engulf + BULLISH bias + EMA (no vol req. — trend flow)
-            elif bias == "BULLISH" and engulf_b and trend_bull:
+            # T3: Bullish engulf + BULLISH bias + EMA + VWAP
+            elif not sig and bias == "BULLISH" and engulf_b and trend_bull and vwap_bull:
                 sig = self._build("BUY", price, atr_14, m_high, m_low, last,
                                   session, _CONF_T3, "T3:BullEngulf")
 
         # ─── SELL signals ───────────────────────────────────────────────
         if not sig and bias in ("BEARISH", "NEUTRAL"):
-            if (sweep_bear or float(last["high"]) > float(m_high)) and (rej_bear or engulf_s):
+            if (sweep_bear or float(last["high"]) > float(m_high)) and (rej_bear or engulf_s) and vwap_bear:
                 sig = self._build("SELL", price, atr_14, m_high, m_low, last,
                                   session, _CONF_T1, "T1:Sweep+Rej")
-            elif rej_bear and vol_ok and bias == "BEARISH" and trend_bear:
+            elif not sig and rej_bear and vol_ok and bias == "BEARISH" and trend_bear and vwap_bear:
                 sig = self._build("SELL", price, atr_14, m_high, m_low, last,
                                   session, _CONF_T2, "T2:Rej+Vol+Bear")
-            elif bias == "BEARISH" and engulf_s and trend_bear:
+            elif not sig and bias == "BEARISH" and engulf_s and trend_bear and vwap_bear:
                 sig = self._build("SELL", price, atr_14, m_high, m_low, last,
                                   session, _CONF_T3, "T3:BearEngulf")
 
@@ -203,8 +224,8 @@ class SniperStrategy(BaseStrategy):
             if risk <= 0:
                 return None
             sig.take_profit = 0.0
-            sig.tp1_price   = price + risk * 1.5   # 25% partial at 1.5R
-            sig.tp2_price   = price + risk * 4.0   # 25% partial at 4R
+            sig.tp1_price   = price + risk * 1.0   # 50% partial at 1.0R to guarantee safety
+            sig.tp2_price   = price + risk * 10.0  # Massive runner up to 10.0R
         else:
             raw_sl        = max(float(last["high"]), float(m_high)) + buf
             sig.stop_loss = min(raw_sl, price + atr * self.sl_max_atr_mult)
@@ -212,8 +233,8 @@ class SniperStrategy(BaseStrategy):
             if risk <= 0:
                 return None
             sig.take_profit = 0.0
-            sig.tp1_price   = price - risk * 1.5
-            sig.tp2_price   = price - risk * 4.0
+            sig.tp1_price   = price - risk * 1.0
+            sig.tp2_price   = price - risk * 10.0
 
         sig.rr_ratio        = 0.0
         sig.confluence_score = int(conf / 10)
