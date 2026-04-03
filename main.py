@@ -50,6 +50,7 @@ from core.execution_pipeline import ExecutionPipeline
 from core.trailing_stop import TrailingStopManager
 from core.strategy_orchestrator import StrategyOrchestrator
 from core.strategy_runtime import StrategyRuntime
+from core.news_filter import NewsFilter
 from dashboard import Dashboard, AnalysisLogger, AnalysisLoggerHandler
 
 # Multi-Strategy
@@ -85,6 +86,7 @@ class TradingBot:
         self.risk_manager = RiskManager(self.config)
         self.notification_manager = NotificationManager(self.config)
         self.state_manager = SecureStateManager()
+        self.news_filter = NewsFilter()
 
         self.daily_pnl = 0.0
         self.daily_trades = 0
@@ -445,18 +447,21 @@ class TradingBot:
         self.config["symbol"] = selected_symbol
         
         # Strategy Select
-        c.print("\nAvailable Strategies: [1] Sniper V4.2  [2] SMC V4  [3] Both (Portfolio)")
-        strat_choice = Prompt.ask("Select Strategy", choices=["1", "2", "3"], default="3")
+        c.print("\nAvailable Strategies: [1] Sniper V4.2  [2] SMC V4")
+        strat_choice = Prompt.ask("Select Strategy", choices=["1", "2"], default="1")
+        
+        # Explicitly pass selected info to Dashboard
+        self.dashboard.selected_symbol_title = selected_symbol
+        self.dashboard.selected_strategy_title = "Sniper V4.2" if strat_choice == "1" else "SMC V4"
         
         for rt in self.strategy_runtimes:
             if strat_choice == "1":
                 rt.strategy.enabled = (rt.strategy_id == "sniper_v1")
             elif strat_choice == "2":
                 rt.strategy.enabled = (rt.strategy_id == "smc_v1")
-            else:
-                rt.strategy.enabled = True
         
-        c.print(f"\n[bold green]Booting [{selected_symbol}] Live Feed...[/]\n")
+        # Disable orchestrator if only 1 strategy is needed? No, orchestrator handles both natively, but we disabled the unused one.
+        c.print(f"\n[bold green]Booting {self.dashboard.selected_strategy_title} on [{selected_symbol}] Live Feed...[/]\n")
 
         if not self._startup_checks():
             logger.critical("Startup checks failed. Exiting.")
@@ -532,6 +537,18 @@ class TradingBot:
                             datetime.now(timezone.utc).hour
                         )
                         self.dashboard.session = session
+
+                        # ── News Filter ──
+                        blocked, news_reason = self.news_filter.is_trading_blocked(symbol)
+                        self.dashboard.news_events = self.news_filter.get_upcoming_news(symbol)
+                        self.dashboard.news_blocked = blocked
+                        self.dashboard.news_reason = news_reason
+
+                        if blocked:
+                            self.dashboard.fetch_ms = int((time.time() - start_cycle) * 1000)
+                            self.dashboard.update()
+                            self._shutdown_event.wait(5.0)
+                            continue
 
                         # ── Multi-Strategy Execution ──
                         if self.orchestrator:
@@ -610,7 +627,7 @@ class TradingBot:
 
 
 if __name__ == "__main__":
-    setup_logging(console=True)
+    setup_logging(console=False)
     parser = argparse.ArgumentParser()
     parser.add_argument("--backtest", action="store_true")
     parser.add_argument("--optimize", action="store_true", help="Run Walk-Forward Optimization")

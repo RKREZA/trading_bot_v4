@@ -93,6 +93,8 @@ class Dashboard:
         self.win_count = 0
         self.loss_count = 0
         self.selected_symbol = config.get("symbol", "XAUUSDm")
+        self.selected_symbol_title = self.selected_symbol
+        self.selected_strategy_title = "Unknown"
         self.session = "CLOSED"
         self.running = True
         self.h4_trend = "RANGING"
@@ -104,6 +106,9 @@ class Dashboard:
         self.fetch_status = ""
         self.fetch_ms = 0
         self.analysis_context = {} # Latest data from StrategyEngine
+        self.news_events = []
+        self.news_blocked = False
+        self.news_reason = ""
 
 
     def start(self):
@@ -146,8 +151,8 @@ class Dashboard:
         # Row 4: AI Advisor
         if self.config.get("use_ai_filter", False):
             parts.append(self._render_ai())
-        # Row 5: Analysis + Setup
-        parts.append(self._equal_row(self._render_analysis(), self._render_setup()))
+        # Row 5: News + Setup
+        parts.append(self._equal_row(self._render_news(), self._render_setup()))
         # Row 6: Open Positions
         parts.append(self._render_positions())
         # Row 7: Signal History & Logs (Side-by-side)
@@ -160,22 +165,25 @@ class Dashboard:
         t.add_column(style=DIM, width=10)
         t.add_column(style=WHITE)
         t.add_row("STATUS", Text("CONNECTED" if self.account_info.get('connected') else "OFFLINE", style=GREEN if self.account_info.get('connected') else RED))
-        # Safely fall back to '-' if server isn't available yet or config is empty
         server_name = self.account_info.get('server') or self.config.get('mt5', {}).get('server', '-')
         t.add_row("SERVER", str(server_name))
+        t.add_row("ACCOUNT", str(self.account_info.get('login', '-')))
+        t.add_row("STRATEGY", Text(getattr(self, 'selected_strategy_title', 'Unknown'), style=ACCENT))
         t.add_row("SESSION", Text(self.session, style=ACCENT))
         return Panel(t, title="[bold cyan]CONNECTION[/]", border_style="cyan", box=box.ROUNDED, expand=True, padding=(0, 1))
 
     def _render_account(self) -> Panel:
         acc = self.account_info
         t = Table(show_header=False, box=None, padding=(0, 1), expand=True)
-        t.add_column(style=DIM, width=10)
+        t.add_column(style=DIM, width=12)
         t.add_column(style=WHITE)
         t.add_row("BALANCE", Text(f"${acc.get('balance', 0):,.2f}", style=f"bold {WHITE}"))
         t.add_row("EQUITY", Text(f"${acc.get('equity', 0):,.2f}", style=f"bold {ACCENT}"))
+        t.add_row("MARGIN", Text(f"${acc.get('margin', 0):,.2f}", style=DIM))
+        t.add_row("FREE MARGIN", Text(f"${acc.get('margin_free', 0):,.2f}", style=GREEN))
         pl = acc.get('profit', 0)
         pl_color = GREEN if pl >= 0 else RED
-        t.add_row("P/L", Text(f"{'+' if pl >= 0 else ''}${pl:,.2f}", style=f"bold {pl_color}"))
+        t.add_row("FLOAT P/L", Text(f"{'+' if pl >= 0 else ''}${pl:,.2f}", style=f"bold {pl_color}"))
         return Panel(t, title="[bold green]ACCOUNT[/]", border_style="green", box=box.ROUNDED, expand=True, padding=(0, 1))
 
     def _render_market(self) -> Panel:
@@ -184,11 +192,16 @@ class Dashboard:
         t.add_column(style=DIM, width=10)
         t.add_column(style=WHITE)
         status_text = "[bold green][OPEN][/]" if self.market_open else "[bold red][CLOSED][/]"
-        symbol_line = Text.from_markup(f"[bold {YELLOW}]* {self.selected_symbol}[/] {status_text}")
+        n_block = " [bold red][NEWS LOCK][/]" if self.news_blocked else ""
+        symbol_line = Text.from_markup(f"[bold {YELLOW}]* {self.selected_symbol}[/] {status_text}{n_block}")
         t.add_row("SYMBOL", symbol_line)
-        price = tick.get('price', 0)
-        t.add_row("PRICE", Text(f"${price:,.2f}", style=f"bold {WHITE}"))
+        
+        bid = tick.get('price', 0)  # Bid is usually default 'price' assignment in mt5 tick
+        # Wait, our live loop just assigns `tick = {"price": tick.bid, "spread": ...}`
+        # Let's cleanly display the single price if ask isn't explicitly recorded cleanly
+        t.add_row("PRICE", Text(f"${bid:,.3f}", style=f"bold {WHITE}"))
         t.add_row("SPREAD", f"{tick.get('spread', 0):.2f}")
+        
         if self.fetch_status:
             t.add_row("DATA TICK", Text.from_markup(self.fetch_status))
         else:
@@ -261,20 +274,20 @@ class Dashboard:
         
         t = Table(show_header=True, box=None, padding=(0, 1), expand=True, header_style=DIM)
         t.add_column("TIME", width=10)
-        t.add_column("SYMBOL", width=12)
+        t.add_column("STRATEGY", width=12)
         t.add_column("DIR", width=6)
         t.add_column("CONF", justify="right", width=6)
         t.add_column("VERDICT")
         
         for s in reversed(list(self.signal_history)):
             timestamp = s.get('time', '--:--:--')
-            symbol = s.get('symbol', '-')
+            strategy = s.get('strategy_id', getattr(self, 'selected_strategy_title', 'Unknown'))
             dir_style = GREEN if s['direction'] == 'BUY' else RED
             v_style = GREEN if s.get('verdict') == 'ENTRY' else (RED if s.get('verdict') == 'REJECT' else YELLOW)
             
             t.add_row(
                 timestamp,
-                Text(symbol, style=YELLOW),
+                Text(strategy, style=YELLOW),
                 Text(s['direction'], style=dir_style),
                 f"{s['confidence']:.0f}%",
                 Text(s.get('reason', 'VALID'), style=v_style)
@@ -283,8 +296,14 @@ class Dashboard:
         return Panel(t, title="[bold magenta]SIGNAL HISTORY[/]", border_style="magenta", box=box.ROUNDED, expand=True, padding=(0, 1))
 
     def _render_positions(self) -> Panel:
-        if not self.positions:
-            return Panel(Text("  No open positions", style=DIM), title="[bold green]OPEN POSITIONS[/]", border_style="green", box=box.ROUNDED, expand=True, padding=(0, 1))
+        filtered = []
+        for p in self.positions:
+            s_name = str(getattr(p, 'symbol', '')) if not isinstance(p, dict) else str(p.get('symbol', ''))
+            if s_name == self.selected_symbol:
+                filtered.append(p)
+                
+        if not filtered:
+            return Panel(Text("  No open positions for selected symbol", style=DIM), title="[bold green]OPEN POSITIONS[/]", border_style="green", box=box.ROUNDED, expand=True, padding=(0, 1))
 
         t = Table(show_header=True, box=None, padding=(0, 1), expand=True, header_style=DIM)
         t.add_column("TICKET", width=10)
@@ -295,17 +314,16 @@ class Dashboard:
         t.add_column("CURRENT", justify="right")
         t.add_column("P/L", justify="right")
 
-        for p in self.positions:
+        for p in filtered:
             try:
-                # MT5 position objects are namedtuples or similar
                 ticket = str(getattr(p, 'ticket', '-'))
                 symbol = str(getattr(p, 'symbol', '-'))
                 pos_type = getattr(p, 'type', 0)
                 dir_str = "BUY" if pos_type == 0 else "SELL"
                 dir_style = GREEN if pos_type == 0 else RED
                 volume = f"{getattr(p, 'volume', 0):.2f}"
-                price_open = f"{getattr(p, 'price_open', 0):,.2f}"
-                price_current = f"{getattr(p, 'price_current', 0):,.2f}"
+                price_open = f"{getattr(p, 'price_open', 0):,.3f}"
+                price_current = f"{getattr(p, 'price_current', 0):,.3f}"
                 profit = getattr(p, 'profit', 0)
                 pnl_style = GREEN if profit >= 0 else RED
                 pnl_str = f"{'+' if profit >= 0 else ''}${profit:,.2f}"
@@ -319,8 +337,7 @@ class Dashboard:
                     price_current, 
                     Text(pnl_str, style=f"bold {pnl_style}")
                 )
-            except Exception as e:
-                # If we received a dict instead of a positional object (unlikely but safe)
+            except Exception:
                 if isinstance(p, dict):
                     t.add_row(str(p.get('ticket')), p.get('symbol'), p.get('type'), str(p.get('volume')), str(p.get('price_open')), str(p.get('price_current')), str(p.get('profit')))
         
@@ -356,15 +373,34 @@ class Dashboard:
 
         return Panel(t, title="[bold blue]AI ADVISOR[/]", border_style="blue", box=box.ROUNDED, expand=True, padding=(0, 1))
 
-    def _render_analysis(self) -> Panel:
-        t = Table(show_header=False, box=None, padding=(0, 1), expand=True)
-        t.add_column(style=DIM, width=14)
-        t.add_column(style=WHITE)
-        trend_color = GREEN if self.h4_trend == "BULLISH" else (RED if self.h4_trend == "BEARISH" else DIM)
-        t.add_row("H4 TREND", Text(f"{self.h4_trend}", style=trend_color))
-        struct_color = GREEN if self.m30_structure == "BULLISH" else (RED if self.m30_structure == "BEARISH" else DIM)
-        t.add_row("M30 STRUCTURE", Text(f"{self.m30_structure}", style=struct_color))
-        return Panel(t, title="[bold magenta]ANALYSIS[/]", border_style="magenta", box=box.ROUNDED, expand=True, padding=(0, 1))
+    def _render_news(self) -> Panel:
+        t = Table(show_header=True, box=None, padding=(0, 1), expand=True, header_style=DIM)
+        t.add_column("TIME (UTC)", width=10)
+        t.add_column("IMPACT", width=10)
+        t.add_column("EVENT")
+        
+        if not hasattr(self, 'news_events') or not self.news_events:
+            t.add_row("-", Text("CLEAR", style=GREEN), Text("No high-impact news incoming", style=DIM))
+        else:
+            now = datetime.now()
+            for ev in self.news_events:
+                ev_time_str = ev['time_utc'].strftime("%H:%M")
+                minutes = (ev['time_utc'].replace(tzinfo=None) - now).total_seconds() / 60
+                if abs(minutes) <= 30:
+                    status = f"[bold red]BLOCK ({int(minutes)}m)[/]"
+                else:
+                    status = f"IN {int(minutes)}m"
+                
+                t.add_row(
+                    Text(ev_time_str, style=WHITE),
+                    Text.from_markup(status),
+                    Text(f"[{ev['currency']}] {ev['title'][:30]}", style=RED)
+                )
+
+        if self.news_blocked:
+            t.add_row("", "", Text(f"{self.news_reason}", style="bold red"))
+            
+        return Panel(t, title="[bold red]HIGH IMPACT NEWS[/]", border_style="red", box=box.ROUNDED, expand=True, padding=(0, 1))
 
     def _render_setup(self) -> Panel:
         t = Table(show_header=False, box=None, padding=(0, 1), expand=True)
