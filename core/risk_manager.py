@@ -102,21 +102,11 @@ class RiskManager:
         self.current_max_balance = 0.0
         self.session_cfg = config.get("session_config", {})
         self.trade_history = []
-        
-        # New: Internal state tracking for can_take_trade
-        self.daily_trades = 0
-        self.daily_losses = 0
-        self.consecutive_losses = 0
-        self.current_equity = 0.0
-        self.current_balance = 0.0
 
     def reset_daily_stats(self, balance: float):
         """Reset daily tracking for circuit breakers."""
         self.day_start_balance = balance
         self.current_max_balance = balance # Reset drawdown peak daily for BT consistency
-        self.daily_trades = 0
-        self.daily_losses = 0
-        self.consecutive_losses = 0
         self.circuit_breaker.reset()
         if not self.silent: logger.info(f"Daily Risk Stats Reset. Day Start Balance: ${balance:.2f}")
 
@@ -333,39 +323,3 @@ class RiskManager:
             if not self.silent: logger.warning(f"Daily Loss Limit Hit: {daily_pnl_pct:.2f}%")
             return True
         return False
-
-    def update_state(self, equity: float, balance: float, daily_trades: int = None, consecutive_losses: int = None):
-        """Update the internal state of the risk manager."""
-        self.current_equity = equity
-        self.current_balance = balance
-        if daily_trades is not None:
-            self.daily_trades = daily_trades
-        if consecutive_losses is not None:
-            self.consecutive_losses = consecutive_losses
-
-    def can_take_trade(self, signal: dict) -> bool:
-        """
-        Validate trade against:
-        - daily loss limit
-        - max exposure
-        - circuit breaker
-        """
-        # 1. Check Portfolio Risk (Drawdown, Daily Loss)
-        allowed, reason = self.check_portfolio_risk(self.current_equity, self.current_balance)
-        if not allowed:
-            logger.info(f"Risk Manager Blocked Trade: {reason}")
-            return False
-            
-        # 2. Check Circuit Breakers (Daily Trades, Consecutive Losses, Daily Loss)
-        allowed, reason = self.check_circuit_breakers(
-            self.current_balance, 
-            self.current_equity, 
-            self.daily_trades, 
-            self.daily_losses, 
-            self.consecutive_losses
-        )
-        if not allowed:
-            logger.info(f"Risk Manager Blocked Trade: {reason}")
-            return False
-            
-        return True

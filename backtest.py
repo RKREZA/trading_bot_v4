@@ -133,8 +133,6 @@ class BacktestCLI:
                 d1 = self.data_fetcher.fetch_candles_range(symbol, "D1", dt_from, dt_to)
                 h1 = self.data_fetcher.fetch_candles_range(symbol, "H1", dt_from, dt_to)
                 progress.update(t1, completed=100)
-                
-            rprint(f"[cyan]Candle Counts:[/] M5: {len(m5)}, M15: {len(m15)}, H1: {len(h1)}, D1: {len(d1)}")
 
             # Symbol Injection
             sym_info = self.data_fetcher.get_symbol_info(symbol)

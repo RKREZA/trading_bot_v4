@@ -99,22 +99,10 @@ class BaseStrategy(ABC):
         self._enabled = value
 
     @abstractmethod
-    def generate_signal(self, market_data: MarketData) -> Optional[dict]:
+    def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
         """
         Core signal generation. Receives immutable market data, returns
-        a standardized signal dictionary if conditions are met, or None.
-        
-        Signal Format:
-        {
-            "strategy": str,
-            "symbol": str,
-            "direction": "BUY" | "SELL",
-            "entry": float,
-            "sl": float,
-            "tp": float,
-            "risk": float,          # fraction of capital (0.0–1.0)
-            "confidence": float     # 0.0–1.0
-        }
+        a TradeSignal if conditions are met, or None.
         
         MUST NOT modify market_data or any shared state.
         """

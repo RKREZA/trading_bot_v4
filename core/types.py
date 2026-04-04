@@ -1,37 +1,7 @@
 from pydantic import BaseModel, Field, ConfigDict
 import numpy as np
-from dataclasses import dataclass, fields, field
+from dataclasses import dataclass, fields
 from typing import Dict, List, Optional, Any
-
-@dataclass(slots=True)
-class Trade:
-    symbol: str
-    direction: str  # BUY / SELL
-    entry: float
-    sl: float
-    size: float
-    remaining_size: float
-    
-    tp1: float
-    tp2: float
-    tp1_hit: bool = False
-    tp2_hit: bool = False
-    
-    breakeven_moved: bool = False
-    trailing_active: bool = False
-    
-    open_time: Any = None
-    close_time: Any = None
-    
-    result: str = ""
-    partial_pnls: list = field(default_factory=list)
-    tick_size: float = 0.01
-    tick_value: float = 1.0
-    strategy_id: str = ""
-    session: str = ""
-    ticket: int = 0
-    signal: dict = field(default_factory=dict)
-    best_price: float = 0.0
 
 @dataclass(slots=True)
 class CandleArray:

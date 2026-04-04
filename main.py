@@ -46,9 +46,9 @@ from core.ai_advisor import AIAdvisor
 from core.risk_manager import RiskManager
 from core.notifications import NotificationManager
 from core.state_manager import SecureStateManager
+from core.strategy_orchestrator import StrategyOrchestrator
+from core.strategy_runtime import StrategyRuntime
 from core.news_filter import NewsFilter
-from core.orchestrator import StrategyOrchestrator as PortfolioOrchestrator
-from core.portfolio_manager import PortfolioManager
 from dashboard import Dashboard, AnalysisLogger, AnalysisLoggerHandler
 
 # Multi-Strategy
@@ -92,7 +92,6 @@ class TradingBot:
         self.daily_trades = 0
         self.win_count = 0
         self.loss_count = 0
-        self.consecutive_losses = {"LONDON": 0, "NEW_YORK": 0, "LONDON/NY": 0, "TOKYO": 0}
         self.running = False
         self.last_reset_day = None  # Will be set after first broker_clock sync
         self.max_drawdown_reached = 0.0
@@ -105,38 +104,50 @@ class TradingBot:
         self._shutdown_event = threading.Event()
 
         self.strategy_runtimes: List[StrategyRuntime] = []
-        self.orchestrator: Optional[PortfolioOrchestrator] = None
-        self.portfolio_manager: Optional[PortfolioManager] = None
-        self._build_portfolio_system()
+        self.orchestrator: Optional[StrategyOrchestrator] = None
+        self._build_strategy_runtimes()
 
         self._load_state()
 
-    def _build_portfolio_system(self):
-        """Initialize the new multi-strategy portfolio system."""
+    def _build_strategy_runtimes(self):
+        # Instantiate global shared RiskManager
         self.risk_manager = RiskManager(self.config, broker_clock=self.broker_clock)
         self.risk_manager.silent = True
 
-        strategies = []
         strategies_config = self.config.get("strategies", [])
         for strat_cfg in strategies_config:
-            if not strat_cfg.get("enabled", True):
-                continue
-                
             sid = strat_cfg.get("id")
             if sid == "sniper_v1":
                 from strategies.sniper_strategy import SniperStrategy
-                strategy = SniperStrategy(sid, strat_cfg)
+                strategy = SniperStrategy(self.config, self.analysis_logger)
             elif sid == "smc_v1":
                 from strategies.smc_strategy import SMCStrategy
-                strategy = SMCStrategy(sid, strat_cfg)
+                strategy = SMCStrategy(self.config, self.analysis_logger)
             else:
                 continue
-            strategies.append(strategy)
 
-        self.orchestrator = PortfolioOrchestrator(strategies, self.data_fetcher)
-        self.portfolio_manager = PortfolioManager(self.risk_manager, self.config, self.state_manager)
-        
-        logger.info(f"Portfolio system initialized with {len(strategies)} strategies.")
+            runtime = StrategyRuntime(
+                strategy=strategy,
+                global_config=self.config,
+                broker_clock=self.broker_clock,
+                risk_manager=self.risk_manager
+            )
+            self.strategy_runtimes.append(runtime)
+
+        # Build orchestrator
+        if self.strategy_runtimes:
+            self.orchestrator = StrategyOrchestrator(
+                runtimes=self.strategy_runtimes,
+                config=self.config,
+                connection=self.connection,
+                position_manager=self.position_manager,
+                notification_manager=self.notification_manager,
+                broker_clock=self.broker_clock,
+            )
+            logger.info(
+                "StrategyOrchestrator initialized with %d runtimes",
+                len(self.strategy_runtimes)
+            )
 
     def _load_config(self, config_path: str) -> dict:
         paths_to_check = ["config_optimized.json", config_path]
@@ -165,26 +176,10 @@ class TradingBot:
                     "last_reset": self.last_reset_day.isoformat() if self.last_reset_day else ""
                 },
                 "max_drawdown": self.max_drawdown_reached,
-                "positions": []
             }
             # Save per-strategy runtime states
             if self.orchestrator:
                 state["strategy_states"] = self.orchestrator.get_states()
-                
-            # Track Active Positions across all strategies
-            if mt5 is not None:
-                magic = int(self.config.get("magic_number", 234000))
-                with MT5Connection.MT5_LOCK:
-                    active = mt5.positions_get()
-                if active:
-                    for p in active:
-                        if p.magic == magic:
-                            state["positions"].append({
-                                "symbol": p.symbol,
-                                "strategy": p.comment if p.comment else "unknown",
-                                "entry": p.price_open,
-                                "direction": "BUY" if p.type == mt5.POSITION_TYPE_BUY else "SELL"
-                            })
 
         self.state_manager.save(state, self.state_file)
 
@@ -469,26 +464,11 @@ class TradingBot:
 
                         # ── Multi-Strategy Execution ──
                         if self.orchestrator:
-                            # 1. Update risk manager state
-                            self.risk_manager.update_state(
-                                equity=acc.get("equity", 0.0),
-                                balance=acc.get("balance", 0.0),
-                                daily_trades=self.daily_trades,
-                                consecutive_losses=self.consecutive_losses[session] if hasattr(self, 'consecutive_losses') and session in self.consecutive_losses else 0
+                            self.orchestrator.execute_cycle(
+                                symbol, h1_candles, m15_candles, m5_candles,
+                                d1_candles, current_price, session
                             )
-                            
-                            # 2. Run run cycle to collect signals
-                            signals = self.orchestrator.run_cycle(symbol, session, current_price, self.broker_clock)
-                            
-                            # 3. Portfolio Manager processes signals
-                            open_positions = self.connection.get_positions(symbol)
-                            approved_trades = self.portfolio_manager.process_signals(signals, acc, open_positions)
-                            
-                            # 4. Centralized Execution
-                            for trade in approved_trades:
-                                self._execute_portfolio_trade(trade)
-                            
-                            analysis = {"trend": "PORTFOLIO", "regime": f"{len(approved_trades)} approved"}
+                            analysis = self.orchestrator.last_analysis
                         else:
                             analysis = {}
 
@@ -514,71 +494,8 @@ class TradingBot:
             self.connection.disconnect()
             logger.info("Shutdown complete.")
 
-    def _execute_portfolio_trade(self, signal: dict):
-        """Standardized execution for signals approved by PortfolioManager."""
-        symbol = signal["symbol"]
-        strategy_id = signal["strategy"]
-        direction = signal["direction"]
-        entry = signal["entry"]
-        sl = signal["sl"]
-        tp = signal["tp"]
-        risk_pct = signal["risk"]  # already fraction 0.0-1.0
-        scale = signal.get("allocation_scale", 1.0)
-        
-        # Calculate Lot Size
-        acc = self.connection.get_account_snapshot()
-        balance = acc.get("balance", 0.0)
-        
-        sym_info = self.connection.get_symbol_info(symbol)
-        if not sym_info:
-            return
-
-        point = sym_info.get("point", 0.01)
-        sl_dist = abs(entry - sl)
-        
-        # Enforce Minimum SL
-        if sl_dist < point * 10:
-            logger.warning(f"[{strategy_id}] SL too tight ({sl_dist}). Scaling out.")
-            return
-
-        # Portfolio Allocation Math: allocated_equity = total_equity * allocation[strategy]
-        # Then risk is applied to that allocated equity.
-        risk_dollar = (balance * scale) * risk_pct
-        
-        from core.lot_calculator import LotCalculator
-        lot = LotCalculator.calculate(
-            risk_amount=risk_dollar,
-            sl_distance=sl_dist,
-            tick_size=point,
-            tick_value=sym_info.get("trade_tick_value", 1.0),
-            volume_min=sym_info.get("volume_min", 0.01),
-            volume_max=sym_info.get("volume_max", 100.0),
-            volume_step=sym_info.get("volume_step", 0.01),
-        )
-
-        from core.order_tagger import OrderTagger
-        trade_id = f"{int(time.time())}"
-        comment = OrderTagger.create_comment(strategy_id, trade_id)
-
-        logger.info(f"PORTFOLIO EXEC: {strategy_id} | {direction} {symbol} | Lot: {lot} | Comment: {comment}")
-
-        from core.strategy_engine import TradeSignal as _LegacySignal
-        # Connection still expects the TradeSignal object for now
-        legacy_sig = _LegacySignal(direction, entry, sl, tp, session=signal.get("session", "UNKNOWN"))
-        legacy_sig.tp1_price = signal.get("tp1", 0.0)
-        legacy_sig.tp2_price = signal.get("tp2", 0.0)
-
-        result = self.connection.place_order(symbol, legacy_sig, lot, comment=comment)
-        
-        if result:
-            self.daily_trades += 1
-            if self.notification_manager:
-                self.notification_manager.notify_trade_open(
-                    symbol=symbol, direction=direction,
-                    entry=entry, lot=lot, sl=sl, tp=tp
-                )
-            # Register in state? 
-            # We'll use MT5 comments for reconciliation now.
+    def run_optimization(self, symbol="XAUUSDm", start_date=None, end_date=None,
+                         count=10000, mode="anchored"):
         logger.info(f"Starting WFO Optimization for {symbol} (Mode: {mode})")
         if not self.connection.connect():
             return
