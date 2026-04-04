@@ -115,15 +115,18 @@ class TradingBot:
         self.risk_manager.silent = True
 
         strategies_config = self.config.get("strategies", [])
+        from core.connection import BOT_MAGIC_NUMBER
+        
         for strat_cfg in strategies_config:
             sid = strat_cfg.get("id")
-            if sid == "sniper_v1":
-                from strategies.sniper_strategy import SniperStrategy
-                strategy = SniperStrategy(self.config, self.analysis_logger)
-            elif sid == "smc_v1":
-                from strategies.smc_strategy import SMCStrategy
-                strategy = SMCStrategy(self.config, self.analysis_logger)
-            else:
+            st_type = strat_cfg.get("type")
+            if not sid or not st_type:
+                continue
+                
+            try:
+                strategy = create_strategy(sid, st_type, self.config)
+            except ValueError as e:
+                logger.error(f"Failed to create strategy {sid}: {e}")
                 continue
 
             runtime = StrategyRuntime(
@@ -162,7 +165,8 @@ class TradingBot:
                         return cfg
                 except Exception as e:
                     logger.error(f"Failed to load {path}: {e}")
-        return {"symbol": "XAUUSDm", "magic_number": 234000}
+        from core.connection import BOT_MAGIC_NUMBER
+        return {"symbol": "XAUUSDm", "magic_number": BOT_MAGIC_NUMBER}
 
     def _save_state(self):
         with self.state_lock:
@@ -207,7 +211,8 @@ class TradingBot:
         if mt5 is None or not self.orchestrator:
             return
         try:
-            magic = int(self.config.get("magic_number", 234000))
+            from core.connection import BOT_MAGIC_NUMBER
+            magic = int(self.config.get("magic_number", BOT_MAGIC_NUMBER))
             with MT5Connection.MT5_LOCK:
                 active = mt5.positions_get()
             live_tickets = {p.ticket: p for p in active if p.magic == magic} if active else {}

@@ -395,7 +395,8 @@ class StrategyOrchestrator:
             return
 
         try:
-            magic = int(self.config.get("magic_number", 234000))
+            from .connection import BOT_MAGIC_NUMBER
+            magic = int(self.config.get("magic_number", BOT_MAGIC_NUMBER))
             with self.connection.MT5_LOCK:
                 active = mt5.positions_get()
             live_tickets = {p.ticket for p in active if p.magic == magic} if active else set()
@@ -446,7 +447,8 @@ class StrategyOrchestrator:
         if not self.config.get("trailing_stop_enabled", True):
             return
 
-        magic = self.config.get("magic_number", 234000)
+        from .connection import BOT_MAGIC_NUMBER
+        magic = self.config.get("magic_number", BOT_MAGIC_NUMBER)
         positions = self.connection.get_positions(symbol)
         if not positions:
             return
@@ -490,9 +492,14 @@ class StrategyOrchestrator:
     def manage_partials(self, symbol: str, bid: float, ask: float) -> None:
         """
         Dynamically cross-reference live Bid/Ask vs registered tp1_price/tp2_price.
-        Execute 50% lot closures over the API when thresholds are crossed.
+        Execute configurable lot closures over the API when thresholds are crossed.
         """
-        magic = self.config.get("magic_number", 234000)
+        from .connection import BOT_MAGIC_NUMBER
+        magic = self.config.get("magic_number", BOT_MAGIC_NUMBER)
+        
+        # Get ratios from config, default to 50% for each step
+        ratios = self.config.get("execution", {}).get("partial_close_ratios", [0.5, 0.5])
+        
         positions = self.connection.get_positions(symbol)
         if not positions:
             return
@@ -516,33 +523,37 @@ class StrategyOrchestrator:
 
                 # BUY Partial Check
                 if is_buy:
-                    if closed_count == 0 and tp1 > 0 and bid >= tp1:
-                        close_vol = round(current_vol * 0.50, 2)
+                    if closed_count < len(ratios) and tp1 > 0 and bid >= tp1 and closed_count == 0:
+                        ratio = ratios[0]
+                        close_vol = round(current_vol * ratio, 2)
                         if close_vol >= 0.01:
-                            logger.info(f"[{runtime.strategy_id}] TP1 Reached (BUY): Closing {close_vol} lots at {bid}")
+                            logger.info(f"[{runtime.strategy_id}] TP1 Reached (BUY): Closing {close_vol} lots ({int(ratio*100)}%) at {bid}")
                             if self.connection.close_position_partial(ticket, close_vol):
                                 runtime.positions.update_position(ticket, {"partial_closed_count": 1})
                     
-                    elif closed_count == 1 and tp2 > 0 and bid >= tp2:
-                        close_vol = round(current_vol * 0.50, 2)
+                    elif closed_count < len(ratios) and tp2 > 0 and bid >= tp2 and closed_count == 1:
+                        ratio = ratios[1]
+                        close_vol = round(current_vol * ratio, 2)
                         if close_vol >= 0.01:
-                            logger.info(f"[{runtime.strategy_id}] TP2 Reached (BUY): Closing {close_vol} lots at {bid}")
+                            logger.info(f"[{runtime.strategy_id}] TP2 Reached (BUY): Closing {close_vol} lots ({int(ratio*100)}%) at {bid}")
                             if self.connection.close_position_partial(ticket, close_vol):
                                 runtime.positions.update_position(ticket, {"partial_closed_count": 2})
 
                 # SELL Partial Check
                 else:
-                    if closed_count == 0 and tp1 > 0 and ask <= tp1:
-                        close_vol = round(current_vol * 0.50, 2)
+                    if closed_count < len(ratios) and tp1 > 0 and ask <= tp1 and closed_count == 0:
+                        ratio = ratios[0]
+                        close_vol = round(current_vol * ratio, 2)
                         if close_vol >= 0.01:
-                            logger.info(f"[{runtime.strategy_id}] TP1 Reached (SELL): Closing {close_vol} lots at {ask}")
+                            logger.info(f"[{runtime.strategy_id}] TP1 Reached (SELL): Closing {close_vol} lots ({int(ratio*100)}%) at {ask}")
                             if self.connection.close_position_partial(ticket, close_vol):
                                 runtime.positions.update_position(ticket, {"partial_closed_count": 1})
                     
-                    elif closed_count == 1 and tp2 > 0 and ask <= tp2:
-                        close_vol = round(current_vol * 0.50, 2)
+                    elif closed_count < len(ratios) and tp2 > 0 and ask <= tp2 and closed_count == 1:
+                        ratio = ratios[1]
+                        close_vol = round(current_vol * ratio, 2)
                         if close_vol >= 0.01:
-                            logger.info(f"[{runtime.strategy_id}] TP2 Reached (SELL): Closing {close_vol} lots at {ask}")
+                            logger.info(f"[{runtime.strategy_id}] TP2 Reached (SELL): Closing {close_vol} lots ({int(ratio*100)}%) at {ask}")
                             if self.connection.close_position_partial(ticket, close_vol):
                                 runtime.positions.update_position(ticket, {"partial_closed_count": 2})
                 
