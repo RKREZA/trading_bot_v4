@@ -68,7 +68,7 @@ class SniperStrategy(BaseStrategy):
 
     # ── Signal Generation ────────────────────────────────────────────────────
 
-    def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
+    def generate_signal(self, market_data: MarketData) -> Optional[dict]:
         m5      = market_data.m5_candles
         session = market_data.session
         price   = market_data.current_price
@@ -202,7 +202,7 @@ class SniperStrategy(BaseStrategy):
                 sig = self._build("SELL", price, atr_14, m_high, m_low, last,
                                   session, _CONF_T3, "T3:BearEngulf")
 
-        if sig is None or sig.confidence < self.min_confidence:
+        if sig is None or sig["confidence"] < (self.min_confidence / 100.0):
             return None
 
         return sig
@@ -213,31 +213,41 @@ class SniperStrategy(BaseStrategy):
         sess_mult = 1.5 if session == "TOKYO" else 1.2 if session == "NEW_YORK" else 1.0
         buf = atr * self.sl_atr_mult * sess_mult
 
-        sig = TradeSignal(direction, price, 0.0, 0.0, session=session)
-        sig.confidence = conf
-        sig.reasons    = [reason]
+        risk_pct = self.config.get("risk", {}).get("risk_per_trade_pct", 1.0)
+        
+        sig = {
+            "strategy": self.strategy_id,
+            "symbol": self.config.get("symbol", "XAUUSDm"),
+            "direction": direction,
+            "entry": price,
+            "sl": 0.0,
+            "tp": 0.0,
+            "risk": risk_pct / 100.0,
+            "confidence": conf / 100.0,
+            "reasons": [reason],
+            "tp1": 0.0,
+            "tp2": 0.0
+        }
 
         if direction == "BUY":
-            raw_sl        = min(float(last["low"]), float(m_low)) - buf
-            sig.stop_loss = max(raw_sl, price - atr * self.sl_max_atr_mult)
-            risk          = price - sig.stop_loss
-            if risk <= 0:
+            raw_sl = min(float(last["low"]), float(m_low)) - buf
+            sig["sl"] = max(raw_sl, price - atr * self.sl_max_atr_mult)
+            risk_dist = price - sig["sl"]
+            if risk_dist <= 0:
                 return None
-            sig.take_profit = 0.0
-            sig.tp1_price   = price + risk * 1.0   # 50% partial at 1.0R to guarantee safety
-            sig.tp2_price   = price + risk * 10.0  # Massive runner up to 10.0R
+            sig["tp"] = 0.0
+            sig["tp1"] = price + risk_dist * 1.0
+            sig["tp2"] = price + risk_dist * 10.0
         else:
-            raw_sl        = max(float(last["high"]), float(m_high)) + buf
-            sig.stop_loss = min(raw_sl, price + atr * self.sl_max_atr_mult)
-            risk          = sig.stop_loss - price
-            if risk <= 0:
+            raw_sl = max(float(last["high"]), float(m_high)) + buf
+            sig["sl"] = min(raw_sl, price + atr * self.sl_max_atr_mult)
+            risk_dist = sig["sl"] - price
+            if risk_dist <= 0:
                 return None
-            sig.take_profit = 0.0
-            sig.tp1_price   = price - risk * 1.0
-            sig.tp2_price   = price - risk * 10.0
+            sig["tp"] = 0.0
+            sig["tp1"] = price - risk_dist * 1.0
+            sig["tp2"] = price - risk_dist * 10.0
 
-        sig.rr_ratio        = 0.0
-        sig.confluence_score = int(conf / 10)
         return sig
 
     # ── Lifecycle ────────────────────────────────────────────────────────────

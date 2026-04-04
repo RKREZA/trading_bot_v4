@@ -35,31 +35,9 @@ from core.risk_manager import RiskManager
 from core.performance_tracker import PerformanceTracker
 from core.base_strategy import BaseStrategy, MarketData
 from core.monte_carlo import MonteCarlo
+from core.types import Trade
 
 logger = logging.getLogger("trading_bot.backtester")
-
-
-class _OpenTrade:
-    """Per-strategy open trade state (backtest-only)."""
-    def __init__(self, ticket: int, signal: Any, entry_price: float, lot: float,
-                 sl: float, tp: float, entry_time: datetime, session: str,
-                 tick_size: float, tick_value: float, strategy_id: str):
-        self.ticket        = ticket
-        self.signal        = signal
-        self.direction     = signal.direction
-        self.entry_price   = entry_price
-        self.lot           = lot
-        self.original_lot  = lot          # Track for commission on full size
-        self.sl            = sl
-        self.tp            = tp
-        self.entry_time    = entry_time
-        self.session       = session
-        self.best_price    = entry_price
-        self.partial_closed_count = 0
-        self.partial_pnl   = 0.0          # Accumulated PnL from partial closes
-        self.tick_size     = tick_size
-        self.tick_value    = tick_value
-        self.strategy_id   = strategy_id
 
 
 class _StrategyBacktestState:
@@ -71,7 +49,7 @@ class _StrategyBacktestState:
         self.risk_manager = risk_manager
         self.performance = performance
         self.balance = initial_balance
-        self.open_trade: Optional[_OpenTrade] = None
+        self.open_trade: Optional[Trade] = None
         self.pending_signal = None
         self.trades: List[dict] = []
         self.daily_trades = 0
@@ -126,7 +104,7 @@ class MultiStrategyBacktestEngine:
         tick_value = symbol_cfg.get("tick_value", 1.0)
 
         # Initialize per-strategy states
-        states: List[_StrategyBacktestState] = []
+        states_map: Dict[str, _StrategyBacktestState] = {}
         for strategy in self.strategies:
             if not strategy.enabled:
                 continue
@@ -138,15 +116,22 @@ class MultiStrategyBacktestEngine:
             rm.silent = True
             rm.reset_daily_stats(self.initial_balance)
             perf = PerformanceTracker(strategy.strategy_id, self.initial_balance)
-            states.append(_StrategyBacktestState(strategy, rm, perf, self.initial_balance))
+            states_map[strategy.strategy_id] = _StrategyBacktestState(strategy, rm, perf, self.initial_balance)
 
-        if not states:
+        if not states_map:
             logger.warning("No enabled strategies to backtest.")
             return {}
+            
+        # Initialize Orchestrator and Portfolio Manager
+        from core.orchestrator import StrategyOrchestrator as PortfolioOrchestrator
+        from core.portfolio_manager import PortfolioManager
+        orchestrator = PortfolioOrchestrator(self.strategies, data_fetcher)
+        # We'll use a dummy state manager for BT
+        portfolio_manager = PortfolioManager(states_map[list(states_map.keys())[0]].risk_manager, self.config, None)
 
         # Preprocess for each strategy
         pre_ctx_map: Dict[str, Optional[dict]] = {}
-        for st in states:
+        for st in states_map.values():
             ctx = st.strategy.preprocess(htf_candles, m15_candles, m5_candles, d1_candles)
             pre_ctx_map[st.strategy_id] = ctx
 
@@ -167,7 +152,7 @@ class MultiStrategyBacktestEngine:
         )
         m5_atr_series = pd.Series(m5_tr).rolling(14).mean().values
 
-        strategy_names = [s.strategy_id for s in states]
+        strategy_names = [s.strategy_id for s in states_map.values()]
         pbar = tqdm(
             total=len(m5_times),
             desc=f"BT:{symbol} ({','.join(strategy_names)})",
@@ -184,7 +169,7 @@ class MultiStrategyBacktestEngine:
 
             # Daily boundary & reset
             is_new_day = False
-            for st in states:
+            for st in states_map.values():
                 if st.last_date != candle_dt.date():
                     st.risk_manager.record_daily_close(st.balance)
                     st.risk_manager.reset_daily_stats(st.balance)
@@ -208,12 +193,14 @@ class MultiStrategyBacktestEngine:
             spread = self.config.get("backtest", {}).get("session_spreads", {}).get(session, 1.5) * point
 
             # Global Portfolio Circuit Breaker (Account Level)
-            if states:
+            if states_map:
                 if portfolio_halted_today:
                     # Daily pause - skip taking new trades, but allow managing open ones
                     pass 
                 else:
-                    allowed, rs = states[0].risk_manager.check_portfolio_risk(states[0].balance, states[0].balance)
+                    # Use the first risk manager as a proxy for the portfolio check
+                    first_st = list(states_map.values())[0]
+                    allowed, rs = first_st.risk_manager.check_portfolio_risk(first_st.balance, first_st.balance)
                     if not allowed:
                         if "Daily Loss" in rs:
                             portfolio_halted_today = True
@@ -223,36 +210,24 @@ class MultiStrategyBacktestEngine:
                             pbar.set_postfix({"HARD_HALT": rs})
                             break
 
-            # Process each strategy independently
-            for st in states:
-                # 1. Handle pending signals (Anti-Lookahead)
-                if st.pending_signal and not st.open_trade:
-                    entry_price = m5_opens[i] + (spread if st.pending_signal.direction == "BUY" else -spread)
-                    allowed, _ = st.risk_manager.check_circuit_breakers(
-                        st.balance, st.balance, st.daily_trades, 0, st.consecutive_losses
-                    )
-                    if allowed:
-                        risk_pct = st.risk_manager.calculate_scaled_risk(st.balance, symbol=symbol, session=session)
-                        risk_val = st.balance * (risk_pct / 100.0)
-                        sl_dist = abs(entry_price - st.pending_signal.stop_loss)
-                        lot = LotCalculator.calculate(
-                            risk_val, sl_dist, point, tick_value,
-                            volume_min=symbol_cfg.get("min_lot", 0.01)
-                        )
-                        st.open_trade = _OpenTrade(
-                            int(t), st.pending_signal, entry_price, lot,
-                            st.pending_signal.stop_loss, st.pending_signal.take_profit,
-                            candle_dt, session, point, tick_value, st.strategy_id
-                        )
-                        st.daily_trades += 1
-                    st.pending_signal = None
-
-                # 2. Manage open trades
+            # 1. Manage open trades across all strategies
+            for sid, st in states_map.items():
                 if st.open_trade:
-                    closed, trade_record = self._manage_open_trade(
-                        st.open_trade, i, m5_highs, m5_lows, m5_opens,
-                        spread, candle_dt, m5_atr_series, st, data_fetcher, symbol, t
+                    # Execute deterministic trailing stop if enabled before checking closures
+                    exec_cfg = self.config.get("execution", {})
+                    if exec_cfg.get("enable_trailing", True) and st.open_trade.breakeven_moved:
+                        tr_mult = exec_cfg.get("trailing_atr_mult", 2.0)
+                        atr = float(m5_atr_series[i]) or 1.0
+                        if st.open_trade.direction == "BUY":
+                            st.open_trade.sl = max(st.open_trade.sl, m5_closes[i] - atr * tr_mult)
+                        else:
+                            st.open_trade.sl = min(st.open_trade.sl, m5_closes[i] + atr * tr_mult + spread)
+
+                    closed, trade_record = self.simulate_trade(
+                        st.open_trade, m5_opens[i], m5_highs[i], m5_lows[i], m5_closes[i],
+                        spread, float(m5_atr_series[i]), exec_cfg, st, candle_dt
                     )
+                    
                     if closed and trade_record:
                         st.trades.append(trade_record)
                         st.risk_manager.update_history(trade_record)
@@ -263,38 +238,119 @@ class MultiStrategyBacktestEngine:
                         else:
                             st.consecutive_losses = 0
                         st.open_trade = None
+            # 2. Update Risk Manager States for all strategies
+            for st in states_map.values():
+                st.risk_manager.update_state(
+                    equity=st.balance,
+                    balance=st.balance,
+                    daily_trades=st.daily_trades,
+                    consecutive_losses=st.consecutive_losses
+                )
 
-                # 3. Generate new signals (for entry at NEXT candle)
-                if not st.open_trade and not st.pending_signal and is_enabled and not portfolio_halted_today:
-                    pre_ctx = pre_ctx_map.get(st.strategy_id)
-                    m5_meta = pre_ctx.get("m5", []) if pre_ctx else []
-                    meta_i = m5_meta[i] if i < len(m5_meta) else {}
+            # 3. Collect Signals via Orchestrator
+            # We mock the broker_clock with a simpler interface for BT
+            class MockClock:
+                def __init__(self, dt): self.dt = dt
+                def now(self): return self.dt
+            
+            mock_clock = MockClock(candle_dt)
+            # Fetch is handled inside orchestrator for live, but here we mock it or pass candles
+            # In BT, the candles are pre-fetched. We'll modify orchestrator to accept data or 
+            # we'll just manually feed the market_data as before but through the standardized interface.
+            
+            from core.base_strategy import MarketData
+            
+            # Base market data (without strategy-specific preprocessed data)
+            base_md = {
+                "symbol": symbol,
+                "htf_candles": htf_candles[:np.searchsorted(htf_candles.time, t, side='right')],
+                "m15_candles": m15_candles[:np.searchsorted(m15_candles.time, t, side='right')],
+                "m5_candles": m5_candles[:i + 1],
+                "d1_candles": d1_candles,
+                "current_price": m5_closes[i],
+                "session": session,
+                "timestamp": candle_dt
+            }
+            
+            signals = []
+            for sid, st in states_map.items():
+                if not st.open_trade and is_enabled and not portfolio_halted_today:
+                    # Provide strategy-specific preprocessed data
+                    p_ctx = pre_ctx_map.get(sid, {}).get("m5", [])
+                    base_md["preprocessed"] = p_ctx[i] if i < len(p_ctx) else {}
+                    
+                    market_data = MarketData(**base_md)
+                    sig = st.strategy.generate_signal(market_data)
+                    if sig:
+                        signals.append(sig)
 
-                    market_data = MarketData(
-                        symbol=symbol,
-                        htf_candles=htf_candles[:np.searchsorted(htf_candles.time, t, side='right')],
-                        m15_candles=m15_candles[:np.searchsorted(m15_candles.time, t, side='right')],
-                        m5_candles=m5_candles[:i + 1],
-                        d1_candles=d1_candles,
-                        current_price=m5_closes[i],
-                        session=session,
-                        timestamp=candle_dt,
-                        preprocessed=meta_i,
+            # 3. Portfolio Manager approves signals
+            # Mock account info for PM
+            total_equity = sum(st.balance for st in states_map.values())
+            acc_mock = {"equity": total_equity, "balance": total_equity}
+            
+            # Mock positions for PM conflict check
+            mock_positions = []
+            class MockPos:
+                def __init__(self, symbol, type):
+                    self.symbol = symbol
+                    self.type = type # 0=BUY, 1=SELL
+            for st in states_map.values():
+                if st.open_trade:
+                    mock_positions.append(MockPos(symbol, 0 if st.open_trade.direction == "BUY" else 1))
+
+            approved = portfolio_manager.process_signals(signals, acc_mock, mock_positions)
+
+            # 4. Execute approved signals at NEXT candle open (Anti-Lookahead)
+            for sig in approved:
+                st = states_map.get(sig["strategy"])
+                if st and not st.open_trade:
+                    # Simplified NEXT candle execution
+                    entry_price = m5_opens[i+1] if i+1 < len(m5_opens) else m5_closes[i]
+                    entry_price += (spread if sig["direction"] == "BUY" else -spread)
+                    
+                    sl_dist = abs(entry_price - sig["sl"])
+                    risk_pct = sig["risk"]
+                    scale = sig.get("allocation_scale", 1.0)
+                    risk_val = (st.balance * scale) * risk_pct
+                    
+                    lot = LotCalculator.calculate(
+                        risk_val, sl_dist, point, tick_value,
+                        volume_min=symbol_cfg.get("min_lot", 0.01)
                     )
-                    signal = st.strategy.generate_signal(market_data)
-                    if signal:
-                        st.pending_signal = signal
+                    
+                    # Store as open trade (Anti-Lookahead)
+                    st.open_trade = Trade(
+                        symbol=symbol,
+                        direction=sig["direction"],
+                        entry=entry_price,
+                        sl=sig["sl"],
+                        size=lot,
+                        remaining_size=lot,
+                        tp1=float(sig.get("tp1", 0.0)),
+                        tp2=float(sig.get("tp2") or sig.get("tp", 0.0)),
+                        open_time=candle_dt,
+                        tick_size=point,
+                        tick_value=tick_value,
+                        strategy_id=sig["strategy"],
+                        session=session,
+                        ticket=int(t),
+                        signal=sig,
+                        best_price=entry_price
+                    )
+                    
+                    st.daily_trades += 1
 
             # Progress
-            total_trades = sum(len(s.trades) for s in states)
-            avg_bal = sum(s.balance for s in states) / len(states)
+            total_trades = sum(len(s.trades) for s in states_map.values())
+            avg_bal = sum(s.balance for s in states_map.values()) / len(states_map)
             pbar.set_postfix({"avg_bal": f"${avg_bal:.0f}", "trades": total_trades})
 
         pbar.close()
 
         # ── Finalize results ───────────────────────────────────────
         results = {}
-        for st in states:
+        for st in states_map.values():
             metrics = st.performance.finalize()
             metrics["trades"] = st.trades
             results[st.strategy_id] = metrics
@@ -315,203 +371,129 @@ class MultiStrategyBacktestEngine:
                 )
 
         # Combined portfolio view
-        if len(states) > 1:
-            results["portfolio"] = self._build_portfolio_metrics(states)
+        if len(states_map) > 1:
+            results["portfolio"] = self._build_portfolio_metrics(list(states_map.values()))
 
         return results
 
-    def _manage_open_trade(
-        self, trade: _OpenTrade, i: int,
-        m5_highs, m5_lows, m5_opens, spread: float,
-        candle_dt: datetime, m5_atr_series, st: _StrategyBacktestState,
-        data_fetcher: Any = None, symbol: str = "", t: int = 0
+    def simulate_trade(
+        self, trade: Trade, open_p: float, high_p: float, low_p: float, close_p: float,
+        spread: float, atr: float, config: dict, st: _StrategyBacktestState,
+        candle_dt: datetime
     ) -> Tuple[bool, Optional[dict]]:
         """
-        Bias-corrected SL/TP/Trailing logic for a single open trade.
-
-        Fixes applied:
-          [1] Intra-candle SL/TP ambiguity: if both SL and TP are hit on the same
-              candle, SL is assumed to trigger first (pessimistic / conservative).
-          [2] SL gap slippage: when SL is hit, apply random gap (0..15% ATR)
-              to simulate real-world gapping through stop levels.
-          [3] TP slippage: small adverse slippage on TP fills (5% ATR).
-          [4] Partial close PnL tracked in trade.partial_pnl for correct reporting.
-          [5] Commission and overnight swap deducted at trade close.
+        Simulates deterministic intra-candle execution across [O -> L, L -> H, H -> C].
+        Handles partial closes and sequential state transitions without lookahead.
         """
-        bid_l, bid_h = m5_lows[i], m5_highs[i]
-        ask_l, ask_h = bid_l + spread, bid_h + spread
-        atr = float(m5_atr_series[i]) or 1.0
+        is_bull = close_p >= open_p
+        segments = [(open_p, low_p), (low_p, high_p), (high_p, close_p)] if is_bull else \
+                   [(open_p, high_p), (high_p, low_p), (low_p, close_p)]
+
         closed = False
-        result = "SL"
-        exit_p = trade.sl
-        use_fixed_tp = (trade.tp != 0)
+        result = ""
+        exit_p = 0.0
 
-        if trade.direction == "BUY":
-            sl_hit = bid_l <= trade.sl
-            tp_hit = use_fixed_tp and bid_h >= trade.tp
-
-            # Ultra-fidelity intra-candle chronologic check
-            if sl_hit and tp_hit and data_fetcher:
-                try:
-                    # Fetch M1 data for this specific 5-min block to resolve priority
-                    m1_candles = data_fetcher.fetch_candles_range(symbol, "M1", t, t + 300)
-                    if m1_candles and len(m1_candles.low) > 0:
-                        sl_hit = False
-                        tp_hit = False
-                        for j in range(len(m1_candles.time)):
-                            # Check if price hit TP level before SL level within the M5 bar
-                            if m1_candles.high[j] >= trade.tp:
-                                tp_hit = True
-                                break
-                            if m1_candles.low[j] <= trade.sl:
-                                sl_hit = True
-                                break
-                except Exception as e:
-                    pass # Fallback to pessimistic SL logic
+        for p_start, p_end in segments:
+            if trade.remaining_size <= 0:
+                break
+                
+            min_p, max_p = min(p_start, p_end), max(p_start, p_end)
+            events = []
+            
+            if trade.direction == "BUY":
+                # Check bounds
+                if trade.sl > 0 and min_p <= trade.sl <= max_p:
+                    events.append((trade.sl, "SL"))
+                if not trade.tp1_hit and trade.tp1 > 0 and min_p <= trade.tp1 <= max_p:
+                    events.append((trade.tp1, "TP1"))
+                if not trade.tp2_hit and trade.tp2 > 0 and min_p <= trade.tp2 <= max_p:
+                    events.append((trade.tp2, "TP2"))
+            else:  # SELL (Trigger logic on Ask = Bid + Spread)
+                ask_min, ask_max = min_p + spread, max_p + spread
+                if trade.sl > 0 and ask_min <= trade.sl <= ask_max:
+                    events.append((trade.sl - spread, "SL"))
+                if not trade.tp1_hit and trade.tp1 > 0 and ask_min <= trade.tp1 <= ask_max:
+                    events.append((trade.tp1 - spread, "TP1"))
+                if not trade.tp2_hit and trade.tp2 > 0 and ask_min <= trade.tp2 <= ask_max:
+                    events.append((trade.tp2 - spread, "TP2"))
+            
+            # Sort chronologically by proximity to p_start
+            events.sort(key=lambda x: abs(x[0] - p_start))
+            
+            for ev_price, ev_type in events:
+                if trade.remaining_size <= 0:
+                    break
                     
-            if sl_hit:
-                # [2] Gap slippage on SL — exit below the SL level
-                gap = random.uniform(0, atr * self._sl_gap_atr_pct)
-                exit_p = trade.sl - gap
-                result, closed = "SL", True
-            elif tp_hit:
-                # [3] TP slippage — slight adverse fill
-                slip = random.uniform(0, atr * self._tp_slip_atr_pct)
-                exit_p = trade.tp - slip
-                result, closed = "TP", True
-            else:
-                # Partial 1: 50% at tp1_price
-                if (trade.partial_closed_count == 0 and
-                        trade.signal.tp1_price > 0 and bid_h >= trade.signal.tp1_price):
-                    p_lot = round(trade.lot * 0.50, 2)
-                    if p_lot >= 0.01:
-                        p_pnl = ((trade.signal.tp1_price - trade.entry_price)
-                                  / trade.tick_size) * trade.tick_value * p_lot
-                        st.balance       += p_pnl
-                        trade.partial_pnl += p_pnl
-                        trade.lot = max(0.01, round(trade.lot - p_lot, 2))
-                        trade.partial_closed_count += 1
-                # Partial 2: 50% at tp2_price
-                if (trade.partial_closed_count == 1 and
-                        trade.signal.tp2_price > 0 and bid_h >= trade.signal.tp2_price):
-                    p_lot = round(trade.lot * 0.50, 2)
-                    if p_lot >= 0.01:
-                        p_pnl = ((trade.signal.tp2_price - trade.entry_price)
-                                  / trade.tick_size) * trade.tick_value * p_lot
-                        st.balance       += p_pnl
-                        trade.partial_pnl += p_pnl
-                        trade.lot = max(0.01, round(trade.lot - p_lot, 2))
-                        trade.partial_closed_count += 1
-        else:  # SELL
-            sl_hit = ask_h >= trade.sl
-            tp_hit = use_fixed_tp and ask_l <= trade.tp
+                if ev_type == "SL":
+                    gap = random.uniform(0, atr * self._sl_gap_atr_pct)
+                    exit_p = trade.sl - gap if trade.direction == "BUY" else trade.sl + gap
+                    result, closed = "SL", True
+                    break
+                elif ev_type == "TP1":
+                    p_ratio = config.get("partial_close_ratio", 0.5)
+                    p_size = round(trade.size * p_ratio, 2)
+                    if p_size >= 0.01:
+                        if trade.direction == "BUY":
+                            p_pnl = ((trade.tp1 - trade.entry) / trade.tick_size) * trade.tick_value * p_size
+                        else:
+                            p_pnl = ((trade.entry - trade.tp1) / trade.tick_size) * trade.tick_value * p_size
+                        
+                        trade.partial_pnls.append(p_pnl)
+                        trade.remaining_size = max(0.01, round(trade.remaining_size - p_size, 2))
+                        st.balance += p_pnl
+                    
+                    trade.tp1_hit = True
+                    trade.sl = trade.entry
+                    trade.breakeven_moved = True
+                elif ev_type == "TP2":
+                    exit_p = trade.tp2  # Assuming limit order execution for exact TP2
+                    result, closed = "TP", True
+                    trade.tp2_hit = True
+                    break
 
-            # Ultra-fidelity intra-candle chronologic check
-            if sl_hit and tp_hit and data_fetcher:
-                try:
-                    m1_candles = data_fetcher.fetch_candles_range(symbol, "M1", t, t + 300)
-                    if m1_candles and len(m1_candles.high) > 0:
-                        sl_hit = False
-                        tp_hit = False
-                        for j in range(len(m1_candles.time)):
-                            # Check if price hit TP level before SL level within the M5 bar
-                            if m1_candles.low[j] + spread <= trade.tp:
-                                tp_hit = True
-                                break
-                            if m1_candles.high[j] + spread >= trade.sl:
-                                sl_hit = True
-                                break
-                except Exception as e:
-                    pass # Fallback to pessimistic SL logic
-
-            if sl_hit:
-                gap    = random.uniform(0, atr * self._sl_gap_atr_pct)
-                exit_p = trade.sl + gap
-                result, closed = "SL", True
-            elif tp_hit:
-                # [3] TP slippage — slight adverse fill
-                slip   = random.uniform(0, atr * self._tp_slip_atr_pct)
-                exit_p = trade.tp + slip
-                result, closed = "TP", True
-            else:
-                # Partial 1: 50% at tp1_price
-                if (trade.partial_closed_count == 0 and
-                        trade.signal.tp1_price > 0 and ask_l <= trade.signal.tp1_price):
-                    p_lot = round(trade.lot * 0.50, 2)
-                    if p_lot >= 0.01:
-                        p_pnl = ((trade.entry_price - trade.signal.tp1_price)
-                                  / trade.tick_size) * trade.tick_value * p_lot
-                        st.balance       += p_pnl
-                        trade.partial_pnl += p_pnl
-                        trade.lot = max(0.01, round(trade.lot - p_lot, 2))
-                        trade.partial_closed_count += 1
-                # Partial 2: 50% at tp2_price
-                if (trade.partial_closed_count == 1 and
-                        trade.signal.tp2_price > 0 and ask_l <= trade.signal.tp2_price):
-                    p_lot = round(trade.lot * 0.50, 2)
-                    if p_lot >= 0.01:
-                        p_pnl = ((trade.entry_price - trade.signal.tp2_price)
-                                  / trade.tick_size) * trade.tick_value * p_lot
-                        st.balance       += p_pnl
-                        trade.partial_pnl += p_pnl
-                        trade.lot = max(0.01, round(trade.lot - p_lot, 2))
-                        trade.partial_closed_count += 1
+            if closed:
+                break
 
         if closed:
-            # Final exit PnL (remaining lot)
+            # Final exit PnL (remaining size)
             if trade.direction == "BUY":
-                pnl = ((exit_p - trade.entry_price) / trade.tick_size) * trade.tick_value * trade.lot
+                rem_pnl = ((exit_p - trade.entry) / trade.tick_size) * trade.tick_value * trade.remaining_size
             else:
-                pnl = ((trade.entry_price - exit_p) / trade.tick_size) * trade.tick_value * trade.lot
+                rem_pnl = ((trade.entry - exit_p) / trade.tick_size) * trade.tick_value * trade.remaining_size
 
-            # [5a] Commission (round-trip on original lot size)
-            commission = self._commission_per_lot * trade.original_lot
+            commission = self._commission_per_lot * trade.size
+            nights_held = max(0, (candle_dt - trade.open_time).days)
+            swap = self._swap_per_lot_night * trade.size * nights_held
 
-            # [5b] Swap: charge per night held
-            nights_held = max(0, (candle_dt - trade.entry_time).days)
-            swap = self._swap_per_lot_night * trade.original_lot * nights_held
-
-            net_pnl = pnl + commission + swap  # commission/swap are negative
+            net_pnl = rem_pnl + commission + swap
             st.balance += net_pnl
-
-            # Total realized PnL including partial closes
-            total_pnl = round(net_pnl + trade.partial_pnl, 2)
+            
+            total_realized_pnl = round(net_pnl + sum(trade.partial_pnls), 2)
+            trade.result = result
+            trade.close_time = candle_dt
 
             trade_record = {
                 "ticket":        trade.ticket,
-                "time":          trade.entry_time,
-                "exit_time":     candle_dt,
+                "time":          trade.open_time,
+                "exit_time":     trade.close_time,
                 "direction":     trade.direction,
-                "entry":         trade.entry_price,
+                "entry":         round(trade.entry, 5),
                 "exit":          round(exit_p, 5),
-                "lot":           trade.lot,
-                "pnl":           total_pnl,
+                "lot":           trade.size,
+                "pnl":           total_realized_pnl,
                 "balance":       round(st.balance, 2),
-                "close_pnl":     round(pnl, 2),
-                "partial_pnl":   round(trade.partial_pnl, 2),
-                "commission":    round(commission, 2),
-                "swap":          round(swap, 2),
+                "close_pnl":     round(rem_pnl, 2),
+                "partial_pnl":   round(sum(trade.partial_pnls), 2),
+                "commission":    commission,
+                "swap":          swap,
                 "nights_held":   nights_held,
                 "result":        result,
                 "session":       trade.session,
-                "strategy_id":   trade.strategy_id,
+                "strategy_id":   trade.strategy_id
             }
             return True, trade_record
-        else:
-            # Trailing stop update
-            trade.best_price = (max(trade.best_price, bid_h) if trade.direction == "BUY"
-                                else min(trade.best_price, ask_l))
-            risk = abs(trade.entry_price - trade.signal.stop_loss)
-            new_sl = TrailingStopManager.calculate_new_sl(
-                trade.direction == "BUY",
-                trade.entry_price, trade.sl, trade.best_price,
-                atr, risk, self.config,
-                {"low": m5_lows[i - 1], "high": m5_highs[i - 1]},
-                symbol=symbol, session=trade.session
-            )
-            if new_sl:
-                trade.sl = new_sl
-            return False, None
+
+        return False, None
 
     def _build_portfolio_metrics(self, states: List[_StrategyBacktestState]) -> dict:
         """
