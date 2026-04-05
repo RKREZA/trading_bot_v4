@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 # Institutional types
-from .types import TradeSignal, CandleArray, MarketRegime
+from .common.types import TradeSignal, CandleArray, MarketRegime
 
 logger = logging.getLogger("trading_bot.base_strategy")
 
@@ -73,8 +73,8 @@ class BaseStrategy(ABC):
     @abstractmethod
     def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
         """
-        MUST return a TradeSignal object or None.
-        Confidence is mandatory 0.0 to 1.0.
+        MUST return a TradeSignal object with direction (BUY|SELL|NONE), 
+        confidence (0.0 to 1.0), and timestamp.
         """
         ...
 
@@ -89,15 +89,57 @@ class BaseStrategy(ABC):
         ...
 
     def on_trade_closed(self, trade_record: dict) -> None:
-        """Optional hook for updating internal counters/cooldowns."""
         pass
 
     def reset_daily_stats(self) -> None:
-        """Called at start of each trading day for reset logic."""
         pass
 
-    def get_config(self) -> dict:
-        return dict(self.config)
+    def get_ema_trend(self, candles: CandleArray, fast: int = 50, slow: int = 200) -> int:
+        """
+        Returns institutional Trend State:
+        1: Bullish (Fast > Slow)
+        -1: Bearish (Fast < Slow)
+        0: Neutral/Crossing
+        """
+        if len(candles) < max(fast, slow):
+            return 0
+            
+        ema_fast = candles.ema(fast)
+        ema_slow = candles.ema(slow)
+        
+        if ema_fast[-1] > ema_slow[-1]:
+            return 1
+        elif ema_fast[-1] < ema_slow[-1]:
+            return -1
+        return 0
+
+    def check_mtf_consensus(self, market_data: MarketData) -> bool:
+        """
+        Verifies if both H1 (HTF) and M15 trends are in agreement.
+        Essential for institutional trend following.
+        """
+        h1_trend = self.get_ema_trend(market_data.htf_candles)
+        m15_trend = self.get_ema_trend(market_data.m15_candles)
+        
+        return h1_trend == m15_trend and h1_trend != 0
+
+    def is_symbol_allowed(self, symbol: str) -> bool:
+        include = self.config.get("symbols") or self.config.get("include_symbols") or []
+        exclude = self.config.get("exclude_symbols") or []
+
+        try:
+            include_set = {str(s).upper() for s in include}
+            exclude_set = {str(s).upper() for s in exclude}
+        except Exception:
+            include_set = set()
+            exclude_set = set()
+
+        sym = str(symbol).upper()
+        if include_set and sym not in include_set:
+            return False
+        if exclude_set and sym in exclude_set:
+            return False
+        return True
 
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__}(id={self.strategy_id}, enabled={self.enabled})>"

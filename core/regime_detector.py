@@ -1,13 +1,6 @@
-from enum import Enum
+from core.common.types import MarketRegime
 import numpy as np
 import logging
-
-class MarketRegime(Enum):
-    TREND           = "TREND"
-    RANGE           = "RANGE"
-    HIGH_VOLATILITY = "HIGH_VOLATILITY"
-    LOW_VOLATILITY  = "LOW_VOLATILITY"
-    UNCERTAIN       = "UNCERTAIN"
 
 class RegimeInfo:
     def __init__(self, regime_type: MarketRegime, confidence: float, adx_val: float, atr_val: float):

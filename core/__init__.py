@@ -1,24 +1,25 @@
 """Trading Bot V4 - Institutional Core Package"""
 
-from .connection import MT5Connection
-from .data_handler import DataFetcher
-from .risk_engine import RiskEngine
-from .execution_engine import ExecutionEngine
-from .portfolio_manager import PortfolioManager
-from .performance_tracker import PerformanceTracker
-from .regime_detector import RegimeDetector, MarketRegime
-from .logger import setup_logging
-from .types import CandleArray, TradeSignal, BotConfig
+# Common Infrastructure
+from .common.types import CandleArray, TradeSignal, BotConfig, MarketRegime
 
-# Multi-Strategy Framework
+# Institutional Packages
+from .risk.risk_guardian import RiskGuardian
+from .data.source_handler import SourceHandler
+from .execution.order_manager import OrderManager
+
+# Core Logic (To be refactored further)
+from .connection import MT5Connection
+from .performance_tracker import PerformanceTracker
+from .regime_detector import RegimeDetector
+from .logger import setup_logging
 from .base_strategy import BaseStrategy, MarketData
 
 __all__ = [
     "MT5Connection",
-    "DataFetcher",
-    "RiskEngine",
-    "ExecutionEngine",
-    "PortfolioManager",
+    "SourceHandler",
+    "RiskGuardian",
+    "OrderManager",
     "PerformanceTracker",
     "RegimeDetector",
     "MarketRegime",

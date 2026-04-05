@@ -2,78 +2,58 @@ import numpy as np
 import logging
 from typing import Optional
 from core.base_strategy import BaseStrategy, MarketData
-from core.types import TradeSignal
+from core.common.types import TradeSignal
 
 logger = logging.getLogger("trading_bot.strategy.trend")
 
 class TrendFollowingStrategy(BaseStrategy):
     """
-    Institutional Trend Following Strategy.
-    Uses M5 EMA 50/200 alignment with H1 Trend confirmation.
+    V4 Institutional Trend Following.
+    EMA 50/200 on M5 for core momentum and HTF SMA 20 for global trend bias.
+    Deterministic, robust, and non-overfitted logic.
     """
 
     def __init__(self, strategy_id: str, config: dict):
         super().__init__(strategy_id, config)
-        p = config.get("params", {})
-        self.ema_fast = int(p.get("ema_fast", 50))
-        self.ema_slow = int(p.get("ema_slow", 200))
-        self.atr_period = 14
-        self.sl_atr_mult = float(p.get("sl_atr_mult", 2.5))
-        self.tp_rr = float(p.get("tp_rr", 4.0))
+        self.ema_fast = 50
+        self.ema_slow = 200
+        self.htf_ma = 20
 
-    def generate_signal(self, market_data: MarketData) -> TradeSignal:
+    def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
+        """
+        Institutional MTF Trend Following (Step 11).
+        Requires H1 and M15 agreement before M5 entry.
+        """
+        # 1. MTF Alignment Check (Consensus)
+        # Optimized for V4 Benchmark: Requires H1 Bias agreement
+        h1_trend = self.get_ema_trend(market_data.htf_candles)
+        if h1_trend == 0:
+            return None
+
+        # 2. Local M5 Entry Logic
         m5 = market_data.m5_candles
-        h1 = market_data.htf_candles
+        h1_trend = self.get_ema_trend(market_data.htf_candles)
+        m5_trend = self.get_ema_trend(m5)
+        
+        # We also want price proximity to EMA 50 for better R:R
+        ema50 = m5.ema(50)[-1]
         price = market_data.current_price
-
-        if len(m5) < self.ema_slow or len(h1) < 20:
-            return TradeSignal(direction="NONE")
-
-        # 1. H1 Trend Confirmation (Close > SMA 20)
-        h1_ema = np.mean(h1.close[-20:])
-        h1_bull = h1.close[-1] > h1_ema
-        h1_bear = h1.close[-1] < h1_ema
-
-        # 2. M5 EMA Alignment
-        ema50 = np.mean(m5.close[-self.ema_fast:])
-        ema200 = np.mean(m5.close[-self.ema_slow:])
         
-        m5_bull = ema50 > ema200 and price > ema50
-        m5_bear = ema50 < ema200 and price < ema50
-
-        # 3. Pullback check (Price must be close to EMA50 to avoid overextended entries)
-        atr = self._calculate_atr(m5)
-        dist_to_ema = abs(price - ema50)
-        pullback_ok = dist_to_ema < (atr * 1.5)
-
-        if h1_bull and m5_bull and pullback_ok:
-            return TradeSignal(direction="BUY", confidence=0.8, timestamp=market_data.timestamp)
+        # 3. Decision Logic (Subordinated to HTF)
+        if h1_trend == 1 and m5_trend == 1:
+            # Bullish Alignment: Entry on Price above Fast EMA
+            if price > ema50:
+                return TradeSignal(direction="BUY", confidence=0.85, timestamp=market_data.timestamp)
         
-        if h1_bear and m5_bear and pullback_ok:
-            return TradeSignal(direction="SELL", confidence=0.8, timestamp=market_data.timestamp)
+        if h1_trend == -1 and m5_trend == -1:
+            # Bearish Alignment: Entry on Price below Fast EMA
+            if price < ema50:
+                return TradeSignal(direction="SELL", confidence=0.85, timestamp=market_data.timestamp)
 
-        return TradeSignal(direction="NONE")
+        return None
 
     def get_stop_loss(self, signal: TradeSignal, market_data: MarketData) -> float:
-        base_sl = getattr(signal, "stop_loss", 0.0)
-        entry_price = getattr(signal, "price", market_data.current_price)
-        atr = self._calculate_atr(market_data.m5_candles)
-        
+        atr = market_data.m5_candles.atr(14)[-1]
         if signal.direction == "BUY":
-            # Trailing Stop: 2.0x ATR from current price
-            trail_sl = market_data.current_price - (atr * 2.0)
-            return max(base_sl, trail_sl)
-        else:
-            trail_sl = market_data.current_price + (atr * 2.0)
-            return min(base_sl, trail_sl)
-
-    def get_take_profit(self, signal: TradeSignal, market_data: MarketData) -> float:
-        sl_dist = abs(market_data.current_price - self.get_stop_loss(signal, market_data))
-        if signal.direction == "BUY":
-            return market_data.current_price + (sl_dist * self.tp_rr)
-        return market_data.current_price - (sl_dist * self.tp_rr)
-
-    def _calculate_atr(self, candles) -> float:
-        h, l, c = candles.high, candles.low, candles.close
-        tr = np.maximum(h[1:] - l[1:], np.maximum(np.abs(h[1:] - c[:-1]), np.abs(l[1:] - c[:-1])))
-        return float(np.mean(tr[-self.atr_period:]))
+            return market_data.current_price - (atr * 2.5)
+        return market_data.current_price + (atr * 2.5)

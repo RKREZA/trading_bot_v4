@@ -2,7 +2,7 @@ import logging
 import time
 import random
 from typing import Optional
-from core.types import TradeSignal
+from core.common.types import TradeSignal
 
 logger = logging.getLogger("trading_bot.execution")
 

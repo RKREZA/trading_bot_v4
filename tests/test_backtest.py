@@ -121,7 +121,7 @@ def test_backtester_runs_and_produces_history():
     bt = PortfolioBacktester(cfg)
     strategies = [DeterministicPulseStrategy("pulse_v1", cfg)]
 
-    history = bt.run("XAUUSDm", strategies, m5, h1, m15, m1)
+    history, equity_history = bt.run("XAUUSDm", strategies, m5, h1, m15, m1)
 
     assert len(history) > 0
     assert all("strategy_id" in t for t in history)
@@ -134,8 +134,8 @@ def test_backtester_resets_state_between_runs():
     bt = PortfolioBacktester(cfg)
     strategies = [DeterministicPulseStrategy("pulse_v1", cfg)]
 
-    history_1 = bt.run("XAUUSDm", strategies, m5, h1, m15, m1)
-    history_2 = bt.run("XAUUSDm", strategies, m5, h1, m15, m1)
+    history_1, _ = bt.run("XAUUSDm", strategies, m5, h1, m15, m1)
+    history_2, _ = bt.run("XAUUSDm", strategies, m5, h1, m15, m1)
 
     assert len(history_1) == len(history_2)
     assert history_1[0]["timestamp"] == history_2[0]["timestamp"]
@@ -150,8 +150,8 @@ def test_backtester_deterministic_seed_is_reproducible():
     strategies_a = [DeterministicPulseStrategy("pulse_v1", cfg)]
     strategies_b = [DeterministicPulseStrategy("pulse_v1", cfg)]
 
-    history_a = bt_a.run("XAUUSDm", strategies_a, m5, h1, m15, m1)
-    history_b = bt_b.run("XAUUSDm", strategies_b, m5, h1, m15, m1)
+    history_a, _ = bt_a.run("XAUUSDm", strategies_a, m5, h1, m15, m1)
+    history_b, _ = bt_b.run("XAUUSDm", strategies_b, m5, h1, m15, m1)
 
     assert len(history_a) == len(history_b)
     assert [round(t["pnl"], 8) for t in history_a] == [round(t["pnl"], 8) for t in history_b]
@@ -175,6 +175,6 @@ def test_trend_strategy_receives_enough_h1_history():
     bt = PortfolioBacktester(cfg)
     trend = create_strategy("TREND_FOLLOWING", cfg)
 
-    history = bt.run("XAUUSDm", [trend], m5, h1, m15, m1)
+    history, _ = bt.run("XAUUSDm", [trend], m5, h1, m15, m1)
 
     assert isinstance(history, list)

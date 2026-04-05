@@ -8,7 +8,7 @@ import time
 import datetime
 import numpy as np
 from typing import Dict, List, Optional
-from core.types import CandleArray
+from core.common.types import CandleArray
 
 try:
     import MetaTrader5 as mt5

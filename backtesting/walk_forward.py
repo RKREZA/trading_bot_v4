@@ -79,9 +79,19 @@ class WalkForwardValidator:
                 current_is_start += timedelta(weeks=test_weeks)
                 continue
 
-            # Run Backtester on OOS window
+            # 1. Run In-Sample (Training) for context
+            is_data = {}
+            for tf, candles in data.items():
+                mask = (candles.time >= is_start_ts) & (candles.time < oos_start_ts)
+                is_data[tf] = candles[mask]
+            
+            is_backtester = PortfolioBacktester(self.config)
+            is_history, _ = is_backtester.run(symbol, strategies, is_data["M5"], is_data.get("H1"), is_data.get("M15"), is_data.get("M1"))
+            is_profit = sum(t['pnl'] for t in is_history) if is_history else 1.0
+
+            # 2. Run Out-Of-Sample (Validation)
             backtester = PortfolioBacktester(self.config)
-            history = backtester.run(
+            history, equity_history = backtester.run(
                 symbol, 
                 strategies, 
                 oos_data["M5"], 
@@ -90,19 +100,32 @@ class WalkForwardValidator:
                 oos_data.get("M1")
             )
             
-            # Calculate metrics for this window
-            # Total capital = $1000 * num_strategies
+            oos_profit = sum(t['pnl'] for t in history) if history else 0.0
+            
+            # WFO Efficiency Ratio (Step 8.1)
+            # Ratio = OOS Profit / IS Profit (normalized by time)
+            normalized_is = is_profit / window_weeks
+            normalized_oos = oos_profit / test_weeks
+            wfo_ratio = normalized_oos / normalized_is if normalized_is > 0 else 0.0
+
+            # Aggregate equity curve
             total_initial = len(strategies) * 1000.0
-            metrics = PerformanceTracker.calculate_metrics(history, total_initial)
+            portfolio_equity = []
+            if equity_history:
+                eq_df = pd.DataFrame(equity_history)
+                portfolio_equity = eq_df.groupby('time')['equity'].sum().tolist()
+
+            metrics = PerformanceTracker.calculate_metrics(history, total_initial, equity_curve=portfolio_equity)
             
             oos_results.append({
-                "window_start": is_end.date().isoformat(),
-                "window_end": oos_end.date().isoformat(),
-                "metrics": metrics,
-                "trade_count": len(history)
+                "window": f"{is_end.date()} -> {oos_end.date()}",
+                "oos_profit": round(oos_profit, 2),
+                "wfo_ratio": round(wfo_ratio, 2),
+                "robustness": "PASSED" if wfo_ratio >= 0.60 else "REJECTED (Curve-Fitted)",
+                "metrics": metrics
             })
             
-            # Roll window forward by test_weeks (The "Walk")
+            # Roll window forward
             current_is_start += timedelta(weeks=test_weeks)
 
         return oos_results

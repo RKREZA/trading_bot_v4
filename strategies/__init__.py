@@ -1,42 +1,75 @@
 """
-TRADING BOT V4 — Strategy Registry
-==================================
-Exposes the institutional-grade micro-service strategies.
+TRADING BOT V4 — Dynamic Strategy Discovery
+===========================================
+Automatically discovers and registers all BASE_STRATEGY subclasses in the strategies/ directory.
 """
 
-from .trend_following import TrendFollowingStrategy
-from .mean_reversion import MeanReversionStrategy
-from .breakout import BreakoutStrategy
-from .liquidity_session import LiquiditySessionStrategy
+import os
+import pkgutil
+import importlib
+import logging
+from typing import Dict, Type
+from core.base_strategy import BaseStrategy
 
-STRATEGY_REGISTRY = {
-    "TREND_FOLLOWING": TrendFollowingStrategy,
-    "MEAN_REVERSION": MeanReversionStrategy,
-    "BREAKOUT": BreakoutStrategy,
-    "LIQUIDITY_SESSION": LiquiditySessionStrategy
-}
+logger = logging.getLogger("trading_bot.strategies")
 
-def create_strategy(strategy_id: str, config: dict):
+STRATEGY_REGISTRY: Dict[str, Type[BaseStrategy]] = {}
+
+def _discover_strategies():
+    """Scan the current package for strategy implementations."""
+    path = os.path.dirname(__file__)
+    for loader, module_name, is_pkg in pkgutil.iter_modules([path]):
+        if is_pkg or module_name == "__init__":
+            continue
+            
+        try:
+            module = importlib.import_module(f".{module_name}", package=__package__)
+            for attribute_name in dir(module):
+                attribute = getattr(module, attribute_name)
+                if (isinstance(attribute, type) and 
+                    issubclass(attribute, BaseStrategy) and 
+                    attribute is not BaseStrategy):
+                    
+                    # Store by Class Name (Upper) as the Registry Type
+                    strat_type = attribute_name.replace("Strategy", "").upper()
+                    STRATEGY_REGISTRY[strat_type] = attribute
+                    logger.debug(f"Registered dynamic strategy type: {strat_type}")
+        except Exception as e:
+            logger.error(f"Failed to load strategy module {module_name}: {e}")
+
+# Initial Discovery Run
+_discover_strategies()
+
+def create_strategy(strategy_id: str, st_type: str = None, config: dict = None):
     """
-    Factory function to instantiate strategies by ID.
+    Enhanced Factory function with dynamic resolution.
     
     Args:
-        strategy_id (str): ID corresponding to the registry keys.
-        config (dict): Strategy-specific configuration.
+        strategy_id (str): The unique ID for this instance (e.g., 'sniper_v1').
+        st_type (str, optional): The strategy class type (e.g., 'LIQUIDITY_SESSION').
+        config (dict): The global configuration.
         
     Returns:
         BaseStrategy: Instantiated strategy object.
     """
-    if strategy_id not in STRATEGY_REGISTRY:
-        raise ValueError(f"Strategy ID '{strategy_id}' not found in registry.")
+    if config is None: config = {}
     
-    return STRATEGY_REGISTRY[strategy_id](strategy_id, config)
+    # Auto-resolve type if not provided
+    if not st_type:
+        # Heuristic resolution based on common ID patterns
+        if "sniper" in strategy_id.lower(): st_type = "LIQUIDITYSESSION"
+        elif "trend" in strategy_id.lower(): st_type = "TRENDFOLLOWING"
+        elif "smc" in strategy_id.lower(): st_type = "MEANREVERSION"
+        elif "breakout" in strategy_id.lower(): st_type = "BREAKOUT"
+        else:
+            raise ValueError(f"Could not auto-resolve strategy type for ID '{strategy_id}'. Please provide it explicitly.")
 
-__all__ = [
-    "TrendFollowingStrategy",
-    "MeanReversionStrategy",
-    "BreakoutStrategy",
-    "LiquiditySessionStrategy",
-    "STRATEGY_REGISTRY",
-    "create_strategy"
-]
+    # Normalization
+    st_type = st_type.upper().replace("_", "")
+    
+    if st_type not in STRATEGY_REGISTRY:
+        raise ValueError(f"Strategy Type '{st_type}' not found. Available: {list(STRATEGY_REGISTRY.keys())}")
+    
+    return STRATEGY_REGISTRY[st_type](strategy_id, config)
+
+__all__ = ["STRATEGY_REGISTRY", "create_strategy"]

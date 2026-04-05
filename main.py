@@ -28,7 +28,12 @@ from rich.live import Live
 
 from core.walk_forward import WalkForwardValidator
 from core.health import start_health_server
-from core.types import BotConfig
+from core.common.types import BotConfig
+from core import (
+    MT5Connection, SourceHandler, RiskGuardian, OrderManager, 
+    PortfolioManager, PerformanceTracker, RegimeDetector, setup_logging, 
+    TradeSignal, BaseStrategy, MarketData
+)
 
 try:
     import MetaTrader5 as mt5
@@ -37,13 +42,8 @@ except ImportError:
 
 from dotenv import load_dotenv
 
-from core.logger import setup_logging
 from core.connection import MT5Connection, PositionManager
-from core.data_fetcher import DataFetcher
-from core.backtester import BacktestEngine
-from core import MT5Connection, DataFetcher, RiskEngine, ExecutionEngine, PortfolioManager, PerformanceTracker, RegimeDetector, setup_logging, TradeSignal, BaseStrategy, MarketData
 from core.ai_advisor import AIAdvisor
-from core.risk_manager import RiskManager
 from core.notifications import NotificationManager
 from core.state_manager import SecureStateManager
 from core.strategy_orchestrator import StrategyOrchestrator
@@ -83,7 +83,7 @@ class TradingBot:
         self.connection = MT5Connection()
         self.connection.config = self.config
         self.position_manager = PositionManager(self.connection)
-        self.data_fetcher = DataFetcher()
+        self.data_fetcher = SourceHandler()
         self.notification_manager = NotificationManager(self.config)
         self.state_manager = SecureStateManager()
         self.news_filter = NewsFilter(broker_clock=self.broker_clock)
@@ -110,30 +110,28 @@ class TradingBot:
         self._load_state()
 
     def _build_strategy_runtimes(self):
-        # Instantiate global shared RiskManager
-        self.risk_manager = RiskManager(self.config, broker_clock=self.broker_clock)
+        # Instantiate global shared RiskGuardian
+        self.risk_manager = RiskGuardian(self.config, broker_clock=self.broker_clock)
         self.risk_manager.silent = True
 
-        strategies_config = self.config.get("strategies", [])
-        from core.connection import BOT_MAGIC_NUMBER
+        # Discovery Transformation: Instantiate ALL discovered strategies as micro-services
+        from strategies import STRATEGY_REGISTRY
         
-        for strat_cfg in strategies_config:
-            sid = strat_cfg.get("id")
-            st_type = strat_cfg.get("type")
-            if not sid or not st_type:
-                continue
-                
+        for st_type, st_class in STRATEGY_REGISTRY.items():
+            sid = f"{st_type.lower()}_v4"
+            
             try:
-                strategy = create_strategy(sid, st_type, self.config)
-            except ValueError as e:
-                logger.error(f"Failed to create strategy {sid}: {e}")
+                # Dynamic Creation from the Registry
+                strategy = st_class(sid, config=self.config)
+                logger.info(f"Instantiated V4 Micro-service: {sid}")
+            except Exception as e:
+                logger.error(f"Failed to instantiate strategy {sid}: {e}")
                 continue
 
             runtime = StrategyRuntime(
                 strategy=strategy,
                 global_config=self.config,
-                broker_clock=self.broker_clock,
-                risk_manager=self.risk_manager
+                risk_guardian=self.risk_manager
             )
             self.strategy_runtimes.append(runtime)
 
@@ -147,10 +145,7 @@ class TradingBot:
                 notification_manager=self.notification_manager,
                 broker_clock=self.broker_clock,
             )
-            logger.info(
-                "StrategyOrchestrator initialized with %d runtimes",
-                len(self.strategy_runtimes)
-            )
+            logger.info("StrategyOrchestrator initialized with %d runtimes", len(self.strategy_runtimes))
 
     def _load_config(self, config_path: str) -> dict:
         paths_to_check = ["config_optimized.json", config_path]
@@ -435,25 +430,40 @@ class TradingBot:
                     # PHASE 3: Active trading — analysis & execution
                     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-                    # Fetch candles
+                    # ── Multi-Strategy Analysis ──
+                    # 1. Fetch candles from institutional SourceHandler
                     h1_candles = self.data_fetcher.fetch_candles(symbol, "H1", 200)
                     m15_candles = self.data_fetcher.fetch_candles(symbol, "M15", 200)
                     m5_candles = self.data_fetcher.fetch_candles(symbol, "M5", 500)
                     d1_candles = self.data_fetcher.fetch_candles(symbol, "D1", 50)
 
-                    # Trailing Stops (per-strategy via orchestrator)
-                    if tick and len(m5_candles) > 30:
-                        if self.orchestrator:
-                            atr = self.orchestrator._preprocessing_engine._calculate_atr(m5_candles, 14)
-                            self.orchestrator.manage_trailing_stops(symbol, tick.bid, tick.ask, atr, m5_candles[-1], session)
-                            self.orchestrator.manage_partials(symbol, tick.bid, tick.ask)
-
-                    if len(m5_candles) > 30:
+                    if h1_candles is not None and m15_candles is not None and m5_candles is not None:
                         current_price = m5_candles.close[-1]
                         session = self.orchestrator._preprocessing_engine.get_session_from_hour(
                             self.broker_clock.hour()
                         )
                         self.dashboard.session = session
+
+                        # 2. Bundle into immutable MarketData object
+                        market_data = MarketData(
+                            symbol=symbol,
+                            htf_candles=h1_candles,
+                            m15_candles=m15_candles,
+                            m5_candles=m5_candles,
+                            d1_candles=d1_candles,
+                            current_price=current_price,
+                            session=session,
+                            timestamp=self.broker_clock.now() if hasattr(self.broker_clock, 'now') else datetime.now()
+                        )
+
+                        # ── Trailing Stops ──
+                        if tick and len(m5_candles) > 30:
+                            if self.orchestrator:
+                                # Pre-calculate ATR for trailing
+                                from core.regime_detector import RegimeDetector
+                                atr = RegimeDetector()._calculate_atr(m5_candles)
+                                self.orchestrator.manage_trailing_stops(symbol, tick.bid, tick.ask, atr, m5_candles[-1], session)
+                                self.orchestrator.manage_partials(symbol, tick.bid, tick.ask)
 
                         # ── News Filter ──
                         blocked, news_reason = self.news_filter.is_trading_blocked(symbol)
@@ -469,10 +479,7 @@ class TradingBot:
 
                         # ── Multi-Strategy Execution ──
                         if self.orchestrator:
-                            self.orchestrator.execute_cycle(
-                                symbol, h1_candles, m15_candles, m5_candles,
-                                d1_candles, current_price, session
-                            )
+                            self.orchestrator.execute_cycle(symbol, market_data, is_news_blocked=blocked)
                             analysis = self.orchestrator.last_analysis
                         else:
                             analysis = {}

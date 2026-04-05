@@ -1,71 +1,79 @@
 import numpy as np
 import logging
+from typing import Optional
 from core.base_strategy import BaseStrategy, MarketData
-from core.types import TradeSignal
+from core.common.types import TradeSignal
 
 logger = logging.getLogger("trading_bot.strategy.breakout")
 
 class BreakoutStrategy(BaseStrategy):
     """
-    Institutional Breakout Strategy.
-    Uses previous N-bar range and candle body strength filters for entry.
-    Targeting explosive, high-momentum moves.
+    V4 Institutional Breakout.
+    Targeting High-Momentum Range Breaks with Candle Strength filters.
+    Rule: Enter on Breakout High/Low + Body Size > 70% of total candle range.
     """
 
     def __init__(self, strategy_id: str, config: dict):
         super().__init__(strategy_id, config)
-        p = config.get("params", {})
-        self.lookback = int(p.get("lookback_period", 20))
-        self.body_strength_threshold = float(p.get("body_strength_threshold", 0.70)) # 70% body size relative to candle range
-        self.tp_rr = float(p.get("tp_rr", 4.0)) # High RR for breakouts
-        self.atr_period = 14
+        self.lookback = 20
+        self.body_thresh = 0.70
 
-    def generate_signal(self, market_data: MarketData) -> TradeSignal:
+    def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
+        """
+        Institutional MTF Breakout (Step 11).
+        Requires H1 Momentum and M15 Trend alignment.
+        """
+        # 1. MTF Confirmation (H1 / M15)
+        h1 = market_data.htf_candles[-1]
+        m15_trend = self.get_ema_trend(market_data.m15_candles)
+        
+        # H1 Candle Body Strength
+        h1_candle_range = h1.high - h1.low
+        h1_body = abs(h1.close - h1.open)
+        h1_strength = (h1_body / h1_candle_range) if h1_candle_range > 0 else 0
+        h1_dir = 1 if h1.close > h1.open else -1
+        
         m5 = market_data.m5_candles
-        price = market_data.current_price
-
         if len(m5) < self.lookback + 1:
-            return TradeSignal(direction="NONE")
+            return None
 
-        # 1. Range Calculation (excluding the current candle)
+        # 2. Local Range Calculation
         prev_range = m5[-self.lookback-1:-1]
-        range_high = np.max(prev_range.high)
-        range_low = np.min(prev_range.low)
+        r_high = np.max(prev_range.high)
+        r_low = np.min(prev_range.low)
 
-        # 2. Breakout detection
-        last_close = m5.close[-1]
-        last_open = m5.open[-1]
-        last_high = m5.high[-1]
-        last_low = m5.low[-1]
+        # 3. M5 Strength Assessment
+        last = m5[-1]
+        price = market_data.current_price
+        m5_strength = (abs(last.close - last.open) / (last.high - last.low)) if (last.high - last.low) > 0 else 0
 
-        # 3. Candle Body Strength Filter
-        candle_range = abs(last_high - last_low)
-        body_size = abs(last_close - last_open)
-        body_strength = (body_size / candle_range) if candle_range > 0 else 0
+        # 4. Integrated Decision Logic
+        # BUY: Price > High AND Strength > 70% AND H1 Bullish + Strong AND M15 NOT Bearish
+        if price > r_high and m5_strength >= self.body_thresh:
+            if h1_dir == 1 and h1_strength > 0.5 and m15_trend != -1:
+                return TradeSignal(direction="BUY", confidence=0.9, timestamp=market_data.timestamp)
+        
+        # SELL: Price < Low AND Strength > 70% AND H1 Bearish + Strong AND M15 NOT Bullish
+        if price < r_low and m5_strength >= self.body_thresh:
+            if h1_dir == -1 and h1_strength > 0.5 and m15_trend != 1:
+                return TradeSignal(direction="SELL", confidence=0.9, timestamp=market_data.timestamp)
 
-        # Entry logic: price must break range and the candle must be strong
-        if last_close > range_high and body_strength >= self.body_strength_threshold:
-            return TradeSignal(direction="BUY", confidence=0.85, timestamp=market_data.timestamp)
-
-        if last_close < range_low and body_strength >= self.body_strength_threshold:
-            return TradeSignal(direction="SELL", confidence=0.85, timestamp=market_data.timestamp)
-
-        return TradeSignal(direction="NONE")
+        return None
 
     def get_stop_loss(self, signal: TradeSignal, market_data: MarketData) -> float:
-        m5 = market_data.m5_candles
-        # SL usually goes at the other end of the breakout candle or middle of the range
+        # Tight stop at the opposite side of the breakout candle
+        # Added ATR-based floor for institutional safety
+        last = market_data.m5_candles[-1]
+        atr = market_data.m5_candles.atr(14)[-1]
+        
         if signal.direction == "BUY":
-            return m5.low[-1] # Tight stop at breakout candle low
-        return m5.high[-1]
+            return min(last.low, market_data.current_price - (atr * 1.5))
+        return max(last.high, market_data.current_price + (atr * 1.5))
 
     def get_take_profit(self, signal: TradeSignal, market_data: MarketData) -> float:
-        sl_dist = abs(market_data.current_price - self.get_stop_loss(signal, market_data))
+        sl_price = self.get_stop_loss(signal, market_data)
+        risk = abs(market_data.current_price - sl_price)
+        # Breakouts play for explosive moves
         if signal.direction == "BUY":
-            return market_data.current_price + (sl_dist * self.tp_rr) 
-        return market_data.current_price - (sl_dist * self.tp_rr)
-
-    def _calculate_atr(self, candles) -> float:
-        h, l, c = candles.high, candles.low, candles.close
-        tr = np.maximum(h[1:] - l[1:], np.maximum(np.abs(h[1:] - c[:-1]), np.abs(l[1:] - c[:-1])))
-        return float(np.mean(tr[-self.atr_period:]))
+            return market_data.current_price + (risk * 3.5)
+        return market_data.current_price - (risk * 3.5)
