@@ -28,7 +28,7 @@ class RiskEngine:
         )
 
         # Institutional Cost Filter
-        self.max_cost_ratio = float(config.get("max_cost_ratio", 0.50)) # 50% of risk allowed for cost
+        self.max_cost_ratio = float(config.get("max_cost_ratio", 0.75)) # 75% max risk-to-cost ratio
         self.min_account_buffer = float(config.get("min_account_buffer", 0.15)) 
         
         self.daily_loss = 0.0
@@ -64,6 +64,10 @@ class RiskEngine:
         actual_sl_dist = max(stop_loss_distance, min_sl_dist)
         
         # 3. Fixed Cost Analysis (Institutional Filter)
+        # Lookup symbol-specific cost ratio (Don't hardcode - Reality Check)
+        symbol_cfg = self.config.get("symbols_config", {}).get(symbol, {})
+        allowed_ratio = float(symbol_cfg.get("max_cost_ratio", self.max_cost_ratio))
+        
         # Calculate lots such that (SL distance in points * tick_value) matches risk_amount
         points_dist = (actual_sl_dist / point) if point > 0 else actual_sl_dist
         potential_lot = risk_amount / (points_dist * tick_value) if points_dist > 0 else 0.0
@@ -71,8 +75,8 @@ class RiskEngine:
         # Cost = (Spread in points * tick_value * lot) + (lot * commission)
         fixed_cost = (spread_points * potential_lot * tick_value) + (potential_lot * commission_per_lot)
         
-        if risk_amount > 0 and (fixed_cost / risk_amount) > self.max_cost_ratio:
-            self.logger.warning(f"Trade rejected on {symbol}: Cost-to-Risk ratio too high ({fixed_cost/risk_amount:.2f})")
+        if risk_amount > 0 and (fixed_cost / risk_amount) > allowed_ratio:
+            self.logger.warning(f"Trade rejected on {symbol}: Cost-to-Risk ratio {fixed_cost/risk_amount:.2f} exceeds limit {allowed_ratio:.2f}")
             return 0.0
 
         return self._apply_broker_constraints(potential_lot, symbol)

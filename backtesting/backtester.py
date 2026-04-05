@@ -83,7 +83,7 @@ class PortfolioBacktester:
         self.open_trades = state["open_trades"]
         self.history = state["history"]
 
-    def run(self, symbol: str, strategies: list, m5_data, h1_data, m15_data, m1_data, resume: bool = False):
+    def run(self, symbol: str, strategies: list, target_tf_data, h1_data, m15_data, m5_data, m1_data, resume: bool = False):
         """
         Production Backtest Runner.
         Implements 'Step 15' development loop with Checkpoint support.
@@ -113,30 +113,32 @@ class PortfolioBacktester:
         # 1. Institutional Indicator Pre-calculation (IPC) - Step 4.2
         # This eliminates the O(N^2) bottleneck by computing everything once.
         from core.indicator_engine import IndicatorEngine
+        target_tf_data.indicators = IndicatorEngine.precalculate_all(symbol, getattr(target_tf_data, "timeframe", "UNKNOWN"), target_tf_data)
         m5_data.indicators = IndicatorEngine.precalculate_all(symbol, "M5", m5_data)
         m15_data.indicators = IndicatorEngine.precalculate_all(symbol, "M15", m15_data)
         h1_data.indicators = IndicatorEngine.precalculate_all(symbol, "H1", h1_data)
 
         # Pre-flight data integrity check (Step 11)
-        self._validate_data_alignment(m5_data, m1_data)
+        self._validate_data_alignment(target_tf_data, m1_data)
 
-        # Main Loop: Step through M5 bars starting from current_index
-        pbar = tqdm(total=len(m5_data.time), initial=self.current_index)
+        # Main Loop: Step through target timeframe bars starting from current_index
+        pbar = tqdm(total=len(target_tf_data.time), initial=self.current_index)
         
-        for i in range(max(200, self.current_index), len(m5_data.time)):
+        for i in range(max(200, self.current_index), len(target_tf_data.time)):
             self.current_index = i
             pbar.update(1)
-            t = m5_data.time[i]
+            t = target_tf_data.time[i]
             dt = datetime.fromtimestamp(t, tz=timezone.utc)
             
             # [ Institutional Fidelity ]: Zero-Copy Index Shifting
             # Excludes the current i-th candle which is currently "forming"
-            m5_data.set_limit(i) 
+            target_tf_data.set_limit(i) 
+            m5_data.set_limit(self._get_tf_idx(m5_data, t))
             m15_data.set_limit(self._get_tf_idx(m15_data, t))
             h1_data.set_limit(self._get_tf_idx(h1_data, t))
             
             # 1. Regime Detection & Gating
-            regime_info = self.regime_detector.detect(m5_data)
+            regime_info = self.regime_detector.detect(target_tf_data)
             regime = regime_info.type
             risk_mult = RegimeGater.get_risk_multiplier(regime)
             conf_buffer = RegimeGater.get_confidence_buffer(regime)
@@ -149,7 +151,7 @@ class PortfolioBacktester:
                 m15_candles=m15_data,
                 m5_candles=m5_data,
                 d1_candles=None,
-                current_price=m5_data.open[i], 
+                current_price=target_tf_data.open[i], 
                 session=SessionDetector.get_session(dt),
                 timestamp=dt
             )
@@ -214,7 +216,7 @@ class PortfolioBacktester:
             self.checkpoint_manager.save_checkpoint(self.get_state())
 
         pbar.close()
-        self._force_close_at_end(m5_data, point, tick_value, comm_per_lot, active_strategies)
+        self._force_close_at_end(target_tf_data, point, tick_value, comm_per_lot, active_strategies)
         self.checkpoint_manager.clear_checkpoint() # Final cleanup
         return self.history, self.equity_history
 

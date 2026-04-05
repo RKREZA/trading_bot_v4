@@ -71,6 +71,14 @@ class BacktestCLI:
             m5 = self.data_manager.prepare_data(symbol, "M5", dt_from)
             m15 = self.data_manager.prepare_data(symbol, "M15", dt_from)
             h1 = self.data_manager.prepare_data(symbol, "H1", dt_from)
+            
+            # [ Institutional Alignment Filter ]: Cap all TFs by available M1 execution data
+            # This prevents simulation crashes on last forming M15/H1 bars.
+            if len(m1) > 0:
+                max_t = m1.time[-1]
+                m5 = m5[m5.time <= max_t]
+                m15 = m15[m15.time <= max_t]
+                h1 = h1[h1.time <= max_t]
 
         if len(m5) < 100:
             rprint("[bold red]Error:[/] Insufficient data for benchmark.")
@@ -87,6 +95,16 @@ class BacktestCLI:
             self._run_walk_forward(symbol, strategies, {"M5": m5, "M1": m1, "M15": m15, "H1": h1})
 
         # 4. Core Portfolio Simulation
+        # Lookup Symbol-specific Primary Timeframe (Reality Check)
+        symbol_cfg = self.config.get("symbols_config", {}).get(symbol, {})
+        primary_tf = symbol_cfg.get("backtest_timeframe", "M5")
+        
+        # Select the driver data
+        tf_map = {"M1": m1, "M5": m5, "M15": m15, "H1": h1}
+        primary_data = tf_map.get(primary_tf, m5)
+        
+        rprint(f"[green]Executing V4-ULTRA Event-Driven Simulation on {primary_tf} (Resume={resume})...[/]")
+        
         runtime_config = dict(self.config)
         runtime_backtest = dict(runtime_config.get("backtest", {}))
         if seed is not None:
@@ -96,8 +114,7 @@ class BacktestCLI:
         runtime_config["backtest"] = runtime_backtest
 
         backtester = PortfolioBacktester(runtime_config)
-        rprint(f"[green]Executing V4-ULTRA Event-Driven Simulation (Resume={resume})...[/]")
-        history, equity_history = backtester.run(symbol, strategies, m5, h1, m15, m1, resume=resume)
+        history, equity_history = backtester.run(symbol, strategies, primary_data, h1, m15, m5, m1, resume=resume)
         
         # 5. Performance Attribution
         partition_initial = float(self.config.get("backtest", {}).get("initial_balance_per_strategy", 1000.0))
