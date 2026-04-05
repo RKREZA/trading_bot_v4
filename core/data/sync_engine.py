@@ -162,4 +162,80 @@ class SyncEngine:
             # Here we would implement intra-sync re-fetching if requested, 
             # but Step 2.3 allows for system halt if re-fetch fails.
 
+    def repair_identified_gaps(self, symbol: str, timeframe: str, current_array: CandleArray, gap_windows: List[tuple]):
+        """
+        Surgically repairs identified data gaps by fetching missing segments from MT5.
+        Fulfills Audit #3 (Institutional Data Integrity).
+        """
+        if not gap_windows: return current_array
+        
+        logger.info(f"Auto-Repair: Fixing {len(gap_windows)} gaps for {symbol} [{timeframe}]...")
+        
+        repaired_segments = []
+        for start_ts, end_ts in gap_windows:
+            # Institutional Buffer: Widen by 2s to ensure MT5 inclusive capture
+            dt_start = datetime.datetime.fromtimestamp(start_ts - 2, datetime.timezone.utc)
+            dt_end = datetime.datetime.fromtimestamp(end_ts + 2, datetime.timezone.utc)
+            
+            logger.debug(f"Repairing Gap: {dt_start} -> {dt_end}")
+            chunk = self.source.fetch_candles_range(symbol, timeframe, dt_start, dt_end)
+            
+            if len(chunk) > 0:
+                repaired_segments.append(chunk)
+            else:
+                # Institutional Fallback: Synthetic Fill (Audit #3 - Robustness)
+                # If gap is smaller than market closure (2h), forward-fill 
+                gap_len_secs = end_ts - start_ts
+                if gap_len_secs < 7200: # 2 hours max synthetic fill
+                    logger.warning(f"Repair Found Midweek Hard Gap: Performing Synthetic Fill for {symbol} ({gap_len_secs/60:.1f} mins)")
+                    synthetic = self._create_synthetic_fill(symbol, timeframe, current_array, start_ts, end_ts)
+                    if synthetic: repaired_segments.append(synthetic)
+        
+        if not repaired_segments:
+            return current_array
+            
+        # Merge all repaired segments with the original array
+        final_array = current_array
+        for segment in repaired_segments:
+            final_array = self._merge_and_deduplicate(final_array, segment)
+            
+        # Institutional Persistence
+        self.store.save(symbol, timeframe, final_array)
+        logger.info(f"Auto-Repair: Successfully patched {len(repaired_segments)} segments.")
+        return final_array
+
+    def _create_synthetic_fill(self, symbol: str, timeframe: str, array: CandleArray, start: float, end: float) -> Optional[CandleArray]:
+        """Creates a forward-fill segment to bridge broker-side server gaps."""
+        # Find the last candle before the gap
+        idx = np.searchsorted(array.time, start) - 1
+        if idx < 0: return None
+        
+        last_c = {
+            "open": array.open[idx], "high": array.high[idx], 
+            "low": array.low[idx], "close": array.close[idx], 
+            "spread": array.spread[idx]
+        }
+        
+        # Determine step
+        step = {"M1": 60, "M5": 300, "M15": 900, "H1": 3600}.get(timeframe, 300)
+        
+        times = []
+        curr = (int(start) // step) * step + step
+        while curr <= end:
+            times.append(curr)
+            curr += step
+            
+        if not times: return None
+        
+        count = len(times)
+        return CandleArray(
+            time=np.array(times, dtype=np.int64),
+            open=np.full(count, last_c["open"]),
+            high=np.full(count, last_c["high"]),
+            low=np.full(count, last_c["low"]),
+            close=np.full(count, last_c["close"]),
+            tick_volume=np.zeros(count, dtype=np.int64),
+            spread=np.full(count, last_c["spread"])
+        )
+
 import pandas as pd
