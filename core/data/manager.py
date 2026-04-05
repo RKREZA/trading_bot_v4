@@ -44,17 +44,46 @@ class DataManager:
             logger.critical(f"FATAL: Source data empty for {symbol} after sync attempt.")
             raise ValueError("SYSTEM_HALT: Sync Failure.")
             
-        # 4. Mandatory Pre-Flight Verification (Step 2.5)
-        # Verify that the array reaches the requested range
-        first_time = array.time[0]
-        if first_time > start_date.timestamp():
-            logger.warning(f"Cache starts later than requested ({datetime.datetime.fromtimestamp(first_time)})")
-            # Deep backfill required
-            self.sync.sync_full_history(symbol, timeframe, start_date)
-            array = self.store.load(symbol, timeframe)
+        # 4. Institutional Mandatory Pre-Flight Verification (Step 2.5)
+        # FIX #1: Zero RSI Trap Mitigation (Min 200 bars)
+        # FIX #3: VPS Health Gap Detection (Continuity)
+        array = self._ensure_min_history(array, symbol, timeframe, start_date)
+        self._verify_continuity(array, symbol, timeframe)
             
-        # Sort and return
+        # Final institutional sort & return
         return array
+
+    def _ensure_min_history(self, array: CandleArray, symbol: str, timeframe: str, start_date: datetime.datetime) -> CandleArray:
+        """Enforces a 200-bar minimum history for reliable indicator calculation (Audit #1)."""
+        if len(array) < 200:
+            logger.warning(f"Data: {symbol} [{timeframe}] has only {len(array)} bars. Fetching more history.")
+            # We fetch 500 bars to be safe
+            self.sync.sync_full_history(symbol, timeframe, start_date)
+            new_array = self.store.load(symbol, timeframe)
+            if len(new_array) < 200:
+                logger.critical(f"FATAL: Insufficient history for {symbol} after backfill.")
+                raise ValueError("SYSTEM_HALT: History Gap.")
+            return new_array
+        return array
+
+    def _verify_continuity(self, array: CandleArray, symbol: str, timeframe: str):
+        """Detects data gaps by checking for contiguous timestamps (Audit #3)."""
+        if len(array) < 2: return
+        
+        # Expected diff between bars based on timeframe minutes
+        tf_map = {"M1": 60, "M5": 300, "M15": 900, "H1": 3600, "D1": 86400}
+        expected_diff = tf_map.get(timeframe)
+        if not expected_diff: return
+        
+        diffs = np.diff(array.time)
+        gaps = np.where(diffs > expected_diff * 1.5)[0] # Allow for some variance but not a full missing bar
+        
+        if len(gaps) > 0:
+            logger.error(f"DATA INTEGRITY ALERT: {len(gaps)} gaps detected in {symbol} [{timeframe}] cache.")
+            for g_idx in gaps[:3]: # Log first 3
+                logger.warning(f"Gap at: {datetime.datetime.fromtimestamp(array.time[g_idx])}")
+            # In Production, we trigger a repair. For now, we halt.
+            raise ValueError("SYSTEM_HALT: Data Gap Detected.")
 
     def get_latest_m1(self, symbol: str) -> CandleArray:
         """Helper for M1-Event Replay in backtesting engine."""

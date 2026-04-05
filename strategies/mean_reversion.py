@@ -52,3 +52,9 @@ class MeanReversionStrategy(BaseStrategy):
         if signal.direction == "BUY":
             return market_data.current_price - (atr * 2.0)
         return market_data.current_price + (atr * 2.0)
+    def get_take_profit(self, signal: TradeSignal, market_data: MarketData) -> float:
+        sl_price = self.get_stop_loss(signal, market_data)
+        risk = abs(market_data.current_price - sl_price)
+        if signal.direction == "BUY":
+            return market_data.current_price + (risk * 2.5)
+        return market_data.current_price - (risk * 2.5)

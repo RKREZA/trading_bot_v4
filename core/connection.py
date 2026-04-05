@@ -425,8 +425,15 @@ class MT5Connection:
                         # Update LOCAL copies only — signal object is untouched
                         if signal.direction == "BUY":
                             local_sl = price - safe_risk_distance
+                            if local_tp != 0:
+                                tp_dist = abs(signal.entry_price - signal.take_profit)
+                                local_tp = price + max(tp_dist, min_stop_distance)
                         else:
                             local_sl = price + safe_risk_distance
+                            if local_tp != 0:
+                                tp_dist = abs(signal.entry_price - signal.take_profit)
+                                local_tp = price - max(tp_dist, min_stop_distance)
+                        
                         local_entry = price
                     continue
                     

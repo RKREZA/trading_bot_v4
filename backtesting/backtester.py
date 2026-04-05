@@ -110,41 +110,46 @@ class PortfolioBacktester:
         tick_value = float(symbol_cfg.get("tick_value", 10.0))
         comm_per_lot = float(symbol_cfg.get("commission_per_lot", 7.0))
         
+        # 1. Institutional Indicator Pre-calculation (IPC) - Step 4.2
+        # This eliminates the O(N^2) bottleneck by computing everything once.
+        from core.indicator_engine import IndicatorEngine
+        m5_data.indicators = IndicatorEngine.precalculate_all(symbol, "M5", m5_data)
+        m15_data.indicators = IndicatorEngine.precalculate_all(symbol, "M15", m15_data)
+        h1_data.indicators = IndicatorEngine.precalculate_all(symbol, "H1", h1_data)
+
         # Pre-flight data integrity check (Step 11)
         self._validate_data_alignment(m5_data, m1_data)
 
         # Main Loop: Step through M5 bars starting from current_index
-        pbar = tqdm(total=len(m5_data), initial=self.current_index)
+        pbar = tqdm(total=len(m5_data.time), initial=self.current_index)
         
-        for i in range(max(100, self.current_index), len(m5_data.time)):
+        for i in range(max(200, self.current_index), len(m5_data.time)):
             self.current_index = i
             pbar.update(1)
             t = m5_data.time[i]
             dt = datetime.fromtimestamp(t, tz=timezone.utc)
             
-            # [ Institutional Fidelity ]: All indicators must use CLOSED candles only
-            # [:i] excludes the current i-th candle which is currently "forming"
-            history_m5 = m5_data[:i]
-            if len(history_m5) < 100: continue
+            # [ Institutional Fidelity ]: Zero-Copy Index Shifting
+            # Excludes the current i-th candle which is currently "forming"
+            m5_data.set_limit(i) 
+            m15_data.set_limit(self._get_tf_idx(m15_data, t))
+            h1_data.set_limit(self._get_tf_idx(h1_data, t))
             
             # 1. Regime Detection & Gating
-            regime_info = self.regime_detector.detect(history_m5)
+            regime_info = self.regime_detector.detect(m5_data)
             regime = regime_info.type
             risk_mult = RegimeGater.get_risk_multiplier(regime)
             conf_buffer = RegimeGater.get_confidence_buffer(regime)
 
-            # 2. MarketData Construction (Anti-Lookahead)
-            h1_slice = self._slice_tf_history(h1_data, t, lookback_bars=200)
-            m15_slice = self._slice_tf_history(m15_data, t, lookback_bars=200)
-            
-            # Strategy sees M5 up to i-1, and current M5 price from index i
+            # 2. MarketData Construction (Zero-Copy & Anti-Lookahead)
+            # FIX #1: Entry price MUST be the Open of the current candle
             market_data = MarketData(
                 symbol=symbol,
-                htf_candles=h1_slice,
-                m15_candles=m15_slice,
-                m5_candles=history_m5,
+                htf_candles=h1_data,
+                m15_candles=m15_data,
+                m5_candles=m5_data,
                 d1_candles=None,
-                current_price=m5_data.close[i], # Next candle open approx
+                current_price=m5_data.open[i], 
                 session=SessionDetector.get_session(dt),
                 timestamp=dt
             )
@@ -175,7 +180,7 @@ class PortfolioBacktester:
                             point=point, 
                             tick_value=tick_value, 
                             symbol=symbol,
-                            spread_points=symbol_cfg.get("spread_pips", 60),
+                            spread_points=symbol_cfg.get("spread_points", 600),
                             commission_per_lot=comm_per_lot
                         )
                         lots = lots * risk_mult
@@ -184,7 +189,7 @@ class PortfolioBacktester:
                             # [ Step 4.1: Execution Simulation ]
                             fill = self.simulator.simulate_entry(
                                 sig, market_data.current_price, 
-                                symbol_cfg.get("spread_pips", 60) * point, point
+                                symbol_cfg.get("spread_points", 600) * point, point
                             )
                             if fill:
                                 entry_comm = lots * comm_per_lot
@@ -206,7 +211,6 @@ class PortfolioBacktester:
                 self.equity_history.append({"time": t, "strategy_id": sid, "equity": self.equities[sid]})
 
             # 6. Crash Persistence System (Step 3.1)
-            # We save state every M5 bar for Zero Data Loss security
             self.checkpoint_manager.save_checkpoint(self.get_state())
 
         pbar.close()
@@ -286,14 +290,14 @@ class PortfolioBacktester:
             logger.critical(f"DATA ALIGNMENT ERROR: M1 data ({m1.time[-1]}) expires before M5 ({m5.time[-1]})")
             raise ValueError("CRITICAL_SYSTEM_ERROR: Data inconsistency.")
 
+    def _get_tf_idx(self, tf_data, target_time) -> int:
+        """Returns the current index of a higher timeframe candle relative to target_time."""
+        idx = np.searchsorted(tf_data.time, target_time, side="right")
+        return max(0, idx)
+
     def _get_m1_for_m5(self, m1, m5_time):
         idx = np.searchsorted(m1.time, m5_time)
         return m1[idx : idx + 5]
-
-    def _slice_tf_history(self, tf, current_time, lookback_bars):
-        end_idx = np.searchsorted(tf.time, current_time, side="right")
-        start_idx = max(0, end_idx - lookback_bars)
-        return tf[start_idx:end_idx]
 
     def _force_close_at_end(self, m5_data, point, tick_value, comm_per_lot, strategies):
         if not self.open_trades: return

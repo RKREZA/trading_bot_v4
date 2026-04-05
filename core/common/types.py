@@ -27,14 +27,56 @@ class Candle:
 
 @dataclass(slots=True)
 class CandleArray:
-    """Vectorized container for OHLCVT+S candle data."""
+    """
+    Vectorized container for OHLCVT+S candle data.
+    Institutional V4-ULTRA Edition: Supports index-aware zero-copy views.
+    """
     time: np.ndarray      # int64 timestamps
     open: np.ndarray
     high: np.ndarray
     low: np.ndarray
     close: np.ndarray
     tick_volume: np.ndarray
-    spread: np.ndarray     # int/float spread in points/pips
+    spread: np.ndarray     
+    
+    # Internal state for simulation fidelity
+    _limit: Optional[int] = field(default=None, repr=False)
+    indicators: Dict[str, np.ndarray] = field(default_factory=dict, repr=False)
+
+    @property
+    def limit(self) -> int:
+        return self._limit if self._limit is not None else len(self.time)
+
+    def set_limit(self, idx: int):
+        """Restricts the view of the data to [0:idx]. Used for anti-lookahead simulation."""
+        self._limit = idx
+
+    @property
+    def o(self) -> np.ndarray: return self.open[:self.limit]
+    @property
+    def h(self) -> np.ndarray: return self.high[:self.limit]
+    @property
+    def l(self) -> np.ndarray: return self.low[:self.limit]
+    @property
+    def c(self) -> np.ndarray: return self.close[:self.limit]
+    @property
+    def v(self) -> np.ndarray: return self.tick_volume[:self.limit]
+    @property
+    def s(self) -> np.ndarray: return self.spread[:self.limit]
+    @property
+    def t(self) -> np.ndarray: return self.time[:self.limit]
+
+    def to_df(self) -> "pd.DataFrame":
+        import pandas as pd
+        return pd.DataFrame({
+            "time": self.time,
+            "open": self.open,
+            "high": self.high,
+            "low": self.low,
+            "close": self.close,
+            "tick_volume": self.tick_volume,
+            "spread": self.spread
+        })
 
     @classmethod
     def from_dicts(cls, candles: list[dict]) -> "CandleArray":
@@ -49,20 +91,27 @@ class CandleArray:
         )
     
     def __len__(self):
-        return len(self.time)
+        return self.limit
     
     def slice(self, start: int, end: int) -> "CandleArray":
-        args = [getattr(self, f.name)[start:end] for f in fields(self)]
-        return CandleArray(*args)
+        """Returns a new CandleArray window. Use sparingly (O(N) copy)."""
+        return CandleArray(
+            time=self.time[start:end],
+            open=self.open[start:end],
+            high=self.high[start:end],
+            low=self.low[start:end],
+            close=self.close[start:end],
+            tick_volume=self.tick_volume[start:end],
+            spread=self.spread[start:end]
+        )
 
     def __getitem__(self, idx):
         if isinstance(idx, slice):
             start = idx.start if idx.start is not None else 0
-            stop = idx.stop if idx.stop is not None else len(self.time)
+            stop = idx.stop if idx.stop is not None else self.limit
             return self.slice(start, stop)
-        elif isinstance(idx, (np.ndarray, list)):
-            return CandleArray(*(getattr(self, f.name)[idx] for f in fields(self)))
         elif isinstance(idx, int):
+            if idx < 0: idx = self.limit + idx
             return Candle(
                 time=int(self.time[idx]),
                 open=float(self.open[idx]),
@@ -74,63 +123,63 @@ class CandleArray:
             )
         raise TypeError(f"Invalid argument type: {type(idx)}")
 
-    def __iter__(self):
-        for i in range(len(self)):
-            yield self[i]
+    def get_indicator(self, name: str) -> np.ndarray:
+        """Accesses pre-calculated indicators up to the current limit (O(1) view)."""
+        if name not in self.indicators:
+            return np.full(self.limit, np.nan)
+        return self.indicators[name][:self.limit]
 
+    # Legacy helper methods updated to use pre-calculation if available
     def ema(self, period: int) -> np.ndarray:
-        """High-performance vectorized Exponential Moving Average."""
-        if len(self.close) < period:
-            return np.full_like(self.close, np.nan)
-        
-        alpha = 2 / (period + 1)
-        ema_values = np.zeros_like(self.close)
-        ema_values[period-1] = np.mean(self.close[:period])
-        
-        for i in range(period, len(self.close)):
-            ema_values[i] = (self.close[i] - ema_values[i-1]) * alpha + ema_values[i-1]
-            
-        return ema_values
+        key = f"ema_{period}"
+        if key in self.indicators: return self.get_indicator(key)
+        # Fallback to manual (inefficient) or raise error in Production
+        return self._calc_ema(self.c, period)
 
     def rsi(self, period: int = 14) -> np.ndarray:
-        """High-performance vectorized Relative Strength Index."""
-        if len(self.close) < period + 1:
-            return np.full_like(self.close, np.nan)
-            
-        delta = np.diff(self.close)
-        gain = (delta > 0) * delta
-        loss = (delta < 0) * -delta
-        
-        avg_gain = np.full_like(self.close, np.nan)
-        avg_loss = np.full_like(self.close, np.nan)
-        
-        avg_gain[period] = np.mean(gain[:period])
-        avg_loss[period] = np.mean(loss[:period])
-        
-        alpha = 1 / period
-        for i in range(period + 1, len(self.close)):
-            avg_gain[i] = (gain[i-1] - avg_gain[i-1]) * alpha + avg_gain[i-1]
-            avg_loss[i] = (loss[i-1] - avg_loss[i-1]) * alpha + avg_loss[i-1]
-            
-        rs = avg_gain / avg_loss
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+        key = f"rsi_{period}"
+        if key in self.indicators: return self.get_indicator(key)
+        return self._calc_rsi(self.c, period)
 
     def atr(self, period: int = 14) -> np.ndarray:
-        """High-performance vectorized Average True Range."""
-        if len(self.close) < period + 1:
-            return np.full_like(self.close, np.nan)
-            
-        h, l, c_prev = self.high[1:], self.low[1:], self.close[:-1]
-        tr = np.maximum(h - l, np.maximum(np.abs(h - c_prev), np.abs(l - c_prev)))
-        
-        atr = np.full_like(self.close, np.nan)
+        key = f"atr_{period}"
+        if key in self.indicators: return self.get_indicator(key)
+        return self._calc_atr(period)
+
+    def _calc_ema(self, data: np.ndarray, period: int) -> np.ndarray:
+        if len(data) < period: return np.full_like(data, np.nan)
+        alpha = 2 / (period + 1)
+        ema = np.zeros_like(data)
+        ema[period-1] = np.mean(data[:period])
+        for i in range(period, len(data)):
+            ema[i] = (data[i] - ema[i-1]) * alpha + ema[i-1]
+        return ema
+
+    def _calc_rsi(self, data: np.ndarray, period: int) -> np.ndarray:
+        if len(data) < period + 1: return np.full_like(data, np.nan)
+        delta = np.diff(data)
+        gain = (delta > 0) * delta
+        loss = (delta < 0) * -delta
+        avg_gain = np.full_like(data, np.nan)
+        avg_loss = np.full_like(data, np.nan)
+        avg_gain[period] = np.mean(gain[:period])
+        avg_loss[period] = np.mean(loss[:period])
+        alpha = 1 / period
+        for i in range(period + 1, len(data)):
+            avg_gain[i] = (gain[i-1] - avg_gain[i-1]) * alpha + avg_gain[i-1]
+            avg_loss[i] = (loss[i-1] - avg_loss[i-1]) * alpha + avg_loss[i-1]
+        rs = avg_gain / avg_loss
+        return 100 - (100 / (1 + rs))
+
+    def _calc_atr(self, period: int) -> np.ndarray:
+        if self.limit < period + 1: return np.full(self.limit, np.nan)
+        h, l, cp = self.high[1:self.limit], self.low[1:self.limit], self.close[:self.limit-1]
+        tr = np.maximum(h - l, np.maximum(np.abs(h - cp), np.abs(l - cp)))
+        atr = np.full(self.limit, np.nan)
         atr[period] = np.mean(tr[:period])
-        
         alpha = 1.0 / period
-        for i in range(period + 1, len(self.close)):
+        for i in range(period + 1, self.limit):
             atr[i] = (tr[i-1] - atr[i-1]) * alpha + atr[i-1]
-            
         return atr
 
     def bollinger_bands(self, period: int = 20, std_dev: float = 2.0) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:

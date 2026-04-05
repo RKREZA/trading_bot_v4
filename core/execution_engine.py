@@ -19,16 +19,19 @@ class ExecutionEngine:
         bt_cfg = config.get("backtest", {}) if isinstance(config.get("backtest", {}), dict) else {}
 
         self.latency_ms = int(exe_cfg.get("latency_ms", 150))
-        self.max_spread_pips = float(exe_cfg.get("max_spread_pips", 5.0))
+        self.max_spread_points = float(exe_cfg.get("max_spread_points", 50.0))
 
-        base_slip = float(exe_cfg.get("slippage_pips", 0.1))
-        self.entry_slippage_pips = float(exe_cfg.get("entry_slippage_pips", base_slip))
-        self.tp_exit_slippage_pips = float(exe_cfg.get("tp_exit_slippage_pips", max(0.0, base_slip * 0.5)))
-        self.sl_exit_slippage_pips = float(exe_cfg.get("sl_exit_slippage_pips", max(0.0, base_slip * 1.25)))
-        self.forced_exit_slippage_pips = float(exe_cfg.get("forced_exit_slippage_pips", base_slip))
+        base_slip = float(exe_cfg.get("slippage_points", 0.5))
+        self.entry_slippage_points = float(exe_cfg.get("entry_slippage_points", base_slip))
+        self.tp_exit_slippage_points = float(exe_cfg.get("tp_exit_slippage_points", max(0.0, base_slip * 0.5)))
+        self.sl_exit_slippage_points = float(exe_cfg.get("sl_exit_slippage_points", max(0.0, base_slip * 1.25)))
+        self.forced_exit_slippage_points = float(exe_cfg.get("forced_exit_slippage_points", base_slip))
 
         self.deterministic = bool(bt_cfg.get("deterministic", False) or exe_cfg.get("deterministic", False))
         self.random_seed = exe_cfg.get("random_seed", bt_cfg.get("random_seed"))
+
+        from core.news_filter import SimpleNewsFilter
+        self.news_filter = SimpleNewsFilter()
 
         self._rng = random.Random()
         self.reset_rng(self.random_seed)
@@ -51,21 +54,23 @@ class ExecutionEngine:
         if signal.direction == "NONE":
             return None
 
-        spread_pips = spread / point if point > 0 else 0
-        if spread_pips > self.max_spread_pips:
-            logger.warning(f"EX_ENGINE: Spread too high ({spread_pips:.1f} pips). Rejecting signal.")
+        spread_points = spread / point if point > 0 else 0
+        if spread_points > self.max_spread_points:
+            logger.warning(f"EX_ENGINE: Spread too high ({spread_points:.1f} points). Rejecting signal.")
             return None
 
-        if self._is_news_blocked():
-            logger.warning("EX_ENGINE: Trading blocked due to high-impact news.")
+        # Institutional Guard: News Filter (Step 15 Refinement)
+        ts = timestamp if timestamp else time.time()
+        if self.news_filter.is_blocked(ts):
+            logger.warning("EX_ENGINE: Trading blocked due to high-impact economic noise.")
             return None
 
-        entry_slippage_points = self.sample_slippage_points(point, event="entry")
-        fill_price = current_price + entry_slippage_points if signal.direction == "BUY" else current_price - entry_slippage_points
+        entry_slip = self.sample_slippage_points(point, event="entry")
+        fill_price = current_price + entry_slip if signal.direction == "BUY" else current_price - entry_slip
 
         logger.info(
             f"EX_ENGINE: Order Filled. {signal.direction} {symbol} @ {fill_price:.5f} "
-            f"(Entry Slippage: {entry_slippage_points / point:.2f} pips)"
+            f"(Entry Slippage: {entry_slip / point:.2f} points)"
         )
 
         return {
@@ -74,9 +79,9 @@ class ExecutionEngine:
             "fill_price": fill_price,
             "sl": signal.stop_loss,
             "tp": signal.take_profit,
-            "timestamp": timestamp if timestamp else time.time(),
+            "timestamp": ts,
             "latency_ms": self.latency_ms,
-            "entry_slippage_pips": entry_slippage_points / point if point > 0 else 0.0,
+            "entry_slippage_points": entry_slip / point if point > 0 else 0.0,
         }
 
     def sample_slippage_points(self, point: float, event: str = "entry") -> float:
@@ -84,15 +89,12 @@ class ExecutionEngine:
             return 0.0
 
         if event == "tp_exit":
-            slippage_pips = self.tp_exit_slippage_pips
+            slippage_points = self.tp_exit_slippage_points
         elif event == "sl_exit":
-            slippage_pips = self.sl_exit_slippage_pips
+            slippage_points = self.sl_exit_slippage_points
         elif event == "forced_exit":
-            slippage_pips = self.forced_exit_slippage_pips
+            slippage_points = self.forced_exit_slippage_points
         else:
-            slippage_pips = self.entry_slippage_pips
+            slippage_points = self.entry_slippage_points
 
-        return self._rng.uniform(0.0, max(0.0, slippage_pips)) * point
-
-    def _is_news_blocked(self) -> bool:
-        return False
+        return self._rng.uniform(0.0, max(0.0, slippage_points)) * point
