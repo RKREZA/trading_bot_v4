@@ -36,12 +36,14 @@ Thumbs.db
 .DS_Store
 
 # application data
-ai_context.json
-bot_state.json
+/tmp
 /backtest_results
 /.hypothesis
+ai_context.json
+bot_state.json
 wf_robustness.json
 performance_report.csv
+
 # Root-level log files (not managed by RotatingFileHandler)
 br.log
 btr.log
