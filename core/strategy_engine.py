@@ -287,13 +287,19 @@ class StrategyEngine:
         htf_sl = pd.Series(htf_l).shift(1).rolling(10).min().values
         
         # Hardened: Zone MUST be accompanied by a structural break
+        # A pattern of candles [i, i+1] is only complete after candle i+1 closes.
         demand_mask = (htf_is_bear[:-1] & htf_is_bull[1:] & (htf_c[1:] > htf_sh[:-1]) & (htf_body[1:] > (htf_atr[:-1] * 1.5)))
         supply_mask = (htf_is_bull[:-1] & htf_is_bear[1:] & (htf_c[1:] < htf_sl[:-1]) & (htf_body[1:] > (htf_atr[:-1] * 1.5)))
         
         demand_zones = []; supply_zones = []
+        # HTF period in seconds (assuming H1 for zones)
+        htf_period = 3600 
         for i in range(len(demand_mask)):
-            if demand_mask[i]: demand_zones.append({"high": htf_h[i], "low": htf_l[i], "time": htf_t[i]})
-            if supply_mask[i]: supply_zones.append({"high": htf_h[i], "low": htf_l[i], "time": htf_t[i]})
+            if demand_mask[i]: 
+                # Pattern ends at i+1. It's only confirmed AFTER candle i+1 closes.
+                demand_zones.append({"high": htf_h[i], "low": htf_l[i], "confirmed_at": htf_t[i+1] + htf_period})
+            if supply_mask[i]: 
+                supply_zones.append({"high": htf_h[i], "low": htf_l[i], "confirmed_at": htf_t[i+1] + htf_period})
 
         m15_is_high = (m15_c == pd.Series(m15_c).rolling(7, min_periods=4).max().values)
         m15_is_low = (m15_c == pd.Series(m15_c).rolling(7, min_periods=4).min().values)
@@ -320,8 +326,9 @@ class StrategyEngine:
         for i in range(len(m5_original)):
             t = m5_t[i]; cp = m5_c[i]; cl = m5_l[i]; ch = m5_h[i]
             m15_idx = np.searchsorted(m15_t, t - _SECONDS_PER_5MIN, side='right') - 1; m15_idx = max(0, m15_idx)
-            relevant_demand = [z for z in demand_zones if z["time"] < t and z["time"] > t - _SECONDS_PER_DAY * _HTF_ZONE_LOOKBACK_DAYS]
-            relevant_supply = [z for z in supply_zones if z["time"] < t and z["time"] > t - _SECONDS_PER_DAY * _HTF_ZONE_LOOKBACK_DAYS]
+            # FIX: Use 'confirmed_at' to ensure zero lookahead
+            relevant_demand = [z for z in demand_zones if z["confirmed_at"] <= t and z["confirmed_at"] > t - _SECONDS_PER_DAY * _HTF_ZONE_LOOKBACK_DAYS]
+            relevant_supply = [z for z in supply_zones if z["confirmed_at"] <= t and z["confirmed_at"] > t - _SECONDS_PER_DAY * _HTF_ZONE_LOOKBACK_DAYS]
             in_d = any((cl <= z["high"] and ch >= z["low"]) for z in relevant_demand)
             in_s = any((ch >= z["low"] and cl <= z["high"]) for z in relevant_supply)
             

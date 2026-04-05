@@ -134,6 +134,14 @@ class BacktestCLI:
                 h1 = self.data_fetcher.fetch_candles_range(symbol, "H1", dt_from, dt_to)
                 progress.update(t1, completed=100)
 
+                # [INSTITUTIONAL] Data Integrity Audit
+                for tf, data in [("M5", m5), ("M15", m15), ("H1", h1)]:
+                    report = self.data_fetcher.validate_data_integrity(data, tf)
+                    if report["status"] != "OK":
+                        rprint(f"[bold yellow]DATA INTEGRITY {tf}:[/] {report['status']} | Missing: {report['missing_total']} candles | Gaps: {report['gap_count']}")
+                        if report["status"] == "CRITICAL":
+                            rprint("[bold red]CAUTION:[/] Large data gaps detected. Results may be unreliable.")
+
             # Symbol Injection
             sym_info = self.data_fetcher.get_symbol_info(symbol)
             if sym_info:
@@ -143,6 +151,7 @@ class BacktestCLI:
                     "contract_size": sym_info["contract_size"],
                     "lot_step": sym_info["lot_step"],
                     "min_lot": sym_info["min_lot"],
+                    "stops_level": sym_info.get("stops_level", 0),
                     "tick_value": sym_info.get("trade_tick_value",
                                                sym_info["contract_size"] * sym_info["point"])
                 })

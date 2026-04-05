@@ -120,10 +120,24 @@ class MultiStrategyBacktestEngine:
         self._swap_per_lot_night   = float(costs.get("swap_per_lot_per_night", 0.0))
         self._sl_gap_atr_pct       = float(costs.get("sl_gap_slippage_atr_pct", 0.0))
         self._tp_slip_atr_pct      = float(costs.get("tp_slippage_atr_pct", 0.0))
+        self._latency_pips         = float(costs.get("execution_latency_pips", 0.1))
         self._do_monte_carlo       = monte_carlo
         symbol_cfg = self.config.get("symbols_config", {}).get(symbol, {})
         point = symbol_cfg.get("point", 0.01)
         tick_value = symbol_cfg.get("tick_value", 1.0)
+        lot_step = symbol_cfg.get("lot_step", 0.01)
+        stops_level = symbol_cfg.get("stops_level", 0.0)
+
+        # Pre-fetch M1 data for high-fidelity simulation
+        self._m1_data = None
+        if data_fetcher and len(m5_candles.time) > 0:
+            try:
+                dt_from = datetime.fromtimestamp(m5_candles.time[0], tz=timezone.utc)
+                dt_to = datetime.fromtimestamp(m5_candles.time[-1] + 300, tz=timezone.utc)
+                self._m1_data = data_fetcher.fetch_candles_range(symbol, "M1", dt_from, dt_to)
+                logger.info(f"V4-Fidelity: Pre-fetched {len(self._m1_data)} M1 candles for simulation.")
+            except Exception as e:
+                logger.error(f"V4-Fidelity Error: Could not pre-fetch M1 data: {e}")
 
         # Initialize per-strategy states
         states: List[_StrategyBacktestState] = []
@@ -182,8 +196,8 @@ class MultiStrategyBacktestEngine:
             t = m5_times[i]
             candle_dt = datetime.fromtimestamp(t, tz=timezone.utc)
 
-            # Daily boundary & reset
-            is_new_day = False
+            # Daily boundary detection & reset
+            is_new_day_detected = False
             for st in states:
                 if st.last_date != candle_dt.date():
                     st.risk_manager.record_daily_close(st.balance)
@@ -192,27 +206,32 @@ class MultiStrategyBacktestEngine:
                     st.consecutive_losses = 0
                     st.last_date = candle_dt.date()
                     st.strategy.reset_daily_stats()
-                    is_new_day = True
+                    is_new_day_detected = True
             
-            if is_new_day:
+            if is_new_day_detected:
                 portfolio_halted_today = False
 
             from core.strategy_engine import StrategyEngine
             session = StrategyEngine.get_session_from_hour(None, candle_dt.hour, self.utc_offset)
+            
             # Session enablement: Symbol-specific override takes precedence
             sym_sessions = self.config.get("symbols_config", {}).get(symbol, {}).get("sessions", {})
             if session in sym_sessions:
                 is_enabled = sym_sessions[session].get("enabled", True)
             else:
                 is_enabled = self.config.get("session_config", {}).get(session, {}).get("enabled", True)
-            spread = self.config.get("backtest", {}).get("session_spreads", {}).get(session, 1.5) * point
+
+            # V4 Dynamic Spread: Base session spread + ATR-scaled volatility scaling
+            base_spread_val = self.config.get("backtest", {}).get("session_spreads", {}).get(session, 1.5)
+            atr = float(m5_atr_series[i]) or (point * 10)
+            # Use rolling 100-bar ATR as "normal" baseline
+            normal_atr = np.mean(m5_atr_series[max(0, i-100):i+1]) if i > 0 else atr
+            vol_scale = max(1.0, atr / normal_atr) if normal_atr > 0 else 1.0
+            spread = (base_spread_val * vol_scale) * point
 
             # Global Portfolio Circuit Breaker (Account Level)
             if states:
-                if portfolio_halted_today:
-                    # Daily pause - skip taking new trades, but allow managing open ones
-                    pass 
-                else:
+                if not portfolio_halted_today:
                     allowed, rs = states[0].risk_manager.check_portfolio_risk(states[0].balance, states[0].balance)
                     if not allowed:
                         if "Daily Loss" in rs:
@@ -223,24 +242,42 @@ class MultiStrategyBacktestEngine:
                             pbar.set_postfix({"HARD_HALT": rs})
                             break
 
+            # M1-Fidelity: Get M1 candles for this M5 bar
+            m1_slice = None
+            if self._m1_data:
+                m1_idx_start = np.searchsorted(self._m1_data.time, t, side='left')
+                m1_idx_end = np.searchsorted(self._m1_data.time, t + 300, side='left')
+                m1_slice = self._m1_data[m1_idx_start:m1_idx_end]
+
             # Process each strategy independently
             for st in states:
                 # 1. Handle pending signals (Anti-Lookahead)
                 if st.pending_signal and not st.open_trade:
-                    entry_price = m5_opens[i] + (spread if st.pending_signal.direction == "BUY" else -spread)
+                    # Enforce stops_level
+                    sl_dist_points = abs(st.pending_signal.entry_price - st.pending_signal.stop_loss) / point
+                    if sl_dist_points < stops_level:
+                        st.pending_signal = None  # Rejected by "broker"
+                        continue
+
+                    # Apply execution latency
+                    latency_penalty = self._latency_pips * point
+                    entry_p = m5_opens[i] + (spread if st.pending_signal.direction == "BUY" else -spread)
+                    entry_p += latency_penalty if st.pending_signal.direction == "BUY" else -latency_penalty
+
                     allowed, _ = st.risk_manager.check_circuit_breakers(
                         st.balance, st.balance, st.daily_trades, 0, st.consecutive_losses
                     )
                     if allowed:
                         risk_pct = st.risk_manager.calculate_scaled_risk(st.balance, symbol=symbol, session=session)
                         risk_val = st.balance * (risk_pct / 100.0)
-                        sl_dist = abs(entry_price - st.pending_signal.stop_loss)
+                        sl_dist = abs(entry_p - st.pending_signal.stop_loss)
                         lot = LotCalculator.calculate(
                             risk_val, sl_dist, point, tick_value,
-                            volume_min=symbol_cfg.get("min_lot", 0.01)
+                            volume_min=symbol_cfg.get("min_lot", 0.01),
+                            volume_step=lot_step
                         )
                         st.open_trade = _OpenTrade(
-                            int(t), st.pending_signal, entry_price, lot,
+                            int(t), st.pending_signal, entry_p, lot,
                             st.pending_signal.stop_loss, st.pending_signal.take_profit,
                             candle_dt, session, point, tick_value, st.strategy_id
                         )
@@ -249,9 +286,9 @@ class MultiStrategyBacktestEngine:
 
                 # 2. Manage open trades
                 if st.open_trade:
-                    closed, trade_record = self._manage_open_trade(
+                    closed, trade_record = self._manage_open_trade_v4(
                         st.open_trade, i, m5_highs, m5_lows, m5_opens,
-                        spread, candle_dt, m5_atr_series, st, data_fetcher, symbol, t
+                        spread, candle_dt, m5_atr_series, st, m1_slice, symbol, t
                     )
                     if closed and trade_record:
                         st.trades.append(trade_record)
@@ -320,185 +357,84 @@ class MultiStrategyBacktestEngine:
 
         return results
 
-    def _manage_open_trade(
+    def _manage_open_trade_v4(
         self, trade: _OpenTrade, i: int,
         m5_highs, m5_lows, m5_opens, spread: float,
         candle_dt: datetime, m5_atr_series, st: _StrategyBacktestState,
-        data_fetcher: Any = None, symbol: str = "", t: int = 0
+        m1_slice: Any = None, symbol: str = "", t_m5: int = 0
     ) -> Tuple[bool, Optional[dict]]:
         """
-        Bias-corrected SL/TP/Trailing logic for a single open trade.
-
-        Fixes applied:
-          [1] Intra-candle SL/TP ambiguity: if both SL and TP are hit on the same
-              candle, SL is assumed to trigger first (pessimistic / conservative).
-          [2] SL gap slippage: when SL is hit, apply random gap (0..15% ATR)
-              to simulate real-world gapping through stop levels.
-          [3] TP slippage: small adverse slippage on TP fills (5% ATR).
-          [4] Partial close PnL tracked in trade.partial_pnl for correct reporting.
-          [5] Commission and overnight swap deducted at trade close.
+        V4 Institutional Fidelity — M1-cycle trade management.
+        =======================================================
+        If M1 data is available, simulates the trade across each minute
+        of the M5 bar to resolve partials, trailing stops, and SL/TP with
+        chronological accuracy.
         """
-        bid_l, bid_h = m5_lows[i], m5_highs[i]
-        ask_l, ask_h = bid_l + spread, bid_h + spread
         atr = float(m5_atr_series[i]) or 1.0
-        closed = False
-        result = "SL"
-        exit_p = trade.sl
-        use_fixed_tp = (trade.tp != 0)
+        point = trade.tick_size
+        
+        # Determine simulation bricks (prefer M1, fallback to M5)
+        sim_bricks = []
+        if m1_slice is not None and len(m1_slice) > 0:
+            for m1 in m1_slice:
+                sim_bricks.append({
+                    "high": m1["high"], "low": m1["low"], 
+                    "close": m1["close"], "time": datetime.fromtimestamp(m1["time"], tz=timezone.utc)
+                })
+        else:
+            sim_bricks = [{"high": m5_highs[i], "low": m5_lows[i], "close": m5_highs[i], "time": candle_dt}]
 
-        if trade.direction == "BUY":
-            sl_hit = bid_l <= trade.sl
-            tp_hit = use_fixed_tp and bid_h >= trade.tp
+        for brick in sim_bricks:
+            bid_l, bid_h = brick["low"], brick["high"]
+            ask_l, ask_h = bid_l + spread, bid_h + spread
+            cur_time = brick["time"]
+            result = "SL"
+            exit_p = trade.sl
+            closed = False
+            use_fixed_tp = (trade.tp != 0)
 
-            # Ultra-fidelity intra-candle chronologic check
-            if sl_hit and tp_hit and data_fetcher:
-                try:
-                    # Fetch M1 data for this specific 5-min block to resolve priority
-                    m1_candles = data_fetcher.fetch_candles_range(symbol, "M1", t, t + 300)
-                    if m1_candles and len(m1_candles.low) > 0:
-                        sl_hit = False
-                        tp_hit = False
-                        for j in range(len(m1_candles.time)):
-                            # Check if price hit TP level before SL level within the M5 bar
-                            if m1_candles.high[j] >= trade.tp:
-                                tp_hit = True
-                                break
-                            if m1_candles.low[j] <= trade.sl:
-                                sl_hit = True
-                                break
-                except Exception as e:
-                    pass # Fallback to pessimistic SL logic
-                    
-            if sl_hit:
-                # [2] Gap slippage on SL — exit below the SL level
-                gap = random.uniform(0, atr * self._sl_gap_atr_pct)
-                exit_p = trade.sl - gap
-                result, closed = "SL", True
-            elif tp_hit:
-                # [3] TP slippage — slight adverse fill
-                slip = random.uniform(0, atr * self._tp_slip_atr_pct)
-                exit_p = trade.tp - slip
-                result, closed = "TP", True
-            else:
-                # Partial 1: 50% at tp1_price
+            if trade.direction == "BUY":
+                sl_hit = bid_l <= trade.sl
+                tp_hit = use_fixed_tp and bid_h >= trade.tp
+                # Tie-breaker: if both hit in same 1-min brick, SL is pessimistic
+                if sl_hit:
+                    gap = random.uniform(0, atr * self._sl_gap_atr_pct)
+                    exit_p, result, closed = trade.sl - gap, "SL", True
+                elif tp_hit:
+                    slip = random.uniform(0, atr * self._tp_slip_atr_pct)
+                    exit_p, result, closed = trade.tp - slip, "TP", True
+                
+                if closed: break # Exit simulation loop
+
+                # Partials (checked per-minute)
                 if (trade.partial_closed_count == 0 and
                         trade.signal.tp1_price > 0 and bid_h >= trade.signal.tp1_price):
-                    p_lot = round(trade.lot * 0.50, 2)
-                    if p_lot >= 0.01:
-                        p_pnl = ((trade.signal.tp1_price - trade.entry_price)
-                                  / trade.tick_size) * trade.tick_value * p_lot
-                        st.balance       += p_pnl
-                        trade.partial_pnl += p_pnl
-                        trade.lot = max(0.01, round(trade.lot - p_lot, 2))
-                        trade.partial_closed_count += 1
-                # Partial 2: 50% at tp2_price
+                    self._execute_partial(trade, st, trade.signal.tp1_price, 0.50)
                 if (trade.partial_closed_count == 1 and
                         trade.signal.tp2_price > 0 and bid_h >= trade.signal.tp2_price):
-                    p_lot = round(trade.lot * 0.50, 2)
-                    if p_lot >= 0.01:
-                        p_pnl = ((trade.signal.tp2_price - trade.entry_price)
-                                  / trade.tick_size) * trade.tick_value * p_lot
-                        st.balance       += p_pnl
-                        trade.partial_pnl += p_pnl
-                        trade.lot = max(0.01, round(trade.lot - p_lot, 2))
-                        trade.partial_closed_count += 1
-        else:  # SELL
-            sl_hit = ask_h >= trade.sl
-            tp_hit = use_fixed_tp and ask_l <= trade.tp
+                    self._execute_partial(trade, st, trade.signal.tp2_price, 0.50)
+            
+            else: # SELL
+                sl_hit = ask_h >= trade.sl
+                tp_hit = use_fixed_tp and ask_l <= trade.tp
+                if sl_hit:
+                    gap = random.uniform(0, atr * self._sl_gap_atr_pct)
+                    exit_p, result, closed = trade.sl + gap, "SL", True
+                elif tp_hit:
+                    slip = random.uniform(0, atr * self._tp_slip_atr_pct)
+                    exit_p, result, closed = trade.tp + slip, "TP", True
+                
+                if closed: break
 
-            # Ultra-fidelity intra-candle chronologic check
-            if sl_hit and tp_hit and data_fetcher:
-                try:
-                    m1_candles = data_fetcher.fetch_candles_range(symbol, "M1", t, t + 300)
-                    if m1_candles and len(m1_candles.high) > 0:
-                        sl_hit = False
-                        tp_hit = False
-                        for j in range(len(m1_candles.time)):
-                            # Check if price hit TP level before SL level within the M5 bar
-                            if m1_candles.low[j] + spread <= trade.tp:
-                                tp_hit = True
-                                break
-                            if m1_candles.high[j] + spread >= trade.sl:
-                                sl_hit = True
-                                break
-                except Exception as e:
-                    pass # Fallback to pessimistic SL logic
-
-            if sl_hit:
-                gap    = random.uniform(0, atr * self._sl_gap_atr_pct)
-                exit_p = trade.sl + gap
-                result, closed = "SL", True
-            elif tp_hit:
-                # [3] TP slippage — slight adverse fill
-                slip   = random.uniform(0, atr * self._tp_slip_atr_pct)
-                exit_p = trade.tp + slip
-                result, closed = "TP", True
-            else:
-                # Partial 1: 50% at tp1_price
+                # Partials
                 if (trade.partial_closed_count == 0 and
                         trade.signal.tp1_price > 0 and ask_l <= trade.signal.tp1_price):
-                    p_lot = round(trade.lot * 0.50, 2)
-                    if p_lot >= 0.01:
-                        p_pnl = ((trade.entry_price - trade.signal.tp1_price)
-                                  / trade.tick_size) * trade.tick_value * p_lot
-                        st.balance       += p_pnl
-                        trade.partial_pnl += p_pnl
-                        trade.lot = max(0.01, round(trade.lot - p_lot, 2))
-                        trade.partial_closed_count += 1
-                # Partial 2: 50% at tp2_price
+                    self._execute_partial(trade, st, trade.signal.tp1_price, 0.50)
                 if (trade.partial_closed_count == 1 and
                         trade.signal.tp2_price > 0 and ask_l <= trade.signal.tp2_price):
-                    p_lot = round(trade.lot * 0.50, 2)
-                    if p_lot >= 0.01:
-                        p_pnl = ((trade.entry_price - trade.signal.tp2_price)
-                                  / trade.tick_size) * trade.tick_value * p_lot
-                        st.balance       += p_pnl
-                        trade.partial_pnl += p_pnl
-                        trade.lot = max(0.01, round(trade.lot - p_lot, 2))
-                        trade.partial_closed_count += 1
+                    self._execute_partial(trade, st, trade.signal.tp2_price, 0.50)
 
-        if closed:
-            # Final exit PnL (remaining lot)
-            if trade.direction == "BUY":
-                pnl = ((exit_p - trade.entry_price) / trade.tick_size) * trade.tick_value * trade.lot
-            else:
-                pnl = ((trade.entry_price - exit_p) / trade.tick_size) * trade.tick_value * trade.lot
-
-            # [5a] Commission (round-trip on original lot size)
-            commission = self._commission_per_lot * trade.original_lot
-
-            # [5b] Swap: charge per night held
-            nights_held = max(0, (candle_dt - trade.entry_time).days)
-            swap = self._swap_per_lot_night * trade.original_lot * nights_held
-
-            net_pnl = pnl + commission + swap  # commission/swap are negative
-            st.balance += net_pnl
-
-            # Total realized PnL including partial closes
-            total_pnl = round(net_pnl + trade.partial_pnl, 2)
-
-            trade_record = {
-                "ticket":        trade.ticket,
-                "time":          trade.entry_time,
-                "exit_time":     candle_dt,
-                "direction":     trade.direction,
-                "entry":         trade.entry_price,
-                "exit":          round(exit_p, 5),
-                "lot":           trade.lot,
-                "pnl":           total_pnl,
-                "balance":       round(st.balance, 2),
-                "close_pnl":     round(pnl, 2),
-                "partial_pnl":   round(trade.partial_pnl, 2),
-                "commission":    round(commission, 2),
-                "swap":          round(swap, 2),
-                "nights_held":   nights_held,
-                "result":        result,
-                "session":       trade.session,
-                "strategy_id":   trade.strategy_id,
-            }
-            return True, trade_record
-        else:
-            # Trailing stop update
+            # Trailing Stop Update (per-minute)
             trade.best_price = (max(trade.best_price, bid_h) if trade.direction == "BUY"
                                 else min(trade.best_price, ask_l))
             risk = abs(trade.entry_price - trade.signal.stop_loss)
@@ -506,12 +442,56 @@ class MultiStrategyBacktestEngine:
                 trade.direction == "BUY",
                 trade.entry_price, trade.sl, trade.best_price,
                 atr, risk, self.config,
-                {"low": m5_lows[i - 1], "high": m5_highs[i - 1]},
+                {"low": brick["low"], "high": brick["high"]},
                 symbol=symbol, session=trade.session
             )
-            if new_sl:
-                trade.sl = new_sl
-            return False, None
+            if new_sl: trade.sl = new_sl
+
+        if closed:
+            # Final exit calculation
+            if trade.direction == "BUY":
+                pnl = ((exit_p - trade.entry_price) / trade.tick_size) * trade.tick_value * trade.lot
+            else:
+                pnl = ((trade.entry_price - exit_p) / trade.tick_size) * trade.tick_value * trade.lot
+
+            commission = self._commission_per_lot * trade.original_lot
+            
+            # Professional Swap Calculation: Triple Swap on Wednesday
+            nights_held = 0
+            swap = 0
+            if candle_dt > trade.entry_time:
+                curr = trade.entry_time + timedelta(days=1)
+                while curr <= candle_dt:
+                    # Nights are usually 00:00 server time.
+                    multiplier = 3 if curr.weekday() == 2 else 1 # Wednesday is index 2
+                    swap += self._swap_per_lot_night * trade.original_lot * multiplier
+                    curr += timedelta(days=1)
+                    nights_held += 1
+
+            net_pnl = pnl + commission + swap
+            st.balance += net_pnl
+            total_pnl = round(net_pnl + trade.partial_pnl, 2)
+
+            return True, {
+                "ticket": trade.ticket, "time": trade.entry_time, "exit_time": candle_dt,
+                "direction": trade.direction, "entry": trade.entry_price, "exit": round(exit_p, 5),
+                "lot": trade.lot, "pnl": total_pnl, "balance": round(st.balance, 2),
+                "commission": round(commission, 2), "swap": round(swap, 2),
+                "result": result, "session": trade.session, "strategy_id": trade.strategy_id,
+            }
+        return False, None
+
+    def _execute_partial(self, trade: _OpenTrade, st: _StrategyBacktestState, price: float, pct: float):
+        p_lot = round(trade.lot * pct, 2)
+        if p_lot >= 0.01:
+            if trade.direction == "BUY":
+                p_pnl = ((price - trade.entry_price) / trade.tick_size) * trade.tick_value * p_lot
+            else:
+                p_pnl = ((trade.entry_price - price) / trade.tick_size) * trade.tick_value * p_lot
+            st.balance += p_pnl
+            trade.partial_pnl += p_pnl
+            trade.lot = max(0.01, round(trade.lot - p_lot, 2))
+            trade.partial_closed_count += 1
 
     def _build_portfolio_metrics(self, states: List[_StrategyBacktestState]) -> dict:
         """
