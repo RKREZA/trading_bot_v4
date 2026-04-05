@@ -8,7 +8,6 @@ import os
 import time
 import math
 import threading
-from core.lot_calculator import LotCalculator
 from datetime import datetime, timezone
 from typing import Optional, List
 
@@ -622,16 +621,12 @@ class PositionManager:
 
         sl_distance = abs(signal.entry_price - signal.stop_loss)
         
-        # Professional Cross-Currency Lot Sizing logic (delegated to LotCalculator)
-        lot = LotCalculator.calculate(
-            risk_amount=risk_amount,
-            sl_distance=sl_distance,
-            tick_size=symbol_info.trade_tick_size,
-            tick_value=symbol_info.trade_tick_value,
-            volume_min=symbol_info.volume_min,
-            volume_max=symbol_info.volume_max,
-            volume_step=symbol_info.volume_step
-        )
+        # Simplified V4 Lot Sizing (Replacing deleted LotCalculator)
+        if sl_distance > 0 and symbol_info.trade_tick_value > 0:
+            lot = risk_amount / (sl_distance * (symbol_info.trade_tick_value / symbol_info.point))
+            lot = max(symbol_info.volume_min, min(symbol_info.volume_max, round(lot / symbol_info.volume_step) * symbol_info.volume_step))
+        else:
+            lot = 0.01
 
         # Scale down lot proportionally if SL is too tight (to avoid risk inflation)
         point = symbol_info.point

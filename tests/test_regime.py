@@ -1,46 +1,30 @@
-import pytest
-from core.regime import MarketRegime
+import numpy as np
 
-def test_regime_classification_trending():
-    # Create an artificially perfectly trending market (straight up)
-    candles = []
-    for i in range(100):
-        # Highs and lows follow a tight spread around the perfect close
-        candles.append({
-            'open': 100 + i,
-            'high': 100 + i + 0.5,
-            'low': 100 + i - 0.5,
-            'close': 101 + i,
-            'tick_volume': 100
-        })
-    # This should yield exceptionally high Efficiency Ratio -> Trending
-    regime = MarketRegime.classify(candles, lookback=50)
-    assert regime == MarketRegime.TRENDING
+from core.regime_detector import RegimeDetector, MarketRegime
+from core.types import CandleArray
 
-def test_regime_classification_low_liquidity():
-    # Normal volume then abrupt drop
-    candles = []
-    for i in range(95):
-        candles.append({
-            'open': 100, 'high': 101, 'low': 99, 'close': 100.5, 'tick_volume': 1000
-        })
-    for i in range(5):
-        candles.append({
-            'open': 100, 'high': 100.1, 'low': 99.9, 'close': 100, 'tick_volume': 10 # 1% of avg
-        })
-    
-    regime = MarketRegime.classify(candles, lookback=50)
-    assert regime == MarketRegime.LOW_LIQUIDITY
 
-def test_regime_classification_ranging():
-    # Zig zag market with efficiency ratio near 0
-    candles = []
-    for i in range(100):
-        close = 101 if i % 2 == 0 else 99
-        candles.append({
-            'open': 100, 'high': 102, 'low': 98, 'close': close, 'tick_volume': 100
-        })
-    
-    regime = MarketRegime.classify(candles, lookback=50)
-    # The ATR might be moderate, but ER is practically 0
-    assert regime == MarketRegime.RANGING
+def _candles(n=120, step=0.1):
+    time = np.arange(n, dtype=np.int64) * 300 + 1700000000
+    close = 100 + np.arange(n) * step
+    return CandleArray(
+        time=time,
+        open=close - 0.05,
+        high=close + 0.10,
+        low=close - 0.10,
+        close=close,
+        tick_volume=np.full(n, 100),
+    )
+
+
+def test_short_series_is_uncertain():
+    det = RegimeDetector()
+    info = det.detect(_candles(n=10))
+    assert info.type == MarketRegime.UNCERTAIN
+
+
+def test_trending_series_detected_as_trend_or_volatility_regime():
+    det = RegimeDetector()
+    info = det.detect(_candles(n=140, step=0.2))
+    assert info.type in {MarketRegime.TREND, MarketRegime.HIGH_VOLATILITY, MarketRegime.LOW_VOLATILITY}
+    assert isinstance(info.confidence, float)

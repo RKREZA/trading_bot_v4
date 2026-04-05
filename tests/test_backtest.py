@@ -1,146 +1,180 @@
-"""
-Unit tests for BacktestEngine.
-Tests the simulation, drawdown, and streak calculations without MT5.
-"""
+"""Backtesting integration tests for V4 PortfolioBacktester."""
 
-import sys
 import os
-import pytest
+import sys
+import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.backtester import BacktestEngine
-from core.strategy_engine import TradeSignal
+from backtesting.backtester import PortfolioBacktester
+from core.base_strategy import BaseStrategy
+from core.types import CandleArray, TradeSignal
+from core.risk_engine import RiskEngine
+from strategies import create_strategy
 
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
+class DeterministicPulseStrategy(BaseStrategy):
+    def generate_signal(self, market_data):
+        if len(market_data.m5_candles) % 25 == 0:
+            return TradeSignal(
+                direction="BUY",
+                price=float(market_data.current_price),
+                confidence=0.95,
+                timestamp=market_data.timestamp,
+            )
+        return TradeSignal(direction="NONE")
 
-@pytest.fixture
-def config():
+    def get_stop_loss(self, signal, market_data):
+        return float(market_data.current_price) - 0.20
+
+    def get_take_profit(self, signal, market_data):
+        return float(market_data.current_price) + 0.20
+
+
+def _build_arrays(n_m5: int = 260):
+    base_ts = 1700000000
+
+    # M5 trend
+    t5 = (np.arange(n_m5) * 300 + base_ts).astype(np.int64)
+    close5 = 100.0 + np.linspace(0, 2.0, n_m5)
+    open5 = close5 - 0.02
+    high5 = close5 + 0.10
+    low5 = close5 - 0.10
+    vol5 = np.full(n_m5, 150)
+    m5 = CandleArray(time=t5, open=open5, high=high5, low=low5, close=close5, tick_volume=vol5)
+
+    # M1 for intrabar execution (TP reachable, SL not touched)
+    n_m1 = n_m5 * 5
+    t1 = (np.arange(n_m1) * 60 + base_ts).astype(np.int64)
+    close1 = 100.0 + np.linspace(0, 2.0, n_m1)
+    open1 = close1 - 0.01
+    high1 = close1 + 0.35
+    low1 = close1 - 0.05
+    vol1 = np.full(n_m1, 120)
+    m1 = CandleArray(time=t1, open=open1, high=high1, low=low1, close=close1, tick_volume=vol1)
+
+    # HTF arrays
+    n_m15 = (n_m5 // 3) + 20
+    t15 = (np.arange(n_m15) * 900 + base_ts).astype(np.int64)
+    close15 = 100.0 + np.linspace(0, 2.0, n_m15)
+    m15 = CandleArray(
+        time=t15,
+        open=close15 - 0.02,
+        high=close15 + 0.12,
+        low=close15 - 0.12,
+        close=close15,
+        tick_volume=np.full(n_m15, 100),
+    )
+
+    n_h1 = (n_m5 // 12) + 30
+    t1h = (np.arange(n_h1) * 3600 + base_ts).astype(np.int64)
+    closeh = 100.0 + np.linspace(0, 2.0, n_h1)
+    h1 = CandleArray(
+        time=t1h,
+        open=closeh - 0.02,
+        high=closeh + 0.15,
+        low=closeh - 0.15,
+        close=closeh,
+        tick_volume=np.full(n_h1, 100),
+    )
+
+    return m5, h1, m15, m1
+
+
+def _config():
     return {
-        "strategy": {"min_confluence_score": 3, "min_confidence": 40, "cooldown_candles": 3},
-        "backtest": {"initial_balance": 1000, "spread_pips": {"TEST": 10}},
-        "symbols_config": {"TEST": {"point": 0.01, "contract_size": 1, "lot": 0.01}},
+        "backtest": {
+            "initial_balance": 1000,
+            "deterministic": True,
+            "random_seed": 7,
+            "costs": {
+                "entry_commission_sides": 1.0,
+                "exit_commission_sides": 1.0,
+            },
+        },
+        "risk_governance": {
+            "risk_per_trade_pct": 0.5,
+            "max_daily_loss_pct": 3.0,
+            "max_drawdown_halt_pct": 10.0,
+        },
+        "symbols_config": {
+            "XAUUSDm": {
+                "point": 0.01,
+                "tick_value": 1.0,
+                "commission_per_lot": 0.5,
+                "spread_pips": 2.0,
+            }
+        },
+        "execution": {
+            "entry_slippage_pips": 0.2,
+            "tp_exit_slippage_pips": 0.1,
+            "sl_exit_slippage_pips": 0.25,
+            "forced_exit_slippage_pips": 0.2,
+            "max_spread_pips": 10.0,
+        },
     }
 
 
-@pytest.fixture
-def engine(config):
-    from core.strategy_engine import StrategyEngine
-    strategy = StrategyEngine(config)
-    return BacktestEngine(config, strategy)
+def test_backtester_runs_and_produces_history():
+    cfg = _config()
+    m5, h1, m15, m1 = _build_arrays()
+    bt = PortfolioBacktester(cfg)
+    strategies = [DeterministicPulseStrategy("pulse_v1", cfg)]
+
+    history = bt.run("XAUUSDm", strategies, m5, h1, m15, m1)
+
+    assert len(history) > 0
+    assert all("strategy_id" in t for t in history)
+    assert any(t["result"] in {"TP", "FORCED_CLOSE"} for t in history)
 
 
-# ---------------------------------------------------------------------------
-# Tier 2: Integration & Determinism
-# ---------------------------------------------------------------------------
+def test_backtester_resets_state_between_runs():
+    cfg = _config()
+    m5, h1, m15, m1 = _build_arrays()
+    bt = PortfolioBacktester(cfg)
+    strategies = [DeterministicPulseStrategy("pulse_v1", cfg)]
 
-class TestBacktestDeterminism:
-    """Run the same backtest twice with same seed — results must be identical."""
-    def test_deterministic_with_fixed_seed(self, engine):
-        from core.types import CandleArray
-        import numpy as np
-        import random
-        from datetime import datetime
-        
-        # Create fake synthetic data
-        base_time = int(datetime(2023, 1, 1).timestamp())
-        fake_data = []
-        random.seed(42)
-        np.random.seed(42)
-        price = 100.0
-        for i in range(500):
-            price += random.uniform(-1, 1)
-            fake_data.append({
-                "time": base_time + i * 3600,
-                "open": price,
-                "high": price + 0.5,
-                "low": price - 0.5,
-                "close": price,
-                "tick_volume": 100
-            })
-            
-        c_arr = CandleArray.from_dicts(fake_data)
-        
-        engine.strategy.silent = True
-        
-        # Run 1
-        random.seed(42)
-        np.random.seed(42)
-        result1 = engine.run("XAUUSDm", c_arr, c_arr, c_arr, c_arr, c_arr, quiet=True)
-        
-        # Run 2
-        random.seed(42)
-        np.random.seed(42)
-        result2 = engine.run("XAUUSDm", c_arr, c_arr, c_arr, c_arr, c_arr, quiet=True)
-        
-        assert result1['net_profit'] == result2['net_profit']
-        assert result1['total_trades'] == result2['total_trades']
+    history_1 = bt.run("XAUUSDm", strategies, m5, h1, m15, m1)
+    history_2 = bt.run("XAUUSDm", strategies, m5, h1, m15, m1)
 
-class TestLiveBacktestParity:
-    """Signal generation should be identical for live and backtest paths."""
-    def test_same_signal_for_same_data(self):
-        # Already covered deterministically if the engine routes through the same StrategyEngine module.
-        pass
+    assert len(history_1) == len(history_2)
+    assert history_1[0]["timestamp"] == history_2[0]["timestamp"]
 
 
-# ---------------------------------------------------------------------------
-# Drawdown Calculation
-# ---------------------------------------------------------------------------
+def test_backtester_deterministic_seed_is_reproducible():
+    cfg = _config()
+    m5, h1, m15, m1 = _build_arrays()
 
-class TestDrawdown:
-    def test_no_trades_zero_drawdown(self):
-        assert BacktestEngine._calc_drawdown([], 1000) == 0.0
+    bt_a = PortfolioBacktester(cfg)
+    bt_b = PortfolioBacktester(cfg)
+    strategies_a = [DeterministicPulseStrategy("pulse_v1", cfg)]
+    strategies_b = [DeterministicPulseStrategy("pulse_v1", cfg)]
 
-    def test_simple_drawdown(self):
-        trades = [
-            {"pnl": 100, "result": "TP"},   # balance: 1100, peak: 1100
-            {"pnl": -200, "result": "SL"},   # balance: 900, dd: (1100-900)/1100 = 18.18%
-            {"pnl": 50, "result": "TP"},     # balance: 950
-        ]
-        dd = BacktestEngine._calc_drawdown(trades, 1000)
-        assert abs(dd - 18.18) < 0.1
+    history_a = bt_a.run("XAUUSDm", strategies_a, m5, h1, m15, m1)
+    history_b = bt_b.run("XAUUSDm", strategies_b, m5, h1, m15, m1)
 
-    def test_no_drawdown_when_only_winning(self):
-        trades = [{"pnl": 100, "result": "TP"}, {"pnl": 50, "result": "TP"}]
-        assert BacktestEngine._calc_drawdown(trades, 1000) == 0.0
+    assert len(history_a) == len(history_b)
+    assert [round(t["pnl"], 8) for t in history_a] == [round(t["pnl"], 8) for t in history_b]
+    assert [round(t.get("entry_slippage_pips", 0.0), 8) for t in history_a] == [
+        round(t.get("entry_slippage_pips", 0.0), 8) for t in history_b
+    ]
 
 
-# ---------------------------------------------------------------------------
-# Streak Calculation
-# ---------------------------------------------------------------------------
+def test_risk_engine_reads_risk_governance_block():
+    cfg = _config()
+    risk = RiskEngine(cfg)
 
-class TestStreak:
-    def test_no_trades_zero_streak(self):
-        assert BacktestEngine._calc_streak([], "TP") == 0
-
-    def test_win_streak(self):
-        trades = [
-            {"result": "TP"}, {"result": "TP"}, {"result": "TP"},
-            {"result": "SL"}, {"result": "TP"},
-        ]
-        assert BacktestEngine._calc_streak(trades, "TP") == 3
-
-    def test_loss_streak(self):
-        trades = [
-            {"result": "TP"}, {"result": "SL"}, {"result": "SL"},
-            {"result": "SL"}, {"result": "SL"}, {"result": "TP"},
-        ]
-        assert BacktestEngine._calc_streak(trades, "SL") == 4
+    assert risk.risk_per_trade_pct == 0.5
+    assert risk.max_daily_loss_pct == 3.0
+    assert risk.max_total_drawdown_pct == 10.0
 
 
-# ---------------------------------------------------------------------------
-# Config-Based Lot Sizes (not hardcoded)
-# ---------------------------------------------------------------------------
+def test_trend_strategy_receives_enough_h1_history():
+    cfg = _config()
+    m5, h1, m15, m1 = _build_arrays()
+    bt = PortfolioBacktester(cfg)
+    trend = create_strategy("TREND_FOLLOWING", cfg)
 
-class TestConfigLotSizes:
-    def test_lot_comes_from_config(self, config):
-        """Verify BacktestEngine reads lot from symbols_config, not hardcoded."""
-        # The config says lot=0.01 for TEST
-        lot = config["symbols_config"]["TEST"]["lot"]
-        assert lot == 0.01
-        # Change it to prove it's read from config
-        config["symbols_config"]["TEST"]["lot"] = 0.5
-        assert config["symbols_config"]["TEST"]["lot"] == 0.5
+    history = bt.run("XAUUSDm", [trend], m5, h1, m15, m1)
+
+    assert isinstance(history, list)

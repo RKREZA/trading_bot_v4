@@ -1,67 +1,37 @@
-import pytest
-from hypothesis import given, strategies as st, settings, HealthCheck
-from unittest.mock import MagicMock
-from core.types import BotConfig
+from core.risk_engine import RiskEngine
 
-from core.risk_manager import RiskManager
 
-@pytest.fixture
-def base_config():
+def _cfg():
     return {
-        "risk": {
-            "risk_per_trade": 1.0,
+        "backtest": {"initial_balance": 1000.0},
+        "risk_governance": {
+            "risk_per_trade_pct": 0.5,
+            "max_daily_loss_pct": 3.0,
             "max_drawdown_halt_pct": 10.0,
-            "drawdown_scaling": True,
-            "max_consecutive_losses": 4,
-            "max_hourly_trades": 3
         },
-        "session_config": {
-            "LONDON": {"risk_multiplier": 1.0},
-            "TOKYO": {"risk_multiplier": 0.5}
-        }
     }
 
-@pytest.fixture
-def risk_manager(base_config):
-    rm = RiskManager(base_config)
-    rm.silent = True
-    return rm
 
-class TestRiskManagerProperties:
-    @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
-    @given(balance=st.floats(min_value=100, max_value=1_000_000),
-           session=st.sampled_from(["LONDON", "TOKYO", "NEW_YORK"]))
-    def test_risk_never_exceeds_max(self, risk_manager, balance, session):
-        risk = risk_manager.calculate_scaled_risk(balance, session)
-        assert 0.0 <= risk <= 2.0  # Hard ceiling in logic
+def test_reads_nested_risk_governance_config():
+    r = RiskEngine(_cfg())
+    assert r.risk_per_trade_pct == 0.5
+    assert r.max_daily_loss_pct == 3.0
+    assert r.max_total_drawdown_pct == 10.0
 
-    @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
-    @given(balance=st.floats(min_value=100, max_value=1_000_000))
-    def test_risk_zero_at_max_drawdown(self, risk_manager, balance):
-        # Establish high watermark
-        risk_manager.calculate_scaled_risk(balance * 2.0)
-        # Check current risk at 50% drawdown
-        risk = risk_manager.calculate_scaled_risk(balance)
-        assert risk == 0.0
 
-def test_circuit_breaker_consecutive_losses(risk_manager):
-    context = {"consecutive_losses": 4}
-    allowed, reason = risk_manager.circuit_breaker.check_all(context)
-    assert not allowed
-    assert "consecutive losses" in reason.lower()
+def test_circuit_breaker_triggers_on_total_drawdown():
+    r = RiskEngine(_cfg())
+    allowed, reason = r.check_circuit_breakers(current_balance=900.0, current_equity=800.0)
+    assert allowed is False
+    assert "Max Total DD" in reason
 
-def test_circuit_breaker_low_margin(risk_manager):
-    context = {"margin_level": 150} # Below 200 threshold
-    allowed, reason = risk_manager.circuit_breaker.check_all(context)
-    assert not allowed
-    assert "low margin" in reason.lower()
 
-def test_kelly_zero_on_losing_streak(risk_manager):
-    # Setup a streak of losses
-    for i in range(20):
-        risk_manager.update_history({'ticket': i, 'pnl': -10.0})
-    
-    # Kelly should fall back to base or quarter-kelly scaled bounds
-    # Since win_rate = 0, kelly factor is 0, so risk should be min clamped to 0.5%
-    risk = risk_manager.calculate_scaled_risk(1000)
-    assert risk == 0.5
+def test_update_history_tracks_losses_and_resets_on_win():
+    r = RiskEngine(_cfg())
+    r.update_history(-5.0, 995.0)
+    r.update_history(-4.0, 991.0)
+    assert r.consecutive_losses == 2
+    assert r.daily_loss == 9.0
+
+    r.update_history(3.0, 994.0)
+    assert r.consecutive_losses == 0

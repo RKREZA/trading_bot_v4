@@ -1,7 +1,7 @@
 """
-TRADING BOT V3 — Strategy Abstraction Layer
-Defines the mandatory contract for all strategy implementations,
-plus shared data types for the multi-strategy framework.
+TRADING BOT V4 — Strategy Abstraction Layer
+===========================================
+Defines the mandatory contract for all institutional strategy implementations.
 """
 
 import uuid
@@ -11,13 +11,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from .types import CandleArray
-
-from .strategy_engine import TradeSignal
+# Institutional types
+from .types import TradeSignal, CandleArray, MarketRegime
 
 logger = logging.getLogger("trading_bot.base_strategy")
-
 
 @dataclass(frozen=True)
 class MarketData:
@@ -26,15 +23,14 @@ class MarketData:
     Shared read-only across all strategy runtimes in a single cycle.
     """
     symbol: str
-    htf_candles: Any         # CandleArray (H1)
-    m15_candles: Any         # CandleArray (M15)
-    m5_candles: Any          # CandleArray (M5)
-    d1_candles: Any          # CandleArray (D1)
+    htf_candles: CandleArray
+    m15_candles: CandleArray
+    m5_candles: CandleArray
+    d1_candles: Optional[CandleArray]
     current_price: float
     session: str
     timestamp: datetime
     preprocessed: Optional[dict] = None   # Precomputed indicators per M5 bar
-
 
 @dataclass
 class TaggedSignal:
@@ -52,7 +48,7 @@ class TaggedSignal:
 
     @property
     def entry_price(self) -> float:
-        return self.signal.entry_price
+        return self.signal.price
 
     @property
     def stop_loss(self) -> float:
@@ -65,90 +61,42 @@ class TaggedSignal:
 
 class BaseStrategy(ABC):
     """
-    Abstract base class that all strategies MUST implement.
-    
-    Contract:
-        - generate_signal() → produces a TradeSignal or None
-        - on_trade_closed()  → notified when one of its trades closes
-        - preprocess()       → optional bulk preprocessing for backtests
-        - get_config()       → returns strategy-specific config snapshot
-    
-    Each concrete strategy:
-        - Owns its own internal state (cooldowns, counters, etc.)
-        - Has ZERO shared mutable state with other strategies
-        - Receives market data as a frozen, read-only MarketData object
+    V4 Institutional Base Strategy Interface.
+    Each strategy behaves as a micro-service: independent and stateless.
     """
 
     def __init__(self, strategy_id: str, config: dict):
-        """
-        Args:
-            strategy_id: Unique identifier (e.g. "sniper_v1", "smc_v2")
-            config: Strategy-specific configuration dict
-        """
         self.strategy_id = strategy_id
         self.config = config
-        self.strategy_name = config.get("name", strategy_id)
-        self._enabled = config.get("enabled", True)
-
-    @property
-    def enabled(self) -> bool:
-        return self._enabled
-
-    @enabled.setter
-    def enabled(self, value: bool):
-        self._enabled = value
+        self.enabled = config.get("enabled", True)
 
     @abstractmethod
     def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
         """
-        Core signal generation. Receives immutable market data, returns
-        a TradeSignal if conditions are met, or None.
-        
-        MUST NOT modify market_data or any shared state.
+        MUST return a TradeSignal object or None.
+        Confidence is mandatory 0.0 to 1.0.
         """
         ...
 
+    @abstractmethod
+    def get_stop_loss(self, signal: TradeSignal, market_data: MarketData) -> float:
+        """Calculate the absolute price for Stop Loss."""
+        ...
+
+    @abstractmethod
+    def get_take_profit(self, signal: TradeSignal, market_data: MarketData) -> float:
+        """Calculate the absolute price for Take Profit."""
+        ...
+
     def on_trade_closed(self, trade_record: dict) -> None:
-        """
-        Called when a trade belonging to this strategy closes.
-        Strategies can override to update internal state (e.g. consecutive losses).
-        
-        Args:
-            trade_record: Dict with keys: ticket, pnl, result, session, etc.
-        """
+        """Optional hook for updating internal counters/cooldowns."""
         pass
-
-    def on_tick(self, tick_data: dict) -> None:
-        """
-        Called on each tick for strategies that need tick-level processing.
-        Default is a no-op; override if needed.
-        
-        Args:
-            tick_data: Dict with keys: bid, ask, spread, time
-        """
-        pass
-
-    def on_order_update(self, order_event: dict) -> None:
-        """
-        Called when an order status changes (filled, partial, rejected).
-        Default is a no-op; override if needed.
-        """
-        pass
-
-    def preprocess(self, htf: Any, m15: Any, m5: Any, d1: Any) -> Optional[dict]:
-        """
-        Optional bulk preprocessing for backtest efficiency.
-        Returns a dict of precomputed indicators indexed by M5 bar.
-        Default returns None (no preprocessing).
-        """
-        return None
 
     def reset_daily_stats(self) -> None:
-        """Called at the start of each new trading day."""
+        """Called at start of each trading day for reset logic."""
         pass
 
     def get_config(self) -> dict:
-        """Returns the strategy's configuration snapshot."""
         return dict(self.config)
 
     def __repr__(self) -> str:

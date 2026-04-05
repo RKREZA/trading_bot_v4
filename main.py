@@ -41,7 +41,7 @@ from core.logger import setup_logging
 from core.connection import MT5Connection, PositionManager
 from core.data_fetcher import DataFetcher
 from core.backtester import BacktestEngine
-from core.strategy_engine import StrategyEngine, TradeSignal
+from core import MT5Connection, DataFetcher, RiskEngine, ExecutionEngine, PortfolioManager, PerformanceTracker, RegimeDetector, setup_logging, TradeSignal, BaseStrategy, MarketData
 from core.ai_advisor import AIAdvisor
 from core.risk_manager import RiskManager
 from core.notifications import NotificationManager
