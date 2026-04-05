@@ -47,3 +47,4 @@ performance_report.csv
 # Root-level log files (not managed by RotatingFileHandler)
 br.log
 btr.log
+/data_cache

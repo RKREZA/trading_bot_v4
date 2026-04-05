@@ -94,6 +94,20 @@ class BaseStrategy(ABC):
     def reset_daily_stats(self) -> None:
         pass
 
+    # [ State Management Interface ] - Step 3.1
+    def get_state(self) -> Dict[str, Any]:
+        """Returns a JSON-serializable snapshot of the strategy state."""
+        return {
+            "strategy_id": self.strategy_id,
+            "enabled": self.enabled,
+            "config": self.config
+        }
+
+    def set_state(self, state: Dict[str, Any]) -> None:
+        """Restores the strategy state from a snapshot."""
+        self.enabled = state.get("enabled", True)
+        self.config.update(state.get("config", {}))
+
     def get_ema_trend(self, candles: CandleArray, fast: int = 50, slow: int = 200) -> int:
         """
         Returns institutional Trend State:

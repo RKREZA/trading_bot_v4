@@ -18,6 +18,7 @@ from rich import print as rprint
 
 from dotenv import load_dotenv
 from core import SourceHandler, MT5Connection, PerformanceTracker, setup_logging
+from core.data.manager import DataManager
 from backtesting import PortfolioBacktester, MonteCarloSimulator, StressTester, WalkForwardValidator
 from strategies import create_strategy, STRATEGY_REGISTRY
 
@@ -27,7 +28,7 @@ class BacktestCLI:
     def __init__(self):
         self.console = Console()
         self.config = self._load_config("config.json")
-        self.data_fetcher = SourceHandler()
+        self.data_manager = DataManager(self.config)
         self.connection = MT5Connection()
         
     def _load_config(self, path: str) -> dict:
@@ -45,8 +46,10 @@ class BacktestCLI:
         strategy_filter: str = None,
         run_monte_carlo: bool = False,
         run_walk_forward: bool = False,
+        run_stress_test: bool = False,
         seed: Optional[int] = None,
         deterministic: Optional[bool] = None,
+        resume: bool = False
     ):
         setup_logging()
         if not self.connection.connect():
@@ -60,14 +63,14 @@ class BacktestCLI:
             rprint("[bold red]Error:[/] Start/End dates must be in YYYY-MM-DD format.")
             return
 
-        # 1. Fetch High-Fidelity Data
-        rprint(Panel(f"[bold cyan]V4-PRO Institutional Benchmark[/]\nSymbol: {symbol} | Range: {start} to {end}", border_style="bright_blue"))
+        # 1. Flawless Data Prep (Step 2.5)
+        rprint(Panel(f"[bold cyan]V4-ULTRA Production Benchmark[/]\nSymbol: {symbol} | Range: {start} to {end}", border_style="bright_blue"))
         
-        with self.console.status("[bold green]Loading Bid/Ask Execution Data...") as status:
-            m1 = self.data_fetcher.fetch_candles_range(symbol, "M1", dt_from, dt_to)
-            m5 = self.data_fetcher.fetch_candles_range(symbol, "M5", dt_from, dt_to)
-            m15 = self.data_fetcher.fetch_candles_range(symbol, "M15", dt_from, dt_to)
-            h1 = self.data_fetcher.fetch_candles_range(symbol, "H1", dt_from, dt_to)
+        with self.console.status("[bold green]Orchestrating Flawless MT5 Sync...") as status:
+            m1 = self.data_manager.prepare_data(symbol, "M1", dt_from)
+            m5 = self.data_manager.prepare_data(symbol, "M5", dt_from)
+            m15 = self.data_manager.prepare_data(symbol, "M15", dt_from)
+            h1 = self.data_manager.prepare_data(symbol, "H1", dt_from)
 
         if len(m5) < 100:
             rprint("[bold red]Error:[/] Insufficient data for benchmark.")
@@ -93,8 +96,8 @@ class BacktestCLI:
         runtime_config["backtest"] = runtime_backtest
 
         backtester = PortfolioBacktester(runtime_config)
-        rprint(f"[green]Executing Multi-Strategy Auction Simulation...[/]")
-        history, equity_history = backtester.run(symbol, strategies, m5, h1, m15, m1)
+        rprint(f"[green]Executing V4-ULTRA Event-Driven Simulation (Resume={resume})...[/]")
+        history, equity_history = backtester.run(symbol, strategies, m5, h1, m15, m1, resume=resume)
         
         # 5. Performance Attribution
         partition_initial = float(self.config.get("backtest", {}).get("initial_balance_per_strategy", 1000.0))
@@ -203,11 +206,12 @@ if __name__ == "__main__":
     parser.add_argument("--stress-test", action="store_true")
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--deterministic", choices=["on", "off"], default=None)
+    parser.add_argument("--resume", action="store_true", help="Resume from last crash checkpoint")
 
     args = parser.parse_args()
     cli = BacktestCLI()
     if args.stress_test:
         cli.config.setdefault("backtest", {})["run_stress_test"] = True
 
-    cli.run(args.symbol, args.start_date, args.end_date, args.strategy, args.monte_carlo, args.walk_forward, args.seed, 
-            None if args.deterministic is None else (args.deterministic == "on"))
+    cli.run(args.symbol, args.start_date, args.end_date, args.strategy, args.monte_carlo, args.walk_forward, args.stress_test, args.seed, 
+            None if args.deterministic is None else (args.deterministic == "on"), resume=args.resume)
