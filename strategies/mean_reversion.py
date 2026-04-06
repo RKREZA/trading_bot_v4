@@ -17,7 +17,10 @@ class MeanReversionStrategy(BaseStrategy):
         super().__init__(strategy_id, config)
         self.rsi_period = 14
         self.bb_period = 20
-        self.bb_std = 1.5 # Lowered for benchmark sensitivity
+        self.bb_std = 2.0  # Increased for higher conviction
+        self.atr_threshold_mult = 2.5 # Max atr allowed relative to mean
+        self.loss_cooldown = 0
+        self.last_loss_time = 0
 
     def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
         """
@@ -30,26 +33,48 @@ class MeanReversionStrategy(BaseStrategy):
         m5 = market_data.m5_candles
         price = market_data.current_price
 
-        # 2. RSI(14)
+        # 2. RSI(14) - Tightened for Institutional Conviction
         rsi_vals = m5.rsi(self.rsi_period)
         rsi = rsi_vals[-1] if len(rsi_vals) > 0 else np.nan
-        if np.isnan(rsi):
+        
+        # 3. ATR Volatility Guard (Phase 2 Hardening)
+        atr_vals = m5.atr(14)
+        if len(atr_vals) < 14 or np.isnan(rsi):
             return None
         
-        # 3. Bollinger Bands (20, 2)
+        current_atr = atr_vals[-1]
+        avg_atr = np.mean(atr_vals[-14:])
+        if current_atr > (avg_atr * self.atr_threshold_mult):
+            # Market is moved too fast (Parabolic), Mean Reversion is high risk
+            return None
+
+        # 4. Loss Cooldown Check
+        if self.loss_cooldown > 0:
+            self.loss_cooldown -= 1
+            return None
+        
+        # 5. Bollinger Bands (20, 2)
         upper_vals, lower_vals, _ = m5.bollinger_bands(self.bb_period, self.bb_std)
         upper, lower = upper_vals[-1], lower_vals[-1]
         if np.isnan(upper) or np.isnan(lower):
             return None
 
-        # 4. Filtered Decision Logic
-        if price < lower and rsi < 35 and h1_trend != -1:
+        # 6. Filtered Decision Logic
+        # BUY: Oversold + Price < Lower BB + HTF is NOT Bearish
+        if price < lower and rsi < 30 and h1_trend != -1:
             return TradeSignal(direction="BUY", price=price, confidence=0.75, timestamp=market_data.timestamp)
         
-        if price > upper and rsi > 65 and h1_trend != 1:
+        # SELL: Overbought + Price > Upper BB + HTF is NOT Bullish
+        if price > upper and rsi > 70 and h1_trend != 1:
             return TradeSignal(direction="SELL", price=price, confidence=0.75, timestamp=market_data.timestamp)
 
         return None
+
+    def on_trade_closed(self, trade_record: dict) -> None:
+        if trade_record.get("pnl", 0) < 0:
+            # Implement 3-period cooldown on loss (Institutional Hardening)
+            self.loss_cooldown = 3
+            logger.info(f"[{self.strategy_id}] Loss detected. Cooldown activated.")
 
     def get_stop_loss(self, signal: TradeSignal, market_data: MarketData) -> float:
         atr_vals = market_data.m5_candles.atr(14)

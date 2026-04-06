@@ -122,6 +122,8 @@ class PortfolioBacktester:
         self._validate_data_alignment(target_tf_data, m1_data)
 
         # Main Loop: Step through target timeframe bars starting from current_index
+        # [ Institutional Sync ]: Date Tracking for Resets
+        last_date = None
         pbar = tqdm(total=len(target_tf_data.time), initial=self.current_index)
         
         for i in range(max(200, self.current_index), len(target_tf_data.time)):
@@ -130,6 +132,15 @@ class PortfolioBacktester:
                 pbar.update(1)
                 t = target_tf_data.time[i]
                 dt = datetime.fromtimestamp(t, tz=timezone.utc)
+
+                # 0. DAILY RESET TRIGGER (Critical for Session Strategies)
+                current_date = dt.date()
+                if last_date is not None and current_date != last_date:
+                    for strat in active_strategies:
+                        strat.reset_daily_stats()
+                    for sid in self.balances:
+                        self.risk_engine.reset_daily(self.balances[sid])
+                last_date = current_date
                 
                 # [ Institutional Fidelity ]: Zero-Copy Index Shifting
                 # Excludes the current i-th candle which is currently "forming"

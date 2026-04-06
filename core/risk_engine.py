@@ -110,7 +110,7 @@ class RiskEngine:
         else:
             self.consecutive_losses = 0
             
-    def record_daily_close(self, balance: float):
+    def reset_daily(self, balance: float):
         self.daily_loss = 0.0
         self.daily_trades = 0
         self.last_reset_date = date.today()

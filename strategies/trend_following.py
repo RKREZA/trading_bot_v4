@@ -17,7 +17,9 @@ class TrendFollowingStrategy(BaseStrategy):
         super().__init__(strategy_id, config)
         self.ema_fast = 50
         self.ema_slow = 200
-        self.htf_ma = 20
+        self.adx_period = 14
+        self.adx_threshold = 25
+        self.proximity_atr_mult = 1.5
 
     def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
         """
@@ -35,29 +37,30 @@ class TrendFollowingStrategy(BaseStrategy):
         h1_trend = self.get_ema_trend(market_data.htf_candles)
         m5_trend = self.get_ema_trend(m5)
         
-        # We also want price proximity to EMA 50 for better R:R
-        ema50 = m5.ema(50)[-1]
+        # 3. ADX Intensity Filter (Phase 2 Hardening)
+        adx = m5.adx(self.adx_period)[-1]
+        if np.isnan(adx) or adx < self.adx_threshold:
+            return None # Trend is too weak
+        
+        # 4. Price Proximity Guard (Phase 2 Hardening)
+        ema50 = m5.ema(self.ema_fast)[-1]
+        atr = m5.atr(14)[-1]
         price = market_data.current_price
         
-        # 3. Decision Logic (Subordinated to HTF)
-        reasons = []
-        if h1_trend == 1: reasons.append("H1: Bullish Trend")
-        elif h1_trend == -1: reasons.append("H1: Bearish Trend")
-        
-        if m5_trend == 1: reasons.append("M5: EMA Momentum UP")
-        elif m5_trend == -1: reasons.append("M5: EMA Momentum DOWN")
-        
-        if price > ema50: reasons.append("Price: Above EMA50 (Bullish)")
-        else: reasons.append("Price: Below EMA50 (Bearish)")
-
+        # We don't want to "chase" a trend that is already too far from the EMA 50
+        dist_from_ema = abs(price - ema50)
+        if dist_from_ema > (atr * self.proximity_atr_mult):
+            return None # Price is overextended/chasing
+            
+        # 5. Decision Logic (Subordinated to HTF)
+        reasons = [f"ADX: {adx:.1f}"]
         if h1_trend == 1 and m5_trend == 1 and price > ema50:
             return TradeSignal(direction="BUY", price=price, confidence=0.85, timestamp=market_data.timestamp, reasons=reasons)
         
         if h1_trend == -1 and m5_trend == -1 and price < ema50:
             return TradeSignal(direction="SELL", price=price, confidence=0.85, timestamp=market_data.timestamp, reasons=reasons)
 
-        # Fallback: Report Bias Even If No Trade
-        return TradeSignal(direction="NONE", price=price, confidence=0.5, reasons=reasons)
+        return None
 
     def get_stop_loss(self, signal: TradeSignal, market_data: MarketData) -> float:
         atr_vals = market_data.m5_candles.atr(14)

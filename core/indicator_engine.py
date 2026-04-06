@@ -56,7 +56,20 @@ class IndicatorEngine:
         # 5. Price Action
         features["body_size"] = (df['close'] - df['open']).abs().values
         
+        # 6. Trend Strength (ADX) — Institutional Gating
+        plus_dm = (df['high'] - df['high'].shift(1)).clip(lower=0)
+        minus_dm = (df['low'].shift(1) - df['low']).clip(lower=0)
+        plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
+        minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
+        
+        tr_smooth = true_range.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+        plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+        minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+        
+        plus_di = 100 * (plus_dm_smooth / tr_smooth)
+        minus_di = 100 * (minus_dm_smooth / tr_smooth)
+        dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di)
+        features["adx_14"] = dx.ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
+        
         # Institutional Mitigation: Keep NaNs for initial bars instead of Zero
-        # This prevents strategies (e.g. RSI < 30) from triggering false positives 
-        # on the incomplete first few bars of the dataset.
         return features

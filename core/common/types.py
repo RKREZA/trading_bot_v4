@@ -159,6 +159,11 @@ class CandleArray:
         if key in self.indicators: return self.get_indicator(key)
         return self._calc_atr(period)
 
+    def adx(self, period: int = 14) -> np.ndarray:
+        key = f"adx_{period}"
+        if key in self.indicators: return self.get_indicator(key)
+        return self._calc_adx(period)
+
     def _calc_ema(self, data: np.ndarray, period: int) -> np.ndarray:
         if len(data) < period: return np.full_like(data, np.nan)
         alpha = 2 / (period + 1)
@@ -194,6 +199,40 @@ class CandleArray:
         for i in range(period + 1, self.limit):
             atr[i] = (tr[i-1] - atr[i-1]) * alpha + atr[i-1]
         return atr
+
+    def _calc_adx(self, period: int) -> np.ndarray:
+        if self.limit < period * 2: return np.full(self.limit, np.nan)
+        h, l, cp = self.high[1:self.limit], self.low[1:self.limit], self.close[:self.limit-1]
+        
+        tr = np.maximum(h - l, np.maximum(np.abs(h - cp), np.abs(l - cp)))
+        up_move = h - self.high[:self.limit-1]
+        down_move = self.low[:self.limit-1] - l
+        
+        pos_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+        neg_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+        
+        alpha = 1.0 / period
+        
+        def wilders_smooth(data):
+            smooth = np.full_like(data, np.nan)
+            smooth[period-1] = np.mean(data[:period])
+            for i in range(period, len(data)):
+                smooth[i] = (data[i] - smooth[i-1]) * alpha + smooth[i-1]
+            return smooth
+
+        str_tr = wilders_smooth(tr)
+        str_pdm = wilders_smooth(pos_dm)
+        str_ndm = wilders_smooth(neg_dm)
+        
+        plus_di = 100 * (str_pdm / str_tr)
+        minus_di = 100 * (str_ndm / str_tr)
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        
+        adx = np.full(self.limit, np.nan)
+        # Shift DX to align with CandleArray indices (tr is size limit-1)
+        adx_core = wilders_smooth(dx[period-1:])
+        adx[period*2-1:] = adx_core[period-1:]
+        return adx
 
     def bollinger_bands(self, period: int = 20, std_dev: float = 2.0) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """High-performance vectorized Bollinger Bands (anti-lookahead safe)."""
