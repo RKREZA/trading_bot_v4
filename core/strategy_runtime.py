@@ -108,14 +108,23 @@ if __name__ == "__main__":
     # Mock Components
     class MockStrategy(BaseStrategy):
         def generate_signal(self, data):
-            return TradeSignal(direction="BUY", confidence=0.8, price=data.close[-1])
+            return TradeSignal(direction="BUY", confidence=0.8, price=data.current_price)
             
-    mock_st = MockStrategy("mock_v4")
+    mock_st = MockStrategy("mock_v4", {})
     guardian = RiskGuardian({"backtest": {"initial_balance": 1000}})
     
     runtime = StrategyRuntime(mock_st, {}, guardian)
     
     print("\n--- StrategyRuntime Standalone Test ---")
-    mock_data = MarketData(symbol="EURUSD", close=[1.1000], timestamp=datetime.now())
+    mock_data = MarketData(
+        symbol="EURUSD",
+        htf_candles=None,
+        m15_candles=None,
+        m5_candles=None,
+        d1_candles=None,
+        current_price=1.1000,
+        session="NY",
+        timestamp=datetime.now()
+    )
     signal = runtime.execute_cycle(mock_data)
     print(f"Signal Generated: {signal}")

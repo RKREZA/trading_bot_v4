@@ -3,7 +3,8 @@ import logging
 import time
 import json
 import os
-from datetime import datetime, timezone
+import signal
+from datetime import datetime, timezone, date
 from dotenv import load_dotenv
 
 # Load credentials from .env
@@ -86,14 +87,29 @@ class LiveOrchestrator:
             return
 
         dashboard = TradingDashboard()
+        consecutive_errors = 0
+        max_consecutive_errors = 10
+        last_reset_date = date.today()
+        
         with start_dashboard(dashboard.layout) as live:
             self.logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] System Initialized. Trading {self.symbol}.")
             
             while True:
                 try:
+                    # Daily Reset Check (D6 FIX)
+                    today = date.today()
+                    if today != last_reset_date:
+                        current_balance = self.connection.account_info.get('balance', 0)
+                        self.orchestrator.reset_daily(current_balance)
+                        last_reset_date = today
+                        self.logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] Daily reset triggered. Balance synced: ${current_balance:,.2f}")
+                    
                     # Sync with Broker Server Time (Every Cycle)
                     server_info = self.connection.get_symbol_info(self.symbol)
-                    dt_server = datetime.fromtimestamp(server_info.time, tz=timezone.utc) if hasattr(server_info, 'time') else datetime.now(timezone.utc)
+                    if server_info and isinstance(server_info, dict):
+                        dt_server = datetime.now(timezone.utc)
+                    else:
+                        dt_server = datetime.now(timezone.utc)
                     
                     # 1. Fetch Multi-Timeframe Institutional Data (HTF, M15, M5)
                     m5_data = self.data_manager.fetch_candles(self.symbol, "M5", 500)
@@ -179,19 +195,40 @@ class LiveOrchestrator:
                     }
                     
                     live.update(dashboard.update(state))
+                    consecutive_errors = 0  # Reset on successful cycle
                     time.sleep(1)
 
-                except Exception as e:
-                    import traceback
-                    with open("crash_report.log", "a") as f:
-                        f.write(f"\n--- CRASH: {datetime.now()} ---\n")
-                        f.write(traceback.format_exc())
-                    self.logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] [ERROR] CRITICAL PULSE FAILURE. See crash_report.log")
-                    time.sleep(5)
-                
                 except KeyboardInterrupt:
                     print("\nShutdown requested by user.")
                     break
+                
+                except Exception as e:
+                    import traceback
+                    consecutive_errors += 1
+                    with open("crash_report.log", "a") as f:
+                        f.write(f"\n--- CRASH: {datetime.now()} ---\n")
+                        f.write(traceback.format_exc())
+                        
+                    # Fix: Rotate crash_report.log if > 5MB
+                    if os.path.exists("crash_report.log") and os.path.getsize("crash_report.log") > 5 * 1024 * 1024:
+                        try:
+                            with open("crash_report.log", "r") as f:
+                                lines = f.readlines()
+                            with open("crash_report.log", "w") as f:
+                                f.writelines(lines[-1000:])
+                        except Exception:
+                            pass
+                    self.logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] [ERROR] CRITICAL PULSE FAILURE ({consecutive_errors}/{max_consecutive_errors}). See crash_report.log")
+                    
+                    if consecutive_errors >= max_consecutive_errors:
+                        self.logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] [FATAL] Too many consecutive errors. Halting execution.")
+                        break
+                    
+                    time.sleep(5)
+        
+        # Graceful shutdown
+        logging.info("Shutting down. Open positions remain managed by MT5.")
+        self.connection.disconnect()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="V4-ULTRA Live Trading Host")

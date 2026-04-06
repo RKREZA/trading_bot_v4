@@ -145,7 +145,12 @@ class PerformanceTracker:
             df_trades['peak'] = df_trades['equity_curve'].cummax()
             df_trades['drawdown_curve'] = (df_trades['peak'] - df_trades['equity_curve']) / df_trades['peak'] * 100
             
-            curves_df = df_trades[['timestamp', 'equity_curve', 'drawdown_curve']]
+            # Use 'timestamp' if available, otherwise use index
+            time_col = 'timestamp' if 'timestamp' in df_trades.columns else None
+            if time_col:
+                curves_df = df_trades[[time_col, 'equity_curve', 'drawdown_curve']]
+            else:
+                curves_df = df_trades[['equity_curve', 'drawdown_curve']]
             curves_df.to_csv(f"{output_dir}/curves.csv", index=False)
             
         # 4. Professional Summary (MD)

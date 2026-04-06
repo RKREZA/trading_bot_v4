@@ -196,16 +196,17 @@ class CandleArray:
         return atr
 
     def bollinger_bands(self, period: int = 20, std_dev: float = 2.0) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """High-performance vectorized Bollinger Bands."""
-        if len(self.close) < period:
-            nan_arr = np.full_like(self.close, np.nan)
+        """High-performance vectorized Bollinger Bands (anti-lookahead safe)."""
+        data = self.c  # Use limited view to prevent lookahead bias
+        if len(data) < period:
+            nan_arr = np.full(len(data), np.nan)
             return nan_arr, nan_arr, nan_arr
             
         # Use Simple Moving Average
-        sma = np.array([np.mean(self.close[i-period+1:i+1]) if i >= period-1 else np.nan for i in range(len(self.close))])
+        sma = np.array([np.mean(data[i-period+1:i+1]) if i >= period-1 else np.nan for i in range(len(data))])
         
         # Vectorized Standard Deviation (Rolling)
-        rolling_std = np.array([np.std(self.close[i-period+1:i+1]) if i >= period-1 else np.nan for i in range(len(self.close))])
+        rolling_std = np.array([np.std(data[i-period+1:i+1]) if i >= period-1 else np.nan for i in range(len(data))])
         
         upper = sma + (rolling_std * std_dev)
         lower = sma - (rolling_std * std_dev)
@@ -223,6 +224,7 @@ class TradeSignal:
     timestamp: Optional[datetime] = None
     stop_loss: float = 0.0
     take_profit: float = 0.0
+    volume: float = 0.0  # Lot size (set by risk engine before execution)
     session: str = "GLOBAL"
     tp1_price: float = 0.0
     tp2_price: float = 0.0

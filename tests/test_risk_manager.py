@@ -7,15 +7,15 @@ class TestRiskEngine:
 
     def test_config_loading(self, mock_config):
         r = RiskEngine(mock_config)
-        assert r.risk_per_trade_pct == 0.5
+        assert r.risk_per_trade_pct == 1.0
         assert r.max_daily_loss_pct == 3.0
         assert r.max_total_drawdown_pct == 10.0
 
     def test_lot_size_calculation(self, mock_config):
         r = RiskEngine(mock_config)
-        # 10,000 balance, 0.5% risk = $50 risk
+        # 10,000 balance, 1.0% risk = $100 risk
         # SL distance = 1.0 (100 points @ 0.01)
-        # Risk / (Points * TickValue) = 50 / (100 * 1) = 0.5 lots
+        # Risk / (Points * TickValue) = 100 / (100 * 1) = 1.0 lots
         lot = r.calculate_lot_size(
             balance=10000.0,
             stop_loss_distance=1.0,
@@ -23,7 +23,7 @@ class TestRiskEngine:
             tick_value=1.0,
             symbol="XAUUSDm"
         )
-        assert lot == 0.5
+        assert lot == 1.0
 
     def test_cost_ratio_rejection(self, mock_config):
         mock_config["max_cost_ratio"] = 0.1 # 10% max cost
@@ -52,10 +52,10 @@ class TestRiskGuardian:
 
     def test_guardian_lot_sizing_with_constraints(self, mock_config, symbol_info):
         g = RiskGuardian(mock_config)
-        # 10,000 balance, 0.5% risk = $50 risk.
-        # SL 2.0 = 200 points. 50 / 200 = 0.25 lots.
+        # 10,000 balance, 1.0% risk = $100 risk.
+        # SL 2.0 = 200 points. 100 / 200 = 0.5 lots.
         lots = g.calculate_lot_size(10000.0, 2.0, symbol_info)
-        assert lots == 0.25
+        assert lots == 0.5
 
     def test_guardian_daily_loss_limit(self, mock_config):
         g = RiskGuardian(mock_config)

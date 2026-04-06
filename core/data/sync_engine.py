@@ -2,6 +2,7 @@ import logging
 import datetime
 import time
 import numpy as np
+import pandas as pd
 from typing import Dict, List, Optional
 from core.common.types import CandleArray
 from core.data.source_handler import SourceHandler
@@ -238,4 +239,3 @@ class SyncEngine:
             spread=np.full(count, last_c["spread"])
         )
 
-import pandas as pd

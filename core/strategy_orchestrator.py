@@ -64,7 +64,7 @@ class StrategyOrchestrator:
         from core.regime_gater import RegimeGater
         active_runtimes = [
             r for r in self.runtimes 
-            if r.strategy.is_symbol_allowed(symbol) and RegimeGater.is_strategy_allowed(r.strategy_id, market_type)
+            if r.strategy.is_symbol_allowed(symbol) and RegimeGater.is_strategy_allowed(r.strategy.__class__.__name__, market_type)
         ]
         
         # 4. GENERATE SIGNALS (Independent Generation)
@@ -101,7 +101,13 @@ class StrategyOrchestrator:
             # 5.2 Individual signal vetting & HARD CONSTRAINTS (Step 13)
             for sid, sig in raw_signals.items():
                 # NO-GRID Check (Rule 13.2)
-                open_pos = self.position_manager.get_positions_by_strategy(sid, symbol)
+                if hasattr(self.position_manager, 'get_positions_by_strategy'):
+                    open_pos = self.position_manager.get_positions_by_strategy(sid, symbol)
+                elif hasattr(self.position_manager, 'get_open_positions'):
+                    all_pos = self.position_manager.get_open_positions(symbol) if hasattr(self.position_manager, 'get_open_positions') else []
+                    open_pos = [p for p in all_pos if sid.upper() in str(getattr(p, 'comment', '')).upper()]
+                else:
+                    open_pos = []
                 if len(open_pos) >= 1:
                     logger.debug(f"[{sid}] Signal REJECTED: Anti-Grid Constraint (Already has position)")
                     continue

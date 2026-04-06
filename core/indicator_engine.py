@@ -37,11 +37,13 @@ class IndicatorEngine:
         true_range = ranges.max(axis=1)
         features["atr_14"] = true_range.rolling(14).mean().values
         
-        # 3. Momentum (RSI)
+        # 3. Momentum (RSI) — Using Wilder's EMA to match types.py
         delta = df['close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
+        gain = delta.where(delta > 0, 0)
+        loss = (-delta.where(delta < 0, 0))
+        avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+        rs = avg_gain / avg_loss
         features["rsi_14"] = (100 - (100 / (1 + rs))).values
         
         # 4. Bollinger Bands

@@ -84,10 +84,11 @@ class RegimeDetector:
         tr = np.maximum(h[1:] - l[1:], np.maximum(np.abs(h[1:] - c[:-1]), np.abs(l[1:] - c[:-1])))
         return tr
 
-    def _ema(self, data, period):
-        alpha = 2.0 / (period + 1)
+    def _ema(self, data: np.ndarray, period: int) -> np.ndarray:
         ema = np.zeros_like(data)
-        ema[0] = data[0]
+        # Initialize with mean of first `period` data points for unbiased start
+        ema[0] = np.mean(data[:min(period, len(data))])
+        multiplier = 2.0 / (period + 1)
         for i in range(1, len(data)):
-            ema[i] = (data[i] - ema[i-1]) * alpha + ema[i-1]
+            ema[i] = (data[i] - ema[i-1]) * multiplier + ema[i-1]
         return ema

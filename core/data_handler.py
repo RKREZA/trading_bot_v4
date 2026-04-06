@@ -199,6 +199,7 @@ class DataFetcher:
                     "low": float(r["low"]),
                     "close": float(r["close"]),
                     "tick_volume": int(r["tick_volume"]),
+                    "spread": int(r.get("spread", 0)),
                 })
             return CandleArray.from_dicts(candles)
         except Exception as e:

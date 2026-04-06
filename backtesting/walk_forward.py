@@ -86,7 +86,7 @@ class WalkForwardValidator:
                 is_data[tf] = candles[mask]
             
             is_backtester = PortfolioBacktester(self.config)
-            is_history, _ = is_backtester.run(symbol, strategies, is_data["M5"], is_data.get("H1"), is_data.get("M15"), is_data.get("M1"))
+            is_history, _ = is_backtester.run(symbol, strategies, is_data["M5"], is_data.get("H1"), is_data.get("M15"), is_data.get("M5"), is_data.get("M1"))
             is_profit = sum(t['pnl'] for t in is_history) if is_history else 1.0
 
             # 2. Run Out-Of-Sample (Validation)
@@ -97,6 +97,7 @@ class WalkForwardValidator:
                 oos_data["M5"], 
                 oos_data.get("H1"), 
                 oos_data.get("M15"), 
+                oos_data.get("M5"),
                 oos_data.get("M1")
             )
             

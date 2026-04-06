@@ -51,19 +51,21 @@ class TrendFollowingStrategy(BaseStrategy):
         else: reasons.append("Price: Below EMA50 (Bearish)")
 
         if h1_trend == 1 and m5_trend == 1 and price > ema50:
-            return TradeSignal(direction="BUY", confidence=0.85, timestamp=market_data.timestamp, reasons=reasons)
+            return TradeSignal(direction="BUY", price=price, confidence=0.85, timestamp=market_data.timestamp, reasons=reasons)
         
         if h1_trend == -1 and m5_trend == -1 and price < ema50:
-            return TradeSignal(direction="SELL", confidence=0.85, timestamp=market_data.timestamp, reasons=reasons)
+            return TradeSignal(direction="SELL", price=price, confidence=0.85, timestamp=market_data.timestamp, reasons=reasons)
 
         # Fallback: Report Bias Even If No Trade
-        return TradeSignal(direction="NONE", confidence=0.5, reasons=reasons)
+        return TradeSignal(direction="NONE", price=price, confidence=0.5, reasons=reasons)
 
     def get_stop_loss(self, signal: TradeSignal, market_data: MarketData) -> float:
-        atr = market_data.m5_candles.atr(14)[-1]
+        atr_vals = market_data.m5_candles.atr(14)
+        atr = atr_vals[-1] if len(atr_vals) > 0 and not np.isnan(atr_vals[-1]) else 1.0
         if signal.direction == "BUY":
             return market_data.current_price - (atr * 2.5)
         return market_data.current_price + (atr * 2.5)
+
     def get_take_profit(self, signal: TradeSignal, market_data: MarketData) -> float:
         sl_price = self.get_stop_loss(signal, market_data)
         risk = abs(market_data.current_price - sl_price)

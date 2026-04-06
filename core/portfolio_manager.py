@@ -49,5 +49,19 @@ class PortfolioManager:
         return approved
 
     def get_strategy_balance(self, total_balance: float, strategy_id: str) -> float:
-        allocation = self.allocations.get(strategy_id, 0.25)
-        return total_balance * allocation
+        """Looks up allocation with key normalization (e.g., 'trendfollowing_v4' → 'TrendFollowing')."""
+        # Try direct lookup first
+        allocation = self.allocations.get(strategy_id)
+        if allocation is not None:
+            return total_balance * allocation
+        
+        # Normalize: strip _v4 suffix, convert to title case variants
+        normalized = strategy_id.replace("_v4", "").replace("_", "")
+        for key in self.allocations:
+            if key.lower().replace("_", "") == normalized.lower():
+                return total_balance * self.allocations[key]
+        
+        # Fallback: equal share
+        logger.warning(f"No allocation found for '{strategy_id}'. Using equal share.")
+        num_strategies = len(self.allocations) or 1
+        return total_balance / num_strategies

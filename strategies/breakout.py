@@ -45,7 +45,8 @@ class BreakoutStrategy(BaseStrategy):
         # 3. M5 Strength Assessment
         last = m5[-1]
         price = market_data.current_price
-        m5_strength = (abs(last.close - last.open) / (last.high - last.low)) if (last.high - last.low) > 0 else 0
+        m5_range = last.high - last.low
+        m5_strength = (abs(last.close - last.open) / m5_range) if m5_range > 0 else 0
 
         # 4. Integrated Decision Logic
         reasons = []
@@ -59,21 +60,20 @@ class BreakoutStrategy(BaseStrategy):
         # BUY: Price > High AND Strength > 70% AND H1 Bullish + Strong AND M15 NOT Bearish
         if price > r_high and m5_strength >= self.body_thresh:
             if h1_dir == 1 and h1_strength > 0.5 and m15_trend != -1:
-                return TradeSignal(direction="BUY", confidence=0.9, timestamp=market_data.timestamp, reasons=reasons)
+                return TradeSignal(direction="BUY", price=price, confidence=0.9, timestamp=market_data.timestamp, reasons=reasons)
         
         # SELL: Price < Low AND Strength > 70% AND H1 Bearish + Strong AND M15 NOT Bullish
         if price < r_low and m5_strength >= self.body_thresh:
             if h1_dir == -1 and h1_strength > 0.5 and m15_trend != 1:
-                return TradeSignal(direction="SELL", confidence=0.9, timestamp=market_data.timestamp, reasons=reasons)
+                return TradeSignal(direction="SELL", price=price, confidence=0.9, timestamp=market_data.timestamp, reasons=reasons)
 
         # Fallback: Report Bias
-        return TradeSignal(direction="NONE", confidence=0.5, reasons=reasons)
+        return TradeSignal(direction="NONE", price=price, confidence=0.5, reasons=reasons)
 
     def get_stop_loss(self, signal: TradeSignal, market_data: MarketData) -> float:
-        # Tight stop at the opposite side of the breakout candle
-        # Added ATR-based floor for institutional safety
         last = market_data.m5_candles[-1]
-        atr = market_data.m5_candles.atr(14)[-1]
+        atr_vals = market_data.m5_candles.atr(14)
+        atr = atr_vals[-1] if len(atr_vals) > 0 and not np.isnan(atr_vals[-1]) else 1.0
         
         if signal.direction == "BUY":
             return min(last.low, market_data.current_price - (atr * 1.5))

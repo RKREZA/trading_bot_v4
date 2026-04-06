@@ -87,7 +87,7 @@ class TradingDashboard:
         
         table.add_row("LEVERAGE", f"[bold yellow]1:{account.get('leverage', 0)}[/]")
         table.add_row("MARGIN", f"[bold red]${account.get('margin', 0):,.2f}[/]")
-        table.add_row("FREE MARGIN", f"[bold cyan]${account.get('margin_free', 0):,.2f}[/]")
+        table.add_row("FREE MARGIN", f"[bold cyan]${account.get('margin_free', account.get('free_margin', 0)):,.2f}[/]")
         
         return Panel(table, title="[bold green]Account Integrity[/]", border_style="green")
 

@@ -9,13 +9,14 @@ def mock_config():
     return {
         "symbol": "XAUUSDm",
         "risk_governance": {
-            "risk_per_trade_pct": 0.5,
+            "risk_per_trade_pct": 1.0,
             "max_daily_loss_pct": 3.0,
             "max_drawdown_halt_pct": 10.0,
             "max_parallel_strategies": 4
         },
         "backtest": {
             "initial_balance": 10000.0,
+            "initial_balance_per_strategy": 5000.0,
             "deterministic": True
         },
         "symbols_config": {

@@ -1,5 +1,6 @@
 import logging
 import numpy as np
+from collections import deque
 from datetime import datetime, date
 from typing import Dict, Any, Optional, Tuple
 
@@ -25,7 +26,7 @@ class RiskGuardian:
         # State Tracking
         self.daily_loss = 0.0
         self.consecutive_losses = 0
-        self.equity_history = []
+        self.equity_history = deque(maxlen=200)  # Bounded to prevent memory leaks
         self.error_count = 0
         self.max_equity = self.initial_balance
         self.kill_switch_active = False
@@ -124,11 +125,14 @@ class RiskGuardian:
             return False, "KILL_SWITCH_TRIGGERED"
 
         # 2. Equity Protection (Step 5.4)
+        # Only block if equity is materially below the MA50 (>3% drawdown from MA)
+        # This prevents minor dips from permanently blocking trading
         self.equity_history.append(current_equity)
         if len(self.equity_history) > 50:
-            ma_equity = np.mean(self.equity_history[-50:])
-            if current_equity < ma_equity:
-                return False, "EQUITY_BELOW_MA50_PROTECTION"
+            ma_equity = np.mean(list(self.equity_history)[-50:])
+            equity_gap_pct = ((ma_equity - current_equity) / ma_equity) * 100 if ma_equity > 0 else 0
+            if current_equity < ma_equity and equity_gap_pct > 3.0:
+                return False, f"EQUITY_BELOW_MA50_PROTECTION (Gap: {equity_gap_pct:.1f}%)"
         
         # 3. Total Drawdown Check
         if current_equity > self.max_equity: self.max_equity = current_equity
@@ -157,8 +161,13 @@ class RiskGuardian:
         max_lot = sym.get('max_lot', 10.0)
         step = sym.get('lot_step', 0.01)
         
+        # CRITICAL FIX: If calculated lot is below min_lot, reject the trade
+        # instead of forcing it to min_lot (which opens unwanted positions)
+        if lot < min_lot:
+            return 0.0
+        
         normalized = round(lot / step) * step
-        return max(min_lot, min(max_lot, normalized))
+        return min(max_lot, normalized)
 
 if __name__ == "__main__":
     # Independent Test Logic

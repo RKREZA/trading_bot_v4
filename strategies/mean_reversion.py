@@ -32,26 +32,32 @@ class MeanReversionStrategy(BaseStrategy):
 
         # 2. RSI(14)
         rsi_vals = m5.rsi(self.rsi_period)
-        rsi = rsi_vals[-1]
+        rsi = rsi_vals[-1] if len(rsi_vals) > 0 else np.nan
+        if np.isnan(rsi):
+            return None
         
         # 3. Bollinger Bands (20, 2)
         upper_vals, lower_vals, _ = m5.bollinger_bands(self.bb_period, self.bb_std)
         upper, lower = upper_vals[-1], lower_vals[-1]
+        if np.isnan(upper) or np.isnan(lower):
+            return None
 
         # 4. Filtered Decision Logic
         if price < lower and rsi < 35 and h1_trend != -1:
-            return TradeSignal(direction="BUY", confidence=0.75, timestamp=market_data.timestamp)
+            return TradeSignal(direction="BUY", price=price, confidence=0.75, timestamp=market_data.timestamp)
         
         if price > upper and rsi > 65 and h1_trend != 1:
-            return TradeSignal(direction="SELL", confidence=0.75, timestamp=market_data.timestamp)
+            return TradeSignal(direction="SELL", price=price, confidence=0.75, timestamp=market_data.timestamp)
 
         return None
 
     def get_stop_loss(self, signal: TradeSignal, market_data: MarketData) -> float:
-        atr = market_data.m5_candles.atr(14)[-1]
+        atr_vals = market_data.m5_candles.atr(14)
+        atr = atr_vals[-1] if len(atr_vals) > 0 and not np.isnan(atr_vals[-1]) else 1.0
         if signal.direction == "BUY":
             return market_data.current_price - (atr * 2.0)
         return market_data.current_price + (atr * 2.0)
+
     def get_take_profit(self, signal: TradeSignal, market_data: MarketData) -> float:
         sl_price = self.get_stop_loss(signal, market_data)
         risk = abs(market_data.current_price - sl_price)

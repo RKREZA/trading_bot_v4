@@ -198,36 +198,41 @@ class PortfolioBacktester:
                                     point=point
                                 )
                                 if fill:
+                                    # C3 FIX: Calculate and store entry commission
+                                    entry_comm = lot_size * comm_per_lot
                                     fill.update({
                                         "sl": sl, 
                                         "tp": tp, 
                                         "strategy_id": sid, 
                                         "lots": lot_size, 
-                                        "session": market_data.session
+                                        "session": market_data.session,
+                                        "entry_comm": entry_comm
                                     })
                                     self.open_trades[sid] = fill
                                     logger.debug(f"[{sid}] Trade Entered: {fill['direction']} @ {fill['fill_price']:.5f} (Lots: {lot_size})")
+
+                # 4. M1 Intra-Bar Execution (Step 4.3)
+                # Find M1 candles belonging to this target TF bar
+                m1_slice = self._get_m1_for_m5(m1_data, t)
+                self._manage_active_trades(m1_slice, tick_value, point, comm_per_lot, active_strategies)
+                
+                # 5. Equity Sampling & Drawdown Track
+                for sid in self.balances:
+                    self.peak_equity[sid] = max(self.peak_equity[sid], self.equities[sid])
+                    dd = (self.peak_equity[sid] - self.equities[sid]) / self.peak_equity[sid] * 100
+                    self.max_drawdowns[sid] = max(self.max_drawdowns[sid], dd)
+                    self.equity_history.append({"time": t, "strategy_id": sid, "equity": self.equities[sid]})
+
+                # 6. Crash Persistence System (Step 3.1) — Save every 100 bars to reduce I/O
+                if i % 100 == 0:
+                    self.checkpoint_manager.save_checkpoint(self.get_state())
+
             except Exception as e:
                 import traceback
                 with open("crash_report.log", "a") as f:
                     f.write(f"\n--- BACKTEST CRASH: {datetime.now()} ---\n")
                     f.write(traceback.format_exc())
                 raise e
-
-            # 4. M1 Intra-Bar Execution (Step 4.3)
-            # Find M1 candles belonging to this M5 bar
-            m1_slice = self._get_m1_for_m5(m1_data, t)
-            self._manage_active_trades(m1_slice, tick_value, point, comm_per_lot, active_strategies)
-            
-            # 5. Equity Sampling & Drawdown Track
-            for sid in self.balances:
-                self.peak_equity[sid] = max(self.peak_equity[sid], self.equities[sid])
-                dd = (self.peak_equity[sid] - self.equities[sid]) / self.peak_equity[sid] * 100
-                self.max_drawdowns[sid] = max(self.max_drawdowns[sid], dd)
-                self.equity_history.append({"time": t, "strategy_id": sid, "equity": self.equities[sid]})
-
-            # 6. Crash Persistence System (Step 3.1)
-            self.checkpoint_manager.save_checkpoint(self.get_state())
 
         pbar.close()
         self._force_close_at_end(target_tf_data, point, tick_value, comm_per_lot, active_strategies)
@@ -268,9 +273,11 @@ class PortfolioBacktester:
                     raw_diff = (final_exit - trade["fill_price"]) if direction == "BUY" else (trade["fill_price"] - final_exit)
                     gross_pnl = (raw_diff / point) * tick_value * trade["lots"]
                     exit_comm = trade["lots"] * comm_per_lot
+                    entry_comm = trade.get("entry_comm", 0.0)
                     
-                    net_pnl = gross_pnl - trade.get("entry_comm", 0.0) - exit_comm
-                    self.balances[sid] += (gross_pnl - exit_comm)
+                    # C2 FIX: net_pnl subtracts BOTH entry and exit commissions
+                    net_pnl = gross_pnl - entry_comm - exit_comm
+                    self.balances[sid] += net_pnl  # Balance uses full net PnL
                     self.equities[sid] = self.balances[sid]
                     
                     trade_record = {
@@ -311,9 +318,17 @@ class PortfolioBacktester:
         idx = np.searchsorted(tf_data.time, target_time, side="right")
         return max(0, idx)
 
-    def _get_m1_for_m5(self, m1, m5_time):
-        idx = np.searchsorted(m1.time, m5_time)
-        return m1[idx : idx + 5]
+    def _get_m1_for_m5(self, m1, target_time):
+        """Returns M1 candles within the target timeframe bar window."""
+        idx_start = np.searchsorted(m1.time, target_time, side='left')
+        # Find next bar boundary by looking for next timestamp > target_time
+        # Use a safe upper bound based on available data
+        tf_seconds = 300  # Default M5 interval
+        next_bar_time = target_time + tf_seconds
+        idx_end = np.searchsorted(m1.time, next_bar_time, side='left')
+        if idx_end <= idx_start:
+            idx_end = min(idx_start + 5, len(m1.time))  # Fallback
+        return m1[idx_start:idx_end]
 
     def _force_close_at_end(self, m5_data, point, tick_value, comm_per_lot, strategies):
         if not self.open_trades: return

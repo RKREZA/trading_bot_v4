@@ -96,8 +96,9 @@ class RiskEngine:
 
         if len(self.equity_history) >= 50:
             ma_equity = np.mean(self.equity_history[-50:])
-            if current_equity < ma_equity:
-                return False, "Equity below 50-period Moving Average"
+            equity_gap_pct = ((ma_equity - current_equity) / ma_equity) * 100 if ma_equity > 0 else 0
+            if current_equity < ma_equity and equity_gap_pct > 3.0:
+                return False, f"Equity below 50-period MA (Gap: {equity_gap_pct:.1f}%)"
 
         return True, "OK"
 
@@ -115,4 +116,14 @@ class RiskEngine:
         self.last_reset_date = date.today()
 
     def _apply_broker_constraints(self, lot: float, symbol: str) -> float:
-        return max(0.01, min(10.0, round(lot, 2)))
+        sym_cfg = self.config.get("symbols_config", {}).get(symbol, {})
+        min_lot = float(sym_cfg.get("min_lot", 0.01))
+        max_lot = float(sym_cfg.get("max_lot", 10.0))
+        step = float(sym_cfg.get("lot_step", 0.01))
+        
+        # Return 0.0 if lot is below minimum (reject trade, don't force it)
+        if lot < min_lot:
+            return 0.0
+        
+        normalized = round(lot / step) * step
+        return min(max_lot, normalized)

@@ -54,10 +54,10 @@ class LiquiditySessionStrategy(BaseStrategy):
 
         # 3. Decision Logic: Break Asian Range with Volume/Momentum
         if price > self.asian_high:
-            return TradeSignal(direction="BUY", confidence=0.80, timestamp=dt)
+            return TradeSignal(direction="BUY", price=price, confidence=0.80, timestamp=dt)
             
         if price < self.asian_low:
-            return TradeSignal(direction="SELL", confidence=0.80, timestamp=dt)
+            return TradeSignal(direction="SELL", price=price, confidence=0.80, timestamp=dt)
 
         return None
 
