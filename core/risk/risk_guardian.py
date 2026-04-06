@@ -118,7 +118,8 @@ class RiskGuardian:
 
         # 1. Kill Switch logic (Step 5.5)
         daily_dd = (self.daily_loss / current_balance) * 100 if current_balance > 0 else 0
-        if daily_dd >= 5.0 or self.error_count > 10 or slippage > 50:
+        limit = float(self.config.get("risk_governance", {}).get("max_daily_loss_pct", 5.0))
+        if daily_dd >= limit or self.error_count > 10 or slippage > 50:
             self.kill_switch_active = True
             return False, "KILL_SWITCH_TRIGGERED"
 

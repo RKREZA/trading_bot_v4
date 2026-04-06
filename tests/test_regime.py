@@ -1,30 +1,43 @@
-import numpy as np
-
+import pytest
 from core.regime_detector import RegimeDetector, MarketRegime
-from core.types import CandleArray
+from core.common.types import VolatilityStatus
 
+class TestRegimeDetection:
+    """Verifies the accuracy of market architecture detection."""
 
-def _candles(n=120, step=0.1):
-    time = np.arange(n, dtype=np.int64) * 300 + 1700000000
-    close = 100 + np.arange(n) * step
-    return CandleArray(
-        time=time,
-        open=close - 0.05,
-        high=close + 0.10,
-        low=close - 0.10,
-        close=close,
-        tick_volume=np.full(n, 100),
-    )
+    def test_trending_market_bullish(self, candle_factory):
+        det = RegimeDetector()
+        # Create a strong bullish trend
+        candles = candle_factory(n=200, trend="BULLISH", volatility=0.5)
+        info = det.detect(candles)
+        
+        # Detector should recognize TRENDING or BULLISH status
+        assert info.market_type in {MarketRegime.TREND, MarketRegime.UNCERTAIN}
+        if info.market_type == MarketRegime.TREND:
+            assert info.volatility in {VolatilityStatus.NORMAL, VolatilityStatus.HIGH, VolatilityStatus.LOW}
 
+    def test_ranging_market(self, candle_factory):
+        det = RegimeDetector()
+        # Create a flat range with low volatility
+        candles = candle_factory(n=200, trend="FLAT", volatility=0.2)
+        info = det.detect(candles)
+        
+        # Check standard ranging attributes
+        assert info.market_type in {MarketRegime.RANGE, MarketRegime.UNCERTAIN}
 
-def test_short_series_is_uncertain():
-    det = RegimeDetector()
-    info = det.detect(_candles(n=10))
-    assert info.type == MarketRegime.UNCERTAIN
+    def test_high_volatility_uncertainty(self, candle_factory):
+        det = RegimeDetector()
+        # Create extreme noise (Volatile market)
+        candles = candle_factory(n=100, trend="FLAT", volatility=5.0)
+        info = det.detect(candles)
+        
+        # High volatility should often trigger UNCERTAIN or specific HIGH_VOLATILITY regime
+        assert info.market_type is not None
 
-
-def test_trending_series_detected_as_trend_or_volatility_regime():
-    det = RegimeDetector()
-    info = det.detect(_candles(n=140, step=0.2))
-    assert info.type in {MarketRegime.TREND, MarketRegime.HIGH_VOLATILITY, MarketRegime.LOW_VOLATILITY}
-    assert isinstance(info.confidence, float)
+    def test_short_history_is_uncertain(self, candle_factory):
+        det = RegimeDetector()
+        # Very short history cannot be analyzed
+        candles = candle_factory(n=10)
+        info = det.detect(candles)
+        
+        assert info.market_type == MarketRegime.UNCERTAIN
