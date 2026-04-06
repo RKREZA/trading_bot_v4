@@ -48,17 +48,26 @@ class BreakoutStrategy(BaseStrategy):
         m5_strength = (abs(last.close - last.open) / (last.high - last.low)) if (last.high - last.low) > 0 else 0
 
         # 4. Integrated Decision Logic
+        reasons = []
+        if h1_strength > 0.5: reasons.append(f"H1: Strong {'Bullish' if h1_dir == 1 else 'Bearish'} ({h1_strength:.2f})")
+        if m5_strength > self.body_thresh: reasons.append(f"M5: Solid Body ({m5_strength:.2f})")
+        
+        if price > r_high: reasons.append("Price: Above Range High")
+        elif price < r_low: reasons.append("Price: Below Range Low")
+        else: reasons.append("Price: Inside Range")
+
         # BUY: Price > High AND Strength > 70% AND H1 Bullish + Strong AND M15 NOT Bearish
         if price > r_high and m5_strength >= self.body_thresh:
             if h1_dir == 1 and h1_strength > 0.5 and m15_trend != -1:
-                return TradeSignal(direction="BUY", confidence=0.9, timestamp=market_data.timestamp)
+                return TradeSignal(direction="BUY", confidence=0.9, timestamp=market_data.timestamp, reasons=reasons)
         
         # SELL: Price < Low AND Strength > 70% AND H1 Bearish + Strong AND M15 NOT Bullish
         if price < r_low and m5_strength >= self.body_thresh:
             if h1_dir == -1 and h1_strength > 0.5 and m15_trend != 1:
-                return TradeSignal(direction="SELL", confidence=0.9, timestamp=market_data.timestamp)
+                return TradeSignal(direction="SELL", confidence=0.9, timestamp=market_data.timestamp, reasons=reasons)
 
-        return None
+        # Fallback: Report Bias
+        return TradeSignal(direction="NONE", confidence=0.5, reasons=reasons)
 
     def get_stop_loss(self, signal: TradeSignal, market_data: MarketData) -> float:
         # Tight stop at the opposite side of the breakout candle

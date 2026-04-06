@@ -1,16 +1,17 @@
-from core.common.types import MarketRegime
+from core.common.types import MarketRegime, VolatilityStatus
 import numpy as np
 import logging
 
 class RegimeInfo:
-    def __init__(self, regime_type: MarketRegime, confidence: float, adx_val: float, atr_val: float):
-        self.type = regime_type
+    def __init__(self, market_type: MarketRegime, volatility: VolatilityStatus, confidence: float, adx_val: float, atr_val: float):
+        self.market_type = market_type
+        self.volatility = volatility
         self.confidence = confidence
         self.adx = adx_val
         self.atr = atr_val
 
     def __repr__(self):
-        return f"<Regime:{self.type.value} Conf:{self.confidence:.2f} ADX:{self.adx:.1f} ATR:{self.atr:.5f}>"
+        return f"<Regime:{self.market_type.value} Vol:{self.volatility.value} Conf:{self.confidence:.2f} ADX:{self.adx:.1f} ATR:{self.atr:.5f}>"
 
 class RegimeDetector:
     """
@@ -25,7 +26,7 @@ class RegimeDetector:
 
     def detect(self, candles) -> RegimeInfo:
         if len(candles) < self.adx_period * 2:
-            return RegimeInfo(MarketRegime.UNCERTAIN, 0.0, 0.0, 0.0)
+            return RegimeInfo(MarketRegime.UNCERTAIN, VolatilityStatus.NORMAL, 0.0, 0.0, 0.0)
 
         adx = self._calculate_adx(candles)
         atr = self._calculate_atr(candles)
@@ -36,24 +37,24 @@ class RegimeDetector:
         
         vol_ratio = atr / avg_atr if avg_atr > 0 else 1.0
 
-        regime = MarketRegime.UNCERTAIN
-        conf = 0.5
-        
+        # Metric 1: Directional Type (ADX)
+        market_type = MarketRegime.UNCERTAIN
+        conf_type = 0.5
         if adx >= 25:
-            regime = MarketRegime.TREND
-            conf = min(1.0, (adx - 20) / 30)
+            market_type = MarketRegime.TREND
+            conf_type = min(1.0, (adx - 20) / 30)
         elif adx <= 20:
-            regime = MarketRegime.RANGE
-            conf = min(1.0, (25 - adx) / 10)
+            market_type = MarketRegime.RANGE
+            conf_type = min(1.0, (25 - adx) / 10)
         
+        # Metric 2: Volatility Status (ATR Ratio)
+        vol_status = VolatilityStatus.NORMAL
         if vol_ratio > 1.8:
-            regime = MarketRegime.HIGH_VOLATILITY
-            conf = 0.9
+            vol_status = VolatilityStatus.HIGH
         elif vol_ratio < 0.6:
-            regime = MarketRegime.LOW_VOLATILITY
-            conf = 0.8
+            vol_status = VolatilityStatus.LOW
 
-        return RegimeInfo(regime, conf, adx, atr)
+        return RegimeInfo(market_type, vol_status, conf_type, adx, atr)
 
     def _calculate_adx(self, candles) -> float:
         h, l, c = candles.high, candles.low, candles.close

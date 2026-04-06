@@ -35,10 +35,11 @@ class StrategyOrchestrator:
         self.last_cycle_time: Optional[datetime] = None
         self.last_analysis: Dict[str, Any] = {}
 
-    def execute_cycle(self, symbol: str, market_data: MarketData, is_news_blocked: bool = False) -> List[Dict[str, Any]]:
+    def execute_cycle(self, symbol: str, market_data: MarketData, is_news_blocked: bool = False) -> Dict[str, Any]:
         """
         STRICT 8-STEP INSTITUTIONAL EXECUTION FLOW (Step 12).
         ====================================================
+        Returns a 'Pulse Report' for dashboard telemetry.
         """
         exec_payloads = []
         symbol_info = self.connection.get_symbol_info(symbol) if hasattr(self.connection, 'get_symbol_info') else {}
@@ -48,26 +49,40 @@ class StrategyOrchestrator:
         # 2. DETECT REGIME
         from core.regime_detector import RegimeDetector
         regime_info = RegimeDetector().detect(market_data.m5_candles)
-        regime = regime_info.type
+        market_type = regime_info.market_type
+        volatility = regime_info.volatility
+        
+        # Pulse Telemetry Initialization
+        pulse_report = {
+            "regime": regime_info,
+            "strategies": {},
+            "execution": [],
+            "timestamp": market_data.timestamp.strftime("%H:%M:%S")
+        }
         
         # 3. ACTIVATE RELEVANT STRATEGIES (Regime Gating)
         from core.regime_gater import RegimeGater
         active_runtimes = [
             r for r in self.runtimes 
-            if r.is_symbol_allowed(symbol) and RegimeGater.is_strategy_allowed(r.strategy_id, regime)
+            if r.strategy.is_symbol_allowed(symbol) and RegimeGater.is_strategy_allowed(r.strategy_id, market_type)
         ]
         
         # 4. GENERATE SIGNALS (Independent Generation)
         raw_signals = {}
         for runtime in active_runtimes:
+            sid = runtime.strategy_id
             sig = runtime.strategy.generate_signal(market_data)
+            
+            # Telemetry: Record Full Signal (including Reasons)
+            pulse_report["strategies"][sid] = sig if sig else "NONE"
+            
             if sig and sig.direction != "NONE":
                 # Attach SL for risk validation
                 sig.stop_loss = runtime.strategy.get_stop_loss(sig, market_data)
-                raw_signals[runtime.strategy_id] = sig
+                raw_signals[sid] = sig
 
         if not raw_signals:
-            return []
+            return pulse_report
 
         # 5. RISK ENGINE VALIDATES TRADE
         current_balance = self.connection.get_balance() if hasattr(self.connection, 'get_balance') else 1000.0
@@ -81,7 +96,7 @@ class StrategyOrchestrator:
             allowed, reason = risk_guardian.check_governance(current_balance, current_equity)
             if not allowed:
                 logger.warning(f"Flow HALTED: {reason}")
-                return []
+                return pulse_report
             
             # 5.2 Individual signal vetting & HARD CONSTRAINTS (Step 13)
             for sid, sig in raw_signals.items():
@@ -98,43 +113,48 @@ class StrategyOrchestrator:
                     logger.debug(f"[{sid}] Signal REJECTED at Risk Validation")
 
         if not validated_signals:
-            return []
+            return pulse_report
 
-        # 6. PORTFOLIO MANAGER RESOLVES CONFLICTS
-        resolution = self.portfolio_manager.resolve_signals(validated_signals)
-        if not resolution:
-            return []
-
-        winner_sid, winning_sig = resolution
-        winner_runtime = next((r for r in self.runtimes if r.strategy_id == winner_sid), None)
-
-        # 7. EXECUTION ENGINE PLACES TRADE
-        if winner_runtime:
-            winning_sig.take_profit = winner_runtime.strategy.get_take_profit(winning_sig, market_data)
+        # 6. PORTFOLIO MANAGER AUDITS SIGNALS
+        # In V4-ULTRA Parallel mode, we approve all non-conflicting edges.
+        approved_signals = self.portfolio_manager.resolve_signals(validated_signals)
+        if not approved_signals:
+            return pulse_report
             
-            # Final Lot Calculation (Partitioned)
-            strat_balance = self.portfolio_manager.get_strategy_balance(current_balance, winner_sid)
-            sl_dist = abs(market_data.current_price - winning_sig.stop_loss)
-            winning_sig.volume = risk_guardian.calculate_lot_size(strat_balance, sl_dist, symbol_info)
+        # 7. EXECUTION ENGINE FLOW (Iterate over all approved strategies)
+        for sid, sig in approved_signals:
+            runtime = next((r for r in self.runtimes if r.strategy_id == sid), None)
+            if not runtime:
+                continue
+                
+            # Final TP Calculation
+            sig.take_profit = runtime.strategy.get_take_profit(sig, market_data)
             
-            if winning_sig.volume > 0:
-                execution_result = winner_runtime.order_manager.execute_signal(
-                    winning_sig, symbol, 
-                    {'bid': market_data.current_price, 'ask': market_data.current_price, 'point': symbol_info.get('point', 0.00001)},
-                    is_news_blocked=is_news_blocked
+            # Final Lot Calculation (Partitioned Strategy Balance)
+            strat_balance = self.portfolio_manager.get_strategy_balance(current_balance, sid)
+            sl_dist = abs(market_data.current_price - sig.stop_loss)
+            sig.volume = risk_guardian.calculate_lot_size(strat_balance, sl_dist, symbol_info)
+            
+            if sig.volume > 0:
+                # 8. LIVE EXECUTION BRIDGE
+                execution_result = self.connection.place_order(
+                    symbol, 
+                    sig, 
+                    sig.volume,
+                    comment=f"V4 {sid.upper()} PARALLEL"
                 )
                 
-                # 8. PERFORMANCE TRACKER LOGS RESULT (Step 8)
+                # 9. PERFORMANCE TRACKER LOGS RESULT
                 if execution_result:
-                    # Individual strategy feedback
-                    winner_runtime.risk_guardian.check_governance(
+                    # Strategy-specific feedback
+                    runtime.risk_guardian.check_governance(
                         current_balance, current_equity, 
                         slippage=execution_result.get("actual_slippage_pips", 0),
                         is_error=execution_result.get("is_error", False)
                     )
-                    exec_payloads.append(execution_result)
+                    pulse_report["execution"].append(execution_result)
             
-        return exec_payloads
+        return pulse_report
 
     def on_trade_closed(self, trade_record: dict):
         """Propagates trade closure to the relevant strategy runtime."""

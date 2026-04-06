@@ -42,8 +42,13 @@ class ExecutionSimulator:
         """
         # 1. Spread Check (Step 4.5)
         # Variable spread simulation: base_spread + random noise (up to 20% of base)
-        current_spread = base_spread_points * (1.0 + self._rng.uniform(0, 0.2))
-        spread_pips = current_spread / point / 10 if point > 0 else 0
+        # base_spread_points is assumed to be in RAW POINTS (e.g. 500 for XAUUSD $5.00 spread)
+        current_spread_pts = base_spread_points * (1.0 + self._rng.uniform(0, 0.2))
+        spread_price = current_spread_pts * point
+        
+        # Human-readable pips for gating (Institutional Standard: 10 pts = 1 pip)
+        # Note: Gold doesn't have 10pts/pip in some brokers but 10 is the internal bot standard.
+        spread_pips = base_spread_points / 10.0
         
         if spread_pips > self.max_spread_pips:
             logger.debug(f"Trade REJECTED: Spread too high ({spread_pips:.1f} pips)")
@@ -51,16 +56,17 @@ class ExecutionSimulator:
             
         # 2. Latency & Slippage (Step 4.1)
         # We simulate Gaussian slippage centered around the configured 'expected' slippage
-        slip_points = self._rng.normal(self.entry_slip_pips, self.entry_slip_pips * 0.5) * 10 * point
+        # slip_points is in Pips
+        slip_price = self._rng.normal(self.entry_slip_pips, self.entry_slip_pips * 0.5) * 10.0 * point
         
         # Calculation for Entry
         direction = signal.direction
         if direction == "BUY":
             # Long enters at ASK (Price + half spread + slippage)
-            fill_price = current_price + (current_spread / 2) + slip_points
+            fill_price = current_price + (spread_price / 2.0) + slip_price
         else:
             # Short enters at BID (Price - half spread - slippage)
-            fill_price = current_price - (current_spread / 2) - slip_points
+            fill_price = current_price - (spread_price / 2.0) - slip_price
             
         return {
             "fill_price": fill_price,
@@ -68,8 +74,8 @@ class ExecutionSimulator:
             "sl": signal.stop_loss,
             "tp": signal.take_profit,
             "timestamp": signal.timestamp,
-            "latency": self.latency_ms,
-            "fill_slippage_pips": slip_points / point / 10 if point > 0 else 0
+            "fill_spread_pips": spread_pips,
+            "fill_slippage_pips": slip_price / point / 10.0 if point > 0 else 0
         }
 
     def simulate_exit(self, 

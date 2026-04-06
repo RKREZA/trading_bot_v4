@@ -40,17 +40,24 @@ class TrendFollowingStrategy(BaseStrategy):
         price = market_data.current_price
         
         # 3. Decision Logic (Subordinated to HTF)
-        if h1_trend == 1 and m5_trend == 1:
-            # Bullish Alignment: Entry on Price above Fast EMA
-            if price > ema50:
-                return TradeSignal(direction="BUY", confidence=0.85, timestamp=market_data.timestamp)
+        reasons = []
+        if h1_trend == 1: reasons.append("H1: Bullish Trend")
+        elif h1_trend == -1: reasons.append("H1: Bearish Trend")
         
-        if h1_trend == -1 and m5_trend == -1:
-            # Bearish Alignment: Entry on Price below Fast EMA
-            if price < ema50:
-                return TradeSignal(direction="SELL", confidence=0.85, timestamp=market_data.timestamp)
+        if m5_trend == 1: reasons.append("M5: EMA Momentum UP")
+        elif m5_trend == -1: reasons.append("M5: EMA Momentum DOWN")
+        
+        if price > ema50: reasons.append("Price: Above EMA50 (Bullish)")
+        else: reasons.append("Price: Below EMA50 (Bearish)")
 
-        return None
+        if h1_trend == 1 and m5_trend == 1 and price > ema50:
+            return TradeSignal(direction="BUY", confidence=0.85, timestamp=market_data.timestamp, reasons=reasons)
+        
+        if h1_trend == -1 and m5_trend == -1 and price < ema50:
+            return TradeSignal(direction="SELL", confidence=0.85, timestamp=market_data.timestamp, reasons=reasons)
+
+        # Fallback: Report Bias Even If No Trade
+        return TradeSignal(direction="NONE", confidence=0.5, reasons=reasons)
 
     def get_stop_loss(self, signal: TradeSignal, market_data: MarketData) -> float:
         atr = market_data.m5_candles.atr(14)[-1]

@@ -200,12 +200,17 @@ class MT5Connection:
         try:
             server_ts = getattr(info, 'server_time', None)
             if server_ts:
-                server_time = datetime.fromtimestamp(server_ts, tz=timezone.utc).strftime("%H:%M:%S")
+                dt = datetime.fromtimestamp(server_ts, tz=timezone.utc)
             else:
-                # Fallback: use last known tick time if available
-                server_time = datetime.now(timezone.utc).strftime("%H:%M:%S")
+                dt = datetime.now(timezone.utc)
+                
+            # Formatting: 6th April 2026 - 10:45PM (UTC)
+            day = dt.day
+            suffix = "th" if 11 <= day <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+            server_time = dt.strftime(f"{day}{suffix} %B %Y - %I:%M%p (UTC)")
+            
         except Exception:
-            server_time = datetime.now(timezone.utc).strftime("%H:%M:%S")
+            server_time = datetime.now(timezone.utc).strftime("%d %B %Y - %I:%M%p (UTC)")
 
         self.account_info = {
             "login": info.login,
@@ -216,10 +221,32 @@ class MT5Connection:
             "margin": info.margin,
             "free_margin": info.margin_free,
             "margin_level": info.margin_level if info.margin > 0 else 0,
+            "leverage": info.leverage,
             "positions": 0,
             "connected": True,
             "server_time": server_time,
         }
+
+    def get_broker_time(self, symbol: str = None) -> datetime:
+        """Fetch the current broker server time as a timezone-aware datetime."""
+        if not self.ensure_connected():
+            return datetime.now(timezone.utc)
+            
+        with self.MT5_LOCK:
+            # Most accurate broker time is the last tick of a major symbol
+            tick_symbol = symbol if symbol else "XAUUSDm"
+            tick = mt5.symbol_info_tick(tick_symbol)
+            
+            if tick and tick.time > 0:
+                return datetime.fromtimestamp(tick.time, tz=timezone.utc)
+            
+            # Secondary Fallback: Account Snapshot (if your broker supports it)
+            info = mt5.account_info()
+            server_ts = getattr(info, 'server_time', None)
+            if server_ts:
+                return datetime.fromtimestamp(server_ts, tz=timezone.utc)
+                
+            return datetime.now(timezone.utc)
 
     def get_market_status(self, symbol: str) -> bool:
         """

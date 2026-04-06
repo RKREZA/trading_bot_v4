@@ -125,80 +125,94 @@ class PortfolioBacktester:
         pbar = tqdm(total=len(target_tf_data.time), initial=self.current_index)
         
         for i in range(max(200, self.current_index), len(target_tf_data.time)):
-            self.current_index = i
-            pbar.update(1)
-            t = target_tf_data.time[i]
-            dt = datetime.fromtimestamp(t, tz=timezone.utc)
-            
-            # [ Institutional Fidelity ]: Zero-Copy Index Shifting
-            # Excludes the current i-th candle which is currently "forming"
-            target_tf_data.set_limit(i) 
-            m5_data.set_limit(self._get_tf_idx(m5_data, t))
-            m15_data.set_limit(self._get_tf_idx(m15_data, t))
-            h1_data.set_limit(self._get_tf_idx(h1_data, t))
-            
-            # 1. Regime Detection & Gating
-            regime_info = self.regime_detector.detect(target_tf_data)
-            regime = regime_info.type
-            risk_mult = RegimeGater.get_risk_multiplier(regime)
-            conf_buffer = RegimeGater.get_confidence_buffer(regime)
-
-            # 2. MarketData Construction (Zero-Copy & Anti-Lookahead)
-            # FIX #1: Entry price MUST be the Open of the current candle
-            market_data = MarketData(
-                symbol=symbol,
-                htf_candles=h1_data,
-                m15_candles=m15_data,
-                m5_candles=m5_data,
-                d1_candles=None,
-                current_price=target_tf_data.open[i], 
-                session=SessionDetector.get_session(dt),
-                timestamp=dt
-            )
-            
-            # 3. Micro-service Strategy Replay
-            for strat in active_strategies:
-                sid = strat.strategy_id
-                if not RegimeGater.is_strategy_allowed(strat.__class__.__name__, regime): continue
-                if sid in self.open_trades: continue
+            try:
+                self.current_index = i
+                pbar.update(1)
+                t = target_tf_data.time[i]
+                dt = datetime.fromtimestamp(t, tz=timezone.utc)
                 
-                # Check Circuit Breakers
-                allowed, _ = self.risk_engine.check_circuit_breakers(self.balances[sid], self.equities[sid])
-                if not allowed: continue
+                # [ Institutional Fidelity ]: Zero-Copy Index Shifting
+                # Excludes the current i-th candle which is currently "forming"
+                target_tf_data.set_limit(i) 
+                
+                # Update sub-timeframes only if they are different objects (Safe Indexing)
+                if m5_data is not target_tf_data: m5_data.set_limit(self._get_tf_idx(m5_data, t))
+                if m15_data is not target_tf_data: m15_data.set_limit(self._get_tf_idx(m15_data, t))
+                if h1_data is not target_tf_data: h1_data.set_limit(self._get_tf_idx(h1_data, t))
+                
+                # 1. Regime Detection & Gating
+                regime_info = self.regime_detector.detect(target_tf_data)
+                regime = regime_info.market_type
+                risk_mult = RegimeGater.get_risk_multiplier(regime_info.volatility)
+                conf_buffer = RegimeGater.get_confidence_buffer(regime_info.volatility)
 
-                # [ Step 4.2: signal -> validation -> execution ]
-                sig = strat.generate_signal(market_data)
-                if sig and sig.direction != "NONE":
-                    if sig.confidence < (0.60 + conf_buffer): continue
+                # 2. MarketData Construction (Zero-Copy & Anti-Lookahead)
+                market_data = MarketData(
+                    symbol=symbol,
+                    htf_candles=h1_data,
+                    m15_candles=m15_data,
+                    m5_candles=m5_data,
+                    d1_candles=None,
+                    current_price=target_tf_data.open[i], 
+                    session=SessionDetector.get_session(dt),
+                    timestamp=dt
+                )
+                
+                # 3. Micro-service Strategy Replay
+                for strat in active_strategies:
+                    sid = strat.strategy_id
+                    if not RegimeGater.is_strategy_allowed(strat.__class__.__name__, regime): continue
+                    if sid in self.open_trades: continue
                     
-                    sig.stop_loss = strat.get_stop_loss(sig, market_data)
-                    sig.take_profit = strat.get_take_profit(sig, market_data)
-                    sl_dist = abs(market_data.current_price - sig.stop_loss)
+                    # Generate Pulse
+                    signal = strat.generate_signal(market_data)
                     
-                    if sl_dist > 0:
-                        lots = self.risk_engine.calculate_lot_size(
-                            balance=self.balances[sid], 
-                            stop_loss_distance=sl_dist, 
-                            point=point, 
-                            tick_value=tick_value, 
-                            symbol=symbol,
-                            spread_points=symbol_cfg.get("spread_points", 600),
-                            commission_per_lot=comm_per_lot
-                        )
-                        lots = lots * risk_mult
+                    if signal and signal.direction != "NONE":
+                        # Validate Signal Confidence (Institutional Gating)
+                        min_conf = getattr(strat, "min_confidence", 0.6)
+                        if signal.confidence < (min_conf + conf_buffer):
+                            continue
+                            
+                        # Risk Engineering (Step 6)
+                        sl = strat.get_stop_loss(signal, market_data)
+                        tp = strat.get_take_profit(signal, market_data)
                         
-                        if lots >= 0.01:
-                            # [ Step 4.1: Execution Simulation ]
-                            fill = self.simulator.simulate_entry(
-                                sig, market_data.current_price, 
-                                symbol_cfg.get("spread_points", 600) * point, point
+                        sl_dist = abs(market_data.current_price - sl)
+                        
+                        if sl_dist > 0:
+                            lot_size = self.risk_engine.calculate_lot_size(
+                                balance=self.balances[sid],
+                                stop_loss_distance=sl_dist,
+                                point=point,
+                                tick_value=tick_value,
+                                symbol=symbol
                             )
-                            if fill:
-                                entry_comm = lots * comm_per_lot
-                                self.balances[sid] -= entry_comm
-                                fill.update({"lots": lots, "strategy_id": sid, "session": market_data.session, "entry_comm": entry_comm})
-                                self.open_trades[sid] = fill
-                                logger.debug(f"[{sid}] Trade Entered: {fill['direction']} @ {fill['fill_price']:.5f}")
+                            lot_size = lot_size * risk_mult
+                            
+                            if lot_size >= 0.01:
+                                # 4. Simulated Execution
+                                fill = self.simulator.simulate_entry(
+                                    signal=signal,
+                                    current_price=market_data.current_price,
+                                    base_spread_points=float(target_tf_data.spread[i]),
+                                    point=point
+                                )
+                                if fill:
+                                    fill.update({
+                                        "sl": sl, 
+                                        "tp": tp, 
+                                        "strategy_id": sid, 
+                                        "lots": lot_size, 
+                                        "session": market_data.session
+                                    })
+                                    self.open_trades[sid] = fill
+                                    logger.debug(f"[{sid}] Trade Entered: {fill['direction']} @ {fill['fill_price']:.5f} (Lots: {lot_size})")
+            except Exception as e:
+                import traceback
+                with open("crash_report.log", "a") as f:
+                    f.write(f"\n--- BACKTEST CRASH: {datetime.now()} ---\n")
+                    f.write(traceback.format_exc())
+                raise e
 
             # 4. M1 Intra-Bar Execution (Step 4.3)
             # Find M1 candles belonging to this M5 bar

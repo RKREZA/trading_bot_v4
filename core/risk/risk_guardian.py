@@ -103,10 +103,12 @@ class RiskGuardian:
         return self._normalize_lots(raw_lot, symbol_info)
 
     def check_governance(self, current_balance: float, current_equity: float, slippage: float = 0.0, is_error: bool = False, open_positions: int = 0) -> Tuple[bool, str]:
-        """Global safety check (Kill Switch, Equity Protection, and NO-GRID)"""
-        # NO GRID Constraint (Step 13)
-        if open_positions >= 1:
-            return False, "ANTI_GRID_VIOLATION (MAX 1 POSITION)"
+        """Global safety check (Kill Switch, Equity Protection, and Parallel Thresholds)"""
+        # Institutional Parallel Threshold (Step 13)
+        # Defaulting to 4 to allow Trend, Breakout, MeanReversion, and Liquidity to trade together.
+        max_parallel_positions = self.config.get("risk_governance", {}).get("max_parallel_strategies", 4)
+        if open_positions >= max_parallel_positions:
+            return False, f"MAX_PARALLEL_STRATEGIES_REACHED ({max_parallel_positions})"
 
         if self.kill_switch_active:
             return False, "KILL_SWITCH_ACTIVE"

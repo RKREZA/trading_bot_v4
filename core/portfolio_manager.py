@@ -28,35 +28,25 @@ class PortfolioManager:
             logger.warning(f"Portfolio allocation checksum error: {total}. Normalizing...")
             self.allocations = {k: v/total for k, v in self.allocations.items()}
             
-    def resolve_signals(self, signals: Dict[str, TradeSignal]) -> Optional[tuple[str, TradeSignal]]:
+    def resolve_signals(self, signals: Dict[str, TradeSignal]) -> List[tuple[str, TradeSignal]]:
         """
-        Institutional Correlation Control (Step 9).
-        1. Groups signals by direction.
-        2. Keeps only the highest confidence trade in the same direction.
-        3. Returns the absolute winner.
+        Institutional Parallel Signal Audit (Step 9).
+        Allows multiple non-conflicting strategies to execute in the same cycle.
         """
         active_signals = {sid: sig for sid, sig in signals.items() if sig.direction != "NONE"}
         if not active_signals:
-            return None
+            return []
 
-        # Sort all signals by confidence
-        sorted_signals = sorted(active_signals.items(), key=lambda x: x[1].confidence, reverse=True)
-        
-        # Directional Filtering (Same Direction Correlation Control)
-        # We only look at the 'top' signal for each direction
-        directions = {"BUY": None, "SELL": None}
-        for sid, sig in sorted_signals:
-            if directions[sig.direction] is None:
-                directions[sig.direction] = (sid, sig)
-
-        # Final winner resolve (BUY vs SELL)
-        buy_win = directions["BUY"]
-        sell_win = directions["SELL"]
-
-        if buy_win and sell_win:
-            return buy_win if buy_win[1].confidence >= sell_win[1].confidence else sell_win
-        
-        return buy_win or sell_win
+        # In parallel mode, we approve all valid signals from different strategies.
+        # Directional Filtering: We keep only the best signal per strategy (already handled by pulse loop)
+        # and ensure we aren't overloaded.
+        approved = []
+        for sid, sig in active_signals.items():
+            approved.append((sid, sig))
+            
+        # Optional: Sort by confidence for sequential execution pulse
+        approved.sort(key=lambda x: x[1].confidence, reverse=True)
+        return approved
 
     def get_strategy_balance(self, total_balance: float, strategy_id: str) -> float:
         allocation = self.allocations.get(strategy_id, 0.25)

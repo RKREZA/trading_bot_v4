@@ -6,6 +6,7 @@ Defines the mandatory contract for all institutional strategy implementations.
 
 import uuid
 import logging
+import numpy as np
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -69,6 +70,10 @@ class BaseStrategy(ABC):
         self.strategy_id = strategy_id
         self.config = config
         self.enabled = config.get("enabled", True)
+        
+        # Institutional Gating Attributes
+        self.min_confidence = float(config.get("min_confidence", 0.6))
+        self.min_rr = float(config.get("min_rr", 2.0))
 
     @abstractmethod
     def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
@@ -113,17 +118,23 @@ class BaseStrategy(ABC):
         Returns institutional Trend State:
         1: Bullish (Fast > Slow)
         -1: Bearish (Fast < Slow)
-        0: Neutral/Crossing
+        0: Neutral/Crossing or NaN
         """
-        if len(candles) < max(fast, slow):
-            return 0
-            
         ema_fast = candles.ema(fast)
         ema_slow = candles.ema(slow)
         
-        if ema_fast[-1] > ema_slow[-1]:
+        # Institutional Gating: Use pre-calculation validity instead of length check
+        if len(ema_fast) == 0 or len(ema_slow) == 0:
+            return 0
+            
+        f_val, s_val = ema_fast[-1], ema_slow[-1]
+        
+        if np.isnan(f_val) or np.isnan(s_val):
+            return 0
+            
+        if f_val > s_val:
             return 1
-        elif ema_fast[-1] < ema_slow[-1]:
+        elif f_val < s_val:
             return -1
         return 0
 

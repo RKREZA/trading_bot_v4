@@ -6,11 +6,14 @@ from enum import Enum
 from datetime import datetime
 
 class MarketRegime(Enum):
-    TREND           = "TREND"
-    RANGE           = "RANGE"
-    HIGH_VOLATILITY = "HIGH_VOLATILITY"
-    LOW_VOLATILITY  = "LOW_VOLATILITY"
+    TREND           = "TRENDING"
+    RANGE           = "RANGING"
     UNCERTAIN       = "UNCERTAIN"
+
+class VolatilityStatus(Enum):
+    HIGH            = "HIGH"
+    LOW             = "LOW"
+    NORMAL          = "NORMAL"
 
 class Candle:
     """Supports both attribute access (c.close) and dict access (c['close'])."""
@@ -113,13 +116,23 @@ class CandleArray:
         elif isinstance(idx, int):
             if idx < 0: idx = self.limit + idx
             return Candle(
-                time=int(self.time[idx]),
-                open=float(self.open[idx]),
-                high=float(self.high[idx]),
-                low=float(self.low[idx]),
-                close=float(self.close[idx]),
-                tick_volume=int(self.tick_volume[idx]),
-                spread=int(self.spread[idx])
+                time=self.time[idx],
+                open=self.open[idx],
+                high=self.high[idx],
+                low=self.low[idx],
+                close=self.close[idx],
+                tick_volume=self.tick_volume[idx],
+                spread=self.spread[idx]
+            )
+        elif isinstance(idx, (np.ndarray, list)):
+            return CandleArray(
+                time=self.time[idx],
+                open=self.open[idx],
+                high=self.high[idx],
+                low=self.low[idx],
+                close=self.close[idx],
+                tick_volume=self.tick_volume[idx],
+                spread=self.spread[idx]
             )
         raise TypeError(f"Invalid argument type: {type(idx)}")
 
