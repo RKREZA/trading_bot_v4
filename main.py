@@ -24,11 +24,12 @@ from strategies import create_strategy
 from dashboard import TradingDashboard, start_dashboard
 
 def setup_live_logging():
+    os.makedirs("logs", exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=[
-            logging.FileHandler("v4_live.log"),
+            logging.FileHandler("logs/v4_live.log"),
             logging.StreamHandler()
         ]
     )
@@ -205,16 +206,17 @@ class LiveOrchestrator:
                 except Exception as e:
                     import traceback
                     consecutive_errors += 1
-                    with open("crash_report.log", "a") as f:
+                    crash_file = os.path.join("logs", "crash_report.log")
+                    with open(crash_file, "a") as f:
                         f.write(f"\n--- CRASH: {datetime.now()} ---\n")
                         f.write(traceback.format_exc())
                         
                     # Fix: Rotate crash_report.log if > 5MB
-                    if os.path.exists("crash_report.log") and os.path.getsize("crash_report.log") > 5 * 1024 * 1024:
+                    if os.path.exists(crash_file) and os.path.getsize(crash_file) > 5 * 1024 * 1024:
                         try:
-                            with open("crash_report.log", "r") as f:
+                            with open(crash_file, "r") as f:
                                 lines = f.readlines()
-                            with open("crash_report.log", "w") as f:
+                            with open(crash_file, "w") as f:
                                 f.writelines(lines[-1000:])
                         except Exception:
                             pass

@@ -4,199 +4,152 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional
 
 from rich.console import Console
-from rich.layout import Layout
-from rich.panel import Panel
-from rich.table import Table
 from rich.text import Text
 from rich.live import Live
 
 class TradingDashboard:
     """
-    V4-ULTRA Professional Live Monitor.
-    Standardized 'State' propagation for multi-strategy institutional trading.
+    V4-ULTRA Professional Live Monitor - Triple-aligned header and full-width layout.
     """
 
     def __init__(self):
         self.console = Console()
-        self.layout = Layout()
-        self._init_layout()
+        self.layout = Text("V4-ULTRA INITIALIZING...")
         
-    def _init_layout(self):
-        """Build the institutional grid structure."""
-        self.layout.split(
-            Layout(name="header", size=3),
-            Layout(name="main", ratio=1),
-            Layout(name="footer", size=10),
-        )
-        self.layout["main"].split_row(
-            Layout(name="left", ratio=1),
-            Layout(name="right", ratio=2),
-        )
-        self.layout["left"].split_column(
-            Layout(name="account", ratio=1),
-            Layout(name="market", size=9),
-            Layout(name="news", ratio=1),
-            Layout(name="setup", ratio=1),
-        )
-        
-        # POPULATE FALLBACK PANELS (To prevent Skeleton View)
-        self.layout["header"].update(Panel("[bold red]V4-ULTRA INITIALIZING...[/]", style="white on blue"))
-        self.layout["account"].update(Panel("[dim white]Waiting for account telemetry...[/]", title="Account Integrity", border_style="green"))
-        self.layout["market"].update(Panel("[dim white]Synchronizing with MT5 Server...[/]", title="Environment Monitor", border_style="cyan"))
-        self.layout["news"].update(Panel("[dim white]Connecting to Economic Cloud...[/]", title="Economic Calendar", border_style="magenta"))
-        self.layout["setup"].update(Panel("[dim white]Loading strategy micro-services...[/]", title="Institutional Setup", border_style="yellow"))
-        self.layout["right"].update(Panel("[dim white]Scanning portfolio for active positions...[/]", title="Portfolio", border_style="blue"))
-        self.layout["footer"].update(Panel("[dim white]Establishing secure analysis heartbeat...[/]", title="Live Analysis", border_style="yellow"))
+    def _get_ordinal_suffix(self, day: int) -> str:
+        """Calculate ordinal suffix for day of month."""
+        if 11 <= day <= 13:
+            return "th"
+        return {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
 
-    def generate_header(self, state: dict) -> Panel:
-        """Top-tier information bar (Modern Minimalist)."""
+    def _get_formatted_time(self) -> str:
+        """Return date in format like: 8th April 2026 - 1:44:40PM"""
+        now = datetime.now()
+        day = now.day
+        suffix = self._get_ordinal_suffix(day)
+        date_part = f"{day}{suffix} {now.strftime('%B %Y')}"
+        time_part = now.strftime("%I:%M:%S%p")
+        return f"{date_part} - {time_part}"
+
+    def update(self, state: dict) -> Text:
+        """Pulse the entire dashboard with triple-aligned header."""
         conn = state.get("connection", {}) or {}
-        status = "[bold green]ONLINE[/]" if conn.get("connected") else "[bold red]OFFLINE[/]"
-        server_time = conn.get("server_time", "00:00:00")
+        acc = state.get("account", {}) or {}
+        width = self.console.width
+        sep = "=" * width
         
-        grid = Table.grid(expand=True)
-        grid.add_column(justify="left", ratio=1)
-        grid.add_column(justify="center", ratio=1)
-        grid.add_column(justify="right", ratio=1)
+        # Account Info Extraction
+        login = acc.get("login", "N/A")
+        server = acc.get("server", "N/A")
+        balance = acc.get("balance", 0)
+        equity = acc.get("equity", 0)
+        free_margin = acc.get("margin_free", acc.get("free_margin", 0))
+        leverage = acc.get("leverage", 0)
+        profit = acc.get("profit", 0)
         
-        grid.add_row(
-            f"  V4-ULTRA Command Center",
-            f"[bold blue]MT5 Server Time: {server_time}[/]",
-            f"Status: {status}  "
-        )
-        return Panel(grid, box=None) # NO BACKGROUND
+        # Environment Info Extraction
+        symbol = state.get("symbol", "N/A")
+        price = state.get("price", 0)
+        spread = state.get("spread", 0)
+        regime = state.get("regime_type", "N/A")
+        volatility = state.get("volatility", "N/A")
+        session = state.get("session", "N/A")
+        
+        status_text = "ONLINE" if conn.get("connected") else "OFFLINE"
+        status_color = "bold green" if conn.get("connected") else "bold red"
+        current_time_str = self._get_formatted_time()
+        
+        # TRIPLE ALIGNMENT LOGIC
+        bot_name = "T-BOT (V4-ULTRA)"
+        right_status = f"STATUS : {status_text}"
+        
+        # Calculate padding for Center position
+        left_len = len(current_time_str)
+        center_len = len(bot_name)
+        right_len = len(right_status)
+        
+        # Start of center text should be roughly at (width // 2) - (center_len // 2)
+        center_start = max(left_len + 1, (width // 2) - (center_len // 2))
+        pad_left = " " * (center_start - left_len)
+        
+        # End of center text is center_start + center_len
+        # Start of right text should be width - right_len
+        right_start = max(center_start + center_len + 1, width - right_len)
+        pad_right = " " * (right_start - (center_start + center_len))
+        
+        # Assemble Header with markup for the status
+        header_markup = f"{current_time_str}{pad_left}[bold blue]{bot_name}[/]{pad_right}STATUS : [{status_color}]{status_text}[/]"
 
-    def generate_account_panel(self, state: dict) -> Panel:
-        """Account health metrics."""
-        account = state.get("account", {}) or {}
-        login = account.get("login", "N/A")
-        server = account.get("server", "N/A")
+        # Build the Dashboard String
+        lines = []
+        lines.append(sep)
+        lines.append(header_markup)
+        lines.append(sep)
         
-        table = Table(show_header=False, box=None, expand=True)
-        table.add_column("METRIC", ratio=1)
-        table.add_column("DETAILS", justify="right", ratio=2)
+        lines.append("Account Information")
+        lines.append(f"ID : {login} | SERVER : {server} | ")
+        lines.append(f"Balance : ${balance:,.2f} | EQUITY : ${equity:,.2f} | FREE MARGIN : ${free_margin:,.2f} | LEVERAGE : {leverage}x")
+        lines.append(f"LIVE PnL : [bold cyan]${profit:,.2f}[/]")
         
-        table.add_row("ACCOUNT ID", f"[bold white]{login}[/]")
-        table.add_row("SERVER", f"[dim white]{server}[/]")
-        table.add_row("BALANCE", f"[bold green]${account.get('balance', 0):,.2f}[/]")
-        table.add_row("EQUITY", f"[bold white]${account.get('equity', 0):,.2f}[/]")
+        lines.append(sep)
+        lines.append("Environment Monitor")
+        lines.append(f"SYMBOL : {symbol} | PRICE : {price:,.2f} | SPREAD : {spread:.1f} pts")
+        lines.append(f"REGIME : {regime} | VOLATILITY : {volatility} | SESSION : {session}")
         
-        profit = account.get('profit', 0)
-        pnl_color = "green" if profit >= 0 else "red"
-        table.add_row("FLOATING P/L", f"[{pnl_color}]${profit:,.2f}[/]")
-        
-        table.add_row("LEVERAGE", f"[bold yellow]1:{account.get('leverage', 0)}[/]")
-        table.add_row("MARGIN", f"[bold red]${account.get('margin', 0):,.2f}[/]")
-        table.add_row("FREE MARGIN", f"[bold cyan]${account.get('margin_free', account.get('free_margin', 0)):,.2f}[/]")
-        
-        return Panel(table, title="[bold green]Account Integrity[/]", border_style="green")
-
-    def generate_market_panel(self, state: dict) -> Panel:
-        """Dual-metric environment monitor."""
-        table = Table(show_header=False, box=None, expand=True)
-        table.add_column("METRIC", ratio=1)
-        table.add_column("DETAILS", justify="right", ratio=2)
-
-        table.add_row("ACTIVE SYMBOL", f"[bold white]{state.get('symbol', 'N/A')}[/]")
-        table.add_row("LIVE PRICE", f"[bold white]{state.get('price', 0):,.2f}[/]")
-        table.add_row("CURRENT SPREAD", f"[bold white]{state.get('spread', 0):.1f} pts[/]")
-        
-        reg_type = state.get('regime_type', 'UNCERTAIN')
-        reg_color = "cyan" if reg_type == "TRENDING" else "yellow" if reg_type == "RANGING" else "white"
-        table.add_row("MARKET TYPE", f"[{reg_color}]{reg_type}[/]")
-        
-        vol_status = state.get('volatility', 'NORMAL')
-        vol_color = "red" if vol_status == "HIGH" else "green" if vol_status == "LOW" else "white"
-        table.add_row("VOLATILITY", f"[{vol_color}]{vol_status}[/]")
-        
-        table.add_row("TRADING SESSION", f"[bold white]{state.get('session', 'GLOBAL')}[/]")
-        
-        return Panel(table, title="[bold cyan]Environment Monitor[/]", border_style="cyan")
-
-    def generate_news_panel(self, state: dict) -> Panel:
-        """Economic Calendar."""
-        news_list = state.get("news_list", []) or []
-        table = Table(show_header=False, box=None, padding=(0,1), expand=True)
-        table.add_column("Impact", justify="left", width=2)
-        table.add_column("Event", justify="left", ratio=1, overflow="ellipsis", no_wrap=True)
-        table.add_column("Time", justify="right")
-        
-        if not news_list:
-            return Panel("[dim white]No high-impact news[/]", title="[bold magenta]Economic Calendar[/]", border_style="magenta")
-            
-        for ev in news_list[:5]:
-            impact = "[bold red]![/]" if ev.get("is_active") else "[red]![/]"
-            table.add_row(impact, f"[white]{ev.get('title')}[/]", f"[magenta]{ev.get('time')}[/]")
-            
-        return Panel(table, title="[bold magenta]Economic Calendar[/]", border_style="magenta")
-
-    def generate_setup_panel(self, state: dict) -> Panel:
-        """Strategy Confluence Reasons."""
+        lines.append(sep)
+        lines.append("Institutional Setup")
         setups = state.get("setups", {}) or {}
-        table = Table(show_header=False, box=None, expand=True)
-        table.add_column("Strat", justify="left", style="bold cyan")
-        table.add_column("Setup", justify="left")
-        
-        if not setups:
-            return Panel("[dim white]Scanning strategy logic...[/]", title="[bold yellow]Institutional Setup[/]", border_style="yellow")
-            
+        found_setup = False
         for sid, reasons in setups.items():
-            if not reasons: continue
-            reason_str = "\n".join([f"• {r}" for r in reasons])
-            table.add_row(sid, f"[dim white]{reason_str}[/]")
-            
-        return Panel(table, title="[bold yellow]Institutional Setup[/]", border_style="yellow")
-
-    def generate_trade_table(self, state: dict) -> Panel:
-        """Open Portfolio positions."""
-        positions = state.get("positions", []) or []
-        table = Table(box=None, header_style="bold blue", expand=True)
-        table.add_column("Symbol", justify="left")
-        table.add_column("Type", justify="center")
-        table.add_column("Lots", justify="right")
-        table.add_column("Price", justify="right")
-        table.add_column("SL", justify="right")
-        table.add_column("TP", justify="right")
-        table.add_column("PnL ($)", justify="right")
+            if reasons:
+                reason_str = " | ".join(reasons)
+                lines.append(f"[bold yellow]{sid}[/]: {reason_str}")
+                found_setup = True
+        if not found_setup:
+            lines.append("[dim]NO ACTIVE STRATEGY SIGNALS[/]")
         
-        for pos in positions:
-            pnl_color = "green" if pos.get('profit', 0) >= 0 else "red"
-            table.add_row(
-                pos.get('symbol', '???'),
-                pos.get('type_text', '???'),
-                f"{pos.get('volume', 0):.2f}",
-                f"{pos.get('price_open', 0):.5f}",
-                f"{pos.get('sl', 0):.5f}",
-                f"{pos.get('tp', 0):.5f}",
-                f"[{pnl_color}]${pos.get('profit', 0):,.2f}[/]"
-            )
+        lines.append(sep)
+        lines.append("Live Analysis")
+        logs = state.get("logs", [])
+        if not logs:
+            lines.append("[dim]Waiting for market events...[/]")
+        else:
+            for log in logs[-5:]:
+                log_color = "white"
+                if "[ANALYSIS]" in log: log_color = "cyan"
+                if "[TRADE]" in log: log_color = "green"
+                if "[ERROR]" in log: log_color = "red"
+                lines.append(f"[{log_color}]> {log}[/]")
             
-        return Panel(table, title="Active Multi-Service Portfolio", border_style="blue")
+        lines.append(sep)
+        lines.append("Economic Calendar")
+        news = state.get("news_list", [])
+        if not news:
+            lines.append("[dim]NO UPCOMING HIGH-IMPACT NEWS[/]")
+        else:
+            for ev in news[:3]:
+                lines.append(f"[magenta][{ev.get('time', 'N/A')}][/] [white]{ev.get('title', 'Unknown Event')}[/]")
+        
+        lines.append(sep)
+        lines.append("Portfolio Summary")
+        positions = state.get("positions", [])
+        if not positions:
+            lines.append("[dim]NO OPEN POSITIONS[/]")
+        else:
+            lines.append(f"{'SYM':<10} | {'TYPE':<5} | {'LOTS':<6} | {'PnL':<10}")
+            for pos in positions:
+                pnl = pos.get('profit', 0)
+                pnl_color = "green" if pnl >= 0 else "red"
+                lines.append(f"{pos.get('symbol', '???'):<10} | {pos.get('type_text', '???'):<5} | {pos.get('volume', 0):<6.2f} | [{pnl_color}]${pnl:<9.2f}[/]")
 
-    def generate_log_footer(self, state: dict) -> Panel:
-        """Live Analysis scrolling logs."""
-        logs = state.get("logs", []) or []
-        log_text = Text()
-        for log in logs[-8:]:
-            color = "white"
-            if "[ANALYSIS]" in log: color = "cyan"
-            if "TRADE" in log: color = "green"
-            if "ERROR" in log: color = "red"
-            log_text.append(f"• {log}\n", style=color)
-            
-        return Panel(log_text, title="[bold yellow]Live Analysis[/]", border_style="yellow")
-
-    def update(self, state: dict) -> Layout:
-        """Pulse the entire dashboard tree."""
-        self.layout["header"].update(self.generate_header(state))
-        self.layout["account"].update(self.generate_account_panel(state))
-        self.layout["market"].update(self.generate_market_panel(state))
-        self.layout["news"].update(self.generate_news_panel(state))
-        self.layout["setup"].update(self.generate_setup_panel(state))
-        self.layout["right"].update(self.generate_trade_table(state))
-        self.layout["footer"].update(self.generate_log_footer(state))
+        lines.append(sep)
+        
+        content = "\n".join(lines)
+        self.layout = Text.from_markup(content)
         return self.layout
 
-def start_dashboard(layout: Layout):
-    """Factory for the live renderer."""
-    return Live(layout, refresh_per_second=2, screen=False)
+def start_dashboard(layout):
+    """Factory for the live renderer - uses full-screen mode."""
+    import warnings
+    warnings.filterwarnings("ignore", category=UserWarning)
+    return Live(layout, refresh_per_second=2, screen=True)

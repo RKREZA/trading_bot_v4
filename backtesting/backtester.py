@@ -233,7 +233,9 @@ class PortfolioBacktester:
 
             except Exception as e:
                 import traceback
-                with open("crash_report.log", "a") as f:
+                crash_file = os.path.join("logs", "crash_report.log")
+                os.makedirs("logs", exist_ok=True)
+                with open(crash_file, "a") as f:
                     f.write(f"\n--- BACKTEST CRASH: {datetime.now()} ---\n")
                     f.write(traceback.format_exc())
                 raise e
