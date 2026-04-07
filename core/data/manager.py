@@ -47,22 +47,34 @@ class DataManager:
             raise ValueError("SYSTEM_HALT: Sync Failure.")
 
         # 4. Institutional Mandatory Pre-Flight Verification (Step 2.5)
-        # We only care about continuity for the requested range + 200 bars buffer
         start_ts = start_date.timestamp()
+        now_ts = datetime.datetime.now(datetime.timezone.utc).timestamp()
+        
+        gaps = []
+        relevant_array = CandleArray.from_dicts([]) # Placeholder
         
         # Repair Loop: Up to 3 attempts
         for attempt in range(3):
             array = self.store.load(symbol, timeframe)
+            if array is None or len(array) == 0: break
             
-            # Institutional Constraint Check (Step 2.5): Does cache cover requested start?
-            if len(array) > 0 and array.time[0] > start_ts:
-                logger.warning(f"DataManager: Cache for {symbol} [{timeframe}] starts at {datetime.datetime.fromtimestamp(array.time[0])}, but {start_date} was requested. Triggering Backfill.")
-                self.sync.sync_full_history(symbol, timeframe, start_date)
-                array = self.store.load(symbol, timeframe)
-
+            # Phase A: Coverage Audit (Fidelity Check)
+            tf_secs = {"M1": 60, "M5": 300, "M15": 900, "H1": 3600}.get(timeframe, 300)
+            days_requested = (now_ts - start_ts) / 86400
+            expected_bars = (days_requested * 86400 / tf_secs) * 0.7 
+            
             idx_start = np.searchsorted(array.time, start_ts)
-            # If start_ts is before the first bar, idx_start is 0
-            safe_idx_start = max(0, idx_start - 210)
+            current_slice = array[idx_start:]
+            
+            # If cache starts late or is missing significant chunks, trigger backfill
+            if (len(array) > 0 and array.time[0] > (start_ts + 3600)) or (len(current_slice) < (expected_bars * 0.85)):
+                if attempt < 1:
+                    logger.warning(f"DataManager: Fidelity Gap Detected for {symbol} ({len(current_slice)}/{int(expected_bars)} bars). Triggering Deep Sync.")
+                    self.sync.sync_full_history(symbol, timeframe, start_date)
+                    continue 
+
+            # Phase B: Extraction with Buffer
+            safe_idx_start = max(0, idx_start - 240) 
             relevant_array = array[safe_idx_start:]
             
             relevant_array = self._ensure_min_history(relevant_array, symbol, timeframe, start_date)
@@ -74,8 +86,9 @@ class DataManager:
             logger.warning(f"DataManager: Detected {len(gaps)} gaps for {symbol} [{timeframe}]. Attempting Auto-Repair {attempt+1}/3...")
             self.sync.repair_identified_gaps(symbol, timeframe, array, gaps)
             
-        logger.critical(f"PROCEEDING WITH TOLERANCE: {len(gaps)} unrepairable gaps detected in {symbol} ({timeframe}) history.")
-        # Fulfills 'Step 3' (Brutal Audit - Robustness): Zero-halt backtesting for production benchmarks.
+        if len(gaps) > 0:
+            logger.critical(f"PROCEEDING WITH TOLERANCE: {len(gaps)} unrepairable gaps detected in {symbol} ({timeframe}) history.")
+        
         return relevant_array
 
     def _ensure_min_history(self, array: CandleArray, symbol: str, timeframe: str, start_date: datetime.datetime) -> CandleArray:

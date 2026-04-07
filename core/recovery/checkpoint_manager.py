@@ -3,6 +3,7 @@ import json
 import logging
 import datetime
 import numpy as np
+import time
 from typing import Dict, Any, Optional
 
 logger = logging.getLogger("trading_bot.recovery.checkpoint")
@@ -38,19 +39,34 @@ class CheckpointManager:
         """
         temp_path = self.main_state_path + ".tmp"
         try:
+            # 1. Serialize to string first to ensure we don't hold a file lock if serialization fails
+            content = json.dumps(state, indent=4, cls=InstitutionalEncoder)
+            
+            # 2. Write to temp file
             with open(temp_path, "w") as f:
-                json.dump(state, f, indent=4, cls=InstitutionalEncoder)
+                f.write(content)
             
-            # Atomic swap
+            # 3. Windows-Safe Atomic Swap
             if os.path.exists(self.main_state_path):
-                os.remove(self.main_state_path)
-            os.rename(temp_path, self.main_state_path)
+                # On Windows, we often need to retry delete if a process is heartbeat-scanning
+                for _ in range(3):
+                    try:
+                        os.remove(self.main_state_path)
+                        break
+                    except PermissionError:
+                        time.sleep(0.1)
             
+            os.rename(temp_path, self.main_state_path)
             logger.debug(f"Checkpoint saved at step {state.get('current_index')}")
+            
         except Exception as e:
             logger.error(f"Failed to save checkpoint: {e}")
+            # Cleanup temp file if it exists and isn't locked
             if os.path.exists(temp_path):
-                os.remove(temp_path)
+                try:
+                    os.remove(temp_path)
+                except:
+                    pass
 
     def load_checkpoint(self) -> Optional[Dict[str, Any]]:
         """Loads the last saved state for recovery."""
@@ -69,8 +85,11 @@ class CheckpointManager:
     def clear_checkpoint(self):
         """Clears state after successful completion of a run."""
         if os.path.exists(self.main_state_path):
-            os.remove(self.main_state_path)
-            logger.info("Checkpoint cleared.")
+            try:
+                os.remove(self.main_state_path)
+                logger.info("Checkpoint cleared.")
+            except Exception as e:
+                logger.warning(f"Failed to clear checkpoint file: {e}")
 
     def validate_integrity(self, saved_equity: float, calculated_equity: float) -> bool:
         """

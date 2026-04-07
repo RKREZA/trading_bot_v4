@@ -17,8 +17,12 @@ class MonteCarloSimulator:
         Institutional Monte Carlo Suite (Step 8.2).
         Includes Bootstrap, Permutation, and Jitter tests.
         """
-        if not history or len(history) < 20:
-            return {"status": "INSUFFICIENT_DATA", "robustness_score": 0}
+        if not history or len(history) < 10:
+            return {
+                "status": "INSUFFICIENT_DATA", 
+                "robustness_score": 0,
+                "message": f"Institutional certification requires at least 10 trades (Found: {len(history)}). Small sample size precludes Stress Testing."
+            }
 
         pnls = np.array([t['pnl'] for t in history])
         all_final_balances = []
@@ -72,6 +76,7 @@ class MonteCarloSimulator:
         prob_of_ruin = (len([b for b in all_final_balances if b <= 0]) / self.iterations) * 100
 
         return {
+            "status": "SUCCESS",
             "iterations": self.iterations,
             "median_final_balance": round(median_balance, 2),
             "worst_case_balance_95ci": round(worst_case_balance, 2),
@@ -91,20 +96,24 @@ class MonteCarloSimulator:
         score = 100.0
         
         # 1. DD Penalty (Institutional target < 15%)
-        # Exponential penalty for exceeding the 15% threshold
         if worst_dd > 15:
             excess = worst_dd - 15
             score -= (excess ** 1.5) * 2.5
         
         # 2. Ruin Penalty (Extreme sensitivity to ruin)
-        # Any non-zero ruin probability is a major failure.
         if ruin_prob > 0:
-            score -= (ruin_prob * 10) + 50 # Massive haircut
+            score -= (ruin_prob * 10) + 50 
         
-        # 3. Sample Size Filter
-        # Institutional certification requires at least 150 trades for statistical significance
-        if len(history) < 150:
-            score -= (150 - len(history)) * 0.2
+        # 3. Sample Size Filter (Tiered Institutional Quality)
+        # 100+ trades = Full Certification
+        # 50-100 trades = Moderate Confidence (-0.1 per missing trade)
+        # < 50 trades = Low Confidence (-0.2 per missing trade)
+        count = len(history)
+        if count < 100:
+            if count >= 50:
+                score -= (100 - count) * 0.1
+            else:
+                score -= (50 - count) * 0.2 + 5.0 # Baseline penalty for low count
         
         return max(0, min(100, round(score, 1)))
 

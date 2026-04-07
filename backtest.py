@@ -95,6 +95,25 @@ class BacktestCLI:
              rprint("[bold red]Error:[/] Date range results in zero bars for simulation.")
              return
 
+        # 1.5 Data Fidelity Audit (Institutional Standard)
+        audit_table = Table(title="Institutional Data Fidelity Audit", box=None, header_style="bold cyan")
+        audit_table.add_column("Property", style="dim")
+        audit_table.add_column("Value")
+        
+        # Calculate coverage
+        days_requested = (dt_to - dt_from).days
+        expected_m5 = (days_requested * 24 * 12) * 0.7 # Approx accounting for weekends
+        coverage = min(100.0, (len(m5) / expected_m5 * 100)) if expected_m5 > 0 else 100.0
+        
+        audit_table.add_row("Symbol/Mode", f"{symbol} (High-Fidelity)")
+        audit_table.add_row("Precision", "M5 Primary + M1 Tick-Replay")
+        audit_table.add_row("Bars (M5)", f"{len(m5):,}")
+        audit_table.add_row("Temporal Range", f"{datetime.fromtimestamp(m5.time[0], tz=timezone.utc).date()} to {datetime.fromtimestamp(m5.time[-1], tz=timezone.utc).date()}")
+        audit_table.add_row("Fidelity Score", f"{coverage:.1f}%")
+        
+        rprint(audit_table)
+        rprint("-" * 60)
+
         # 2. Strategy Loader (Step 9)
         strategies = self._build_strategies(strategy_filter, symbol=symbol)
         if not strategies:
@@ -190,24 +209,38 @@ class BacktestCLI:
         rprint("\n[bold yellow]Institutional Robustness Audit: Running Monte Carlo Stress Suite (2500 paths)...[/]")
         mc = MonteCarloSimulator(iterations=2500)
         res = mc.run(history, initial_balance=initial_balance)
-        score = float(res.get("robustness_score", 0))
         
-        # Institutional Standard: Score > 80.0 and Ruin == 0.0%
+        if res.get("status") == "INSUFFICIENT_DATA":
+            rprint(f"\n[bold red]⚠ AUDIT HALTED: {res.get('message')}[/]")
+            return False
+
+        score = float(res.get("robustness_score", 0))
         ruin_text = res.get("probability_of_ruin", "100%")
         ruin_prob = float(ruin_text.replace("%", ""))
+        
+        # Institutional Standard: Score > 80.0 and Ruin == 0.0%
         is_robust = (score >= 80.0) and (ruin_prob == 0.0)
         
-        mc_table = Table(title="V4-ULTRA Institutional Robustness Certification", show_header=False, padding=(0, 2))
-        for k, v in res.items():
-            k_display = k.replace("_", " ").title()
-            if k == "robustness_score":
-                score_color = "green" if is_robust else "red"
-                mc_table.add_row(k_display, f"[{score_color}]{v}/100[/]")
-            elif k == "probability_of_ruin":
-                ruin_color = "green" if ruin_prob == 0.0 else "red"
-                mc_table.add_row(k_display, f"[{ruin_color}]{v}[/]")
+        mc_table = Table(title="V4-ULTRA Institutional Robustness Certification", show_header=False, padding=(0, 2), box=None)
+        
+        # Display specific tracked metrics in a professional order
+        metrics = [
+            ("Robustness Score", f"{score}/100"),
+            ("Median Final Balance", f"${res.get('median_final_balance', 0)}"),
+            ("Worst Case Balance (95% CI)", f"${res.get('worst_case_balance_95ci', 0)}"),
+            ("Max Drawdown (95% CI)", res.get("worst_case_dd_95ci", "0%")),
+            ("Probability of Ruin", ruin_text)
+        ]
+        
+        for label, val in metrics:
+            if "Score" in label:
+                color = "green" if is_robust else "red"
+                mc_table.add_row(label, f"[{color}]{val}[/]")
+            elif "Ruin" in label:
+                color = "green" if ruin_prob == 0.0 else "red"
+                mc_table.add_row(label, f"[{color}]{val}[/]")
             else:
-                mc_table.add_row(k_display, str(v))
+                mc_table.add_row(label, val)
         
         if not is_robust:
             rprint("\n[bold red]!!! AUDIT FAILURE: STRATEGY REJECTED FOR PRODUCTION !!![/]")
@@ -218,7 +251,7 @@ class BacktestCLI:
         else:
             rprint("\n[bold green]*** AUDIT PASSED: STRATEGY CERTIFIED FOR INSTITUTIONAL DEPLOYMENT ***[/]")
 
-        self.console.print(Panel(mc_table, border_style="bright_green" if is_robust else "red", title="Robustness Certification"))
+        self.console.print(Panel(mc_table, border_style="bright_green" if is_robust else "red", title="Robustness Suite Output"))
         return is_robust
 
     def _run_stress_test(self, symbol, strategies, data):

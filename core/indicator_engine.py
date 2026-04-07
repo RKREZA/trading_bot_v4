@@ -35,9 +35,12 @@ class IndicatorEngine:
         low_close = (df['low'] - df['close'].shift()).abs()
         ranges = pd.concat([high_low, high_close, low_close], axis=1)
         true_range = ranges.max(axis=1)
+        # Calculate both 14 and 20 periods for different strategy/regime defaults
         features["atr_14"] = true_range.rolling(14).mean().values
+        features["atr_20"] = true_range.rolling(20).mean().values
         
         # 3. Momentum (RSI) — Using Wilder's EMA to match types.py
+        # ... (rest of momentum code)
         delta = df['close'].diff()
         gain = delta.where(delta > 0, 0)
         loss = (-delta.where(delta < 0, 0))
@@ -46,17 +49,20 @@ class IndicatorEngine:
         rs = avg_gain / avg_loss
         features["rsi_14"] = (100 - (100 / (1 + rs))).values
         
-        # 4. Bollinger Bands
+        # 4. Bollinger Bands (calculates sma_20 as bb_mid)
         ma_20 = df['close'].rolling(20).mean()
         std_20 = df['close'].rolling(20).std()
         features["bb_upper"] = (ma_20 + (std_20 * 2)).values
         features["bb_lower"] = (ma_20 - (std_20 * 2)).values
         features["bb_mid"] = ma_20.values
+        features["sma_20"] = ma_20.values # Alias for strategy volume checks
         
-        # 5. Price Action
+        # 5. Price Action & Volume
         features["body_size"] = (df['close'] - df['open']).abs().values
+        features["vol_sma_20"] = df['tick_volume'].rolling(20).mean().values
         
         # 6. Trend Strength (ADX) — Institutional Gating
+        # ... (rest of ADX code)
         plus_dm = (df['high'] - df['high'].shift(1)).clip(lower=0)
         minus_dm = (df['low'].shift(1) - df['low']).clip(lower=0)
         plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
@@ -71,5 +77,4 @@ class IndicatorEngine:
         dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di)
         features["adx_14"] = dx.ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
         
-        # Institutional Mitigation: Keep NaNs for initial bars instead of Zero
         return features

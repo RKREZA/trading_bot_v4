@@ -75,7 +75,9 @@ class WalkForwardValidator:
                 mask = (candles.time >= oos_start_ts) & (candles.time < oos_end_ts)
                 oos_data[tf] = candles[mask]
 
-            if len(oos_data.get("M5", [])) < 50:
+            # Institutional Quality Gate: Ensure M5 coverage AND M1 tick availability for OOS
+            if len(oos_data.get("M5", [])) < 50 or len(oos_data.get("M1", [])) < 10:
+                logger.warning(f"WFO: Skipping OOS window {is_end.date()} (Insufficient Data: M5={len(oos_data.get('M5', []))}, M1={len(oos_data.get('M1', []))})")
                 current_is_start += timedelta(weeks=test_weeks)
                 continue
 
@@ -85,6 +87,12 @@ class WalkForwardValidator:
                 mask = (candles.time >= is_start_ts) & (candles.time < oos_start_ts)
                 is_data[tf] = candles[mask]
             
+            # Institutional Quality Gate: Ensure M5 coverage AND M1 tick availability for IS
+            if len(is_data.get("M5", [])) < 100 or len(is_data.get("M1", [])) < 20:
+                logger.warning(f"WFO: Skipping IS window {current_is_start.date()} (Insufficient Data: M5={len(is_data.get('M5', []))}, M1={len(is_data.get('M1', []))})")
+                current_is_start += timedelta(weeks=test_weeks)
+                continue
+
             is_backtester = PortfolioBacktester(self.config)
             is_history, _ = is_backtester.run(symbol, strategies, is_data["M5"], is_data.get("H1"), is_data.get("M15"), is_data.get("M5"), is_data.get("M1"))
             is_profit = sum(t['pnl'] for t in is_history) if is_history else 1.0

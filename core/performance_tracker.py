@@ -92,6 +92,12 @@ class PerformanceTracker:
         
         # 1. Summary Block
         s = portfolio_results.get('portfolio', {})
+        if not s or s.get("status") == "NO_TRADES":
+            lines.append(" [bold yellow]!!! AUDIT NOTICE: NO TRADES EXECUTED DURING THIS PERIOD !!![/]")
+            lines.append(" Reason: Strategy criteria not met, or insufficient volatility in the requested range.")
+            lines.append("-" * 80)
+            return "\n".join(lines)
+
         lines.append(f" PORTFOLIO PERFORMANCE SUMMARY:")
         lines.append(f" - Net Profit:     ${s.get('net_profit', 0):<15}   Profit Factor: {s.get('profit_factor', 0)}")
         lines.append(f" - Win Rate:       {s.get('win_rate', '0%'):<15}   Total Trades:  {s.get('total_trades', 0)}")

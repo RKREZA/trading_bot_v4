@@ -99,8 +99,6 @@ class PortfolioBacktester:
             state = self.checkpoint_manager.load_checkpoint()
             if state:
                 self.set_state(state)
-                # Restore each strategy instance state if present
-                # Logic: We assume the strategy states were part of the global snapshot or handled separately.
             else:
                 logger.warning("Resume requested but no checkpoint found. Starting from scratch.")
                 self.reset(sid_list)
@@ -111,22 +109,25 @@ class PortfolioBacktester:
         comm_per_lot = float(symbol_cfg.get("commission_per_lot", 7.0))
         
         # 1. Institutional Indicator Pre-calculation (IPC) - Step 4.2
-        # This eliminates the O(N^2) bottleneck by computing everything once.
         from core.indicator_engine import IndicatorEngine
-        target_tf_data.indicators = IndicatorEngine.precalculate_all(symbol, getattr(target_tf_data, "timeframe", "UNKNOWN"), target_tf_data)
-        m5_data.indicators = IndicatorEngine.precalculate_all(symbol, "M5", m5_data)
-        m15_data.indicators = IndicatorEngine.precalculate_all(symbol, "M15", m15_data)
-        h1_data.indicators = IndicatorEngine.precalculate_all(symbol, "H1", h1_data)
+        from rich.console import Console
+        console = Console()
+        
+        with console.status(f"[bold blue]Calibrating {symbol} Strategy Indicators...") as status:
+            target_tf_data.indicators = IndicatorEngine.precalculate_all(symbol, getattr(target_tf_data, "timeframe", "UNKNOWN"), target_tf_data)
+            m5_data.indicators = IndicatorEngine.precalculate_all(symbol, "M5", m5_data)
+            m15_data.indicators = IndicatorEngine.precalculate_all(symbol, "M15", m15_data)
+            h1_data.indicators = IndicatorEngine.precalculate_all(symbol, "H1", h1_data)
+            logger.info("Indicator Pre-calculation COMPLETED.")
 
         # Pre-flight data integrity check (Step 11)
         self._validate_data_alignment(target_tf_data, m1_data)
 
         # Main Loop: Step through target timeframe bars starting from current_index
-        # [ Institutional Sync ]: Date Tracking for Resets
         last_date = None
         pbar = tqdm(total=len(target_tf_data.time), initial=self.current_index)
         
-        for i in range(max(200, self.current_index), len(target_tf_data.time)):
+        for i in range(max(100, self.current_index), len(target_tf_data.time)):
             try:
                 self.current_index = i
                 pbar.update(1)
@@ -143,10 +144,8 @@ class PortfolioBacktester:
                 last_date = current_date
                 
                 # [ Institutional Fidelity ]: Zero-Copy Index Shifting
-                # Excludes the current i-th candle which is currently "forming"
                 target_tf_data.set_limit(i) 
                 
-                # Update sub-timeframes only if they are different objects (Safe Indexing)
                 if m5_data is not target_tf_data: m5_data.set_limit(self._get_tf_idx(m5_data, t, side="left"))
                 if m15_data is not target_tf_data: m15_data.set_limit(self._get_tf_idx(m15_data, t, side="left"))
                 if h1_data is not target_tf_data: h1_data.set_limit(self._get_tf_idx(h1_data, t, side="left"))
@@ -173,26 +172,18 @@ class PortfolioBacktester:
                 for strat in active_strategies:
                     sid = strat.strategy_id
                     
-                    # Hard Institutional Gating (Step 11.4): Max DR < 15%
-                    if RegimeGater.is_drawdown_gated(self.max_drawdowns.get(sid, 0)):
-                        continue
-
+                    if RegimeGater.is_drawdown_gated(self.max_drawdowns.get(sid, 0)): continue
                     if not RegimeGater.is_strategy_allowed(strat.__class__.__name__, regime): continue
                     if sid in self.open_trades: continue
                     
-                    # Generate Pulse
                     signal = strat.generate_signal(market_data)
                     
                     if signal and signal.direction != "NONE":
-                        # Validate Signal Confidence (Institutional Gating)
                         min_conf = getattr(strat, "min_confidence", 0.6)
-                        if signal.confidence < (min_conf + conf_buffer):
-                            continue
+                        if signal.confidence < (min_conf + conf_buffer): continue
                             
-                        # Risk Engineering (Step 6)
                         sl = strat.get_stop_loss(signal, market_data)
                         tp = strat.get_take_profit(signal, market_data)
-                        
                         sl_dist = abs(market_data.current_price - sl)
                         
                         if sl_dist > 0:
@@ -206,7 +197,6 @@ class PortfolioBacktester:
                             lot_size = lot_size * risk_mult
                             
                             if lot_size >= 0.01:
-                                # 4. Simulated Execution
                                 fill = self.simulator.simulate_entry(
                                     signal=signal,
                                     current_price=market_data.current_price,
@@ -214,7 +204,6 @@ class PortfolioBacktester:
                                     point=point
                                 )
                                 if fill:
-                                    # C3 FIX: Calculate and store entry commission
                                     entry_comm = lot_size * comm_per_lot
                                     fill.update({
                                         "sl": sl, 
@@ -225,12 +214,12 @@ class PortfolioBacktester:
                                         "entry_comm": entry_comm
                                     })
                                     self.open_trades[sid] = fill
-                                    logger.debug(f"[{sid}] Trade Entered: {fill['direction']} @ {fill['fill_price']:.5f} (Lots: {lot_size})")
+                                    logger.debug(f"[{sid}] Trade Entered: {fill['direction']} @ {fill['fill_price']:.5f}")
 
-                # 4. M1 Intra-Bar Execution (Step 4.3)
-                # Find M1 candles belonging to this target TF bar
+                # 4. M1 Intra-Bar Execution
                 m1_slice = self._get_m1_for_m5(m1_data, t)
-                self._manage_active_trades(m1_slice, tick_value, point, comm_per_lot, active_strategies)
+                if len(m1_slice) > 0:
+                    self._manage_active_trades(m1_slice, tick_value, point, comm_per_lot, active_strategies)
                 
                 # 5. Equity Sampling & Drawdown Track
                 for sid in self.balances:
@@ -239,7 +228,6 @@ class PortfolioBacktester:
                     self.max_drawdowns[sid] = max(self.max_drawdowns[sid], dd)
                     self.equity_history.append({"time": t, "strategy_id": sid, "equity": self.equities[sid]})
 
-                # 6. Crash Persistence System (Step 3.1) — Save every 100 bars to reduce I/O
                 if i % 100 == 0:
                     self.checkpoint_manager.save_checkpoint(self.get_state())
 
@@ -252,7 +240,7 @@ class PortfolioBacktester:
 
         pbar.close()
         self._force_close_at_end(target_tf_data, point, tick_value, comm_per_lot, active_strategies)
-        self.checkpoint_manager.clear_checkpoint() # Final cleanup
+        self.checkpoint_manager.clear_checkpoint()
         return self.history, self.equity_history
 
     def _manage_active_trades(self, m1_candles, tick_value, point, comm_per_lot, strategies):
@@ -267,33 +255,25 @@ class PortfolioBacktester:
                 spread = m1_candles.spread[m] * point
                 direction = trade["direction"]
                 
-                # Check Hits
                 exit_price = None
                 event = None
                 
                 if direction == "BUY":
-                    if m1_low <= trade["sl"]:
-                        exit_price, event = trade["sl"], "sl"
-                    elif m1_high >= trade["tp"]:
-                        exit_price, event = trade["tp"], "tp"
+                    if m1_low <= trade["sl"]: exit_price, event = trade["sl"], "sl"
+                    elif m1_high >= trade["tp"]: exit_price, event = trade["tp"], "tp"
                 else: # SELL
-                    if m1_high + spread >= trade["sl"]:
-                        exit_price, event = trade["sl"], "sl"
-                    elif m1_low + spread <= trade["tp"]:
-                        exit_price, event = trade["tp"], "tp"
+                    if m1_high + spread >= trade["sl"]: exit_price, event = trade["sl"], "sl"
+                    elif m1_low + spread <= trade["tp"]: exit_price, event = trade["tp"], "tp"
                 
                 if exit_price:
-                    # [ Step 4.1: Simulated Institutional Exit ]
                     final_exit, exit_slip = self.simulator.simulate_exit(trade, exit_price, point, event=event)
-                    
                     raw_diff = (final_exit - trade["fill_price"]) if direction == "BUY" else (trade["fill_price"] - final_exit)
                     gross_pnl = (raw_diff / point) * tick_value * trade["lots"]
                     exit_comm = trade["lots"] * comm_per_lot
                     entry_comm = trade.get("entry_comm", 0.0)
                     
-                    # C2 FIX: net_pnl subtracts BOTH entry and exit commissions
                     net_pnl = gross_pnl - entry_comm - exit_comm
-                    self.balances[sid] += net_pnl  # Balance uses full net PnL
+                    self.balances[sid] += net_pnl
                     self.equities[sid] = self.balances[sid]
                     
                     trade_record = {
@@ -308,7 +288,6 @@ class PortfolioBacktester:
                     self.history.append(trade_record)
                     self.risk_engine.update_history(net_pnl, self.equities[sid])
                     
-                    # Notify Strategy (Micro-service Isolation)
                     for s in strategies:
                         if s.strategy_id == sid:
                             s.on_trade_closed(trade_record)
@@ -317,7 +296,6 @@ class PortfolioBacktester:
                     del self.open_trades[sid]
                     is_closed = True
                 else:
-                    # Update Floating Equity
                     floating_price = m1_low if direction == "BUY" else m1_high
                     f_diff = (floating_price - trade["fill_price"]) if direction == "BUY" else (trade["fill_price"] - floating_price)
                     f_gross_pnl = (f_diff / point) * tick_value * trade["lots"]
@@ -325,25 +303,31 @@ class PortfolioBacktester:
 
     def _validate_data_alignment(self, m5, m1):
         """Ensures that M1 data covers the M5 range without gaps (Step 11)."""
+        if len(m5) == 0 or len(m1) == 0:
+            logger.warning(f"DATA ALIGNMENT SKIPPED: Missing timeframe slice.")
+            return
+
         if m5.time[-1] > m1.time[-1]:
             logger.critical(f"DATA ALIGNMENT ERROR: M1 data ({m1.time[-1]}) expires before M5 ({m5.time[-1]})")
             raise ValueError("CRITICAL_SYSTEM_ERROR: Data inconsistency.")
 
     def _get_tf_idx(self, tf_data, target_time, side: str = "right") -> int:
         """Returns the current index of a higher timeframe candle relative to target_time."""
+        if len(tf_data) == 0: return 0
         idx = np.searchsorted(tf_data.time, target_time, side=side)
         return max(0, idx)
 
     def _get_m1_for_m5(self, m1, target_time):
         """Returns M1 candles within the target timeframe bar window."""
+        if len(m1) == 0:
+            from core.common.types import CandleArray
+            return CandleArray.from_dicts([])
+
         idx_start = np.searchsorted(m1.time, target_time, side='left')
-        # Find next bar boundary by looking for next timestamp > target_time
-        # Use a safe upper bound based on available data
-        tf_seconds = 300  # Default M5 interval
-        next_bar_time = target_time + tf_seconds
+        next_bar_time = target_time + 300 
         idx_end = np.searchsorted(m1.time, next_bar_time, side='left')
         if idx_end <= idx_start:
-            idx_end = min(idx_start + 5, len(m1.time))  # Fallback
+            idx_end = min(idx_start + 5, len(m1.time))
         return m1[idx_start:idx_end]
 
     def _force_close_at_end(self, m5_data, point, tick_value, comm_per_lot, strategies):
