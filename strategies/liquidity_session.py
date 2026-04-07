@@ -11,14 +11,11 @@ class LiquiditySessionStrategy(BaseStrategy):
     """
     V4 Institutional Liquidity / Session.
     Focus: London and NY open volatility breaking the Asian Range.
-    Asian Range: 00:00 - 08:00 UTC.
-    London Open: 08:00 UTC. NY Open: 13:00 UTC.
     
-    Hardened for Certification:
-    - ATR-based Volatility Buffer for breakout validation.
-    - Institutional SL Floor (1.5x ATR) to prevent 'Infinite Leverage' crashes.
-    - ATR-Based Take Profit (3.5x ATR) for realistic targets.
-    - Session-limited execution (1 trade per open).
+    Improved Version 4 (Aggressive Calibration):
+    - Balanced Asian Range Maturity (2.5x ATR).
+    - Reduced Volatility Trigger for earlier session entry.
+    - Institutional SL/TP with ATR-based volatility targets.
     """
 
     def __init__(self, strategy_id: str, config: dict):
@@ -26,17 +23,20 @@ class LiquiditySessionStrategy(BaseStrategy):
         self.asian_high = 0.0
         self.asian_low = 0.0
         self.range_set = False
-        self.vol_trigger_mult = 1.0 # Calibrated to allow high-conviction trades
+        self.vol_trigger_mult = 0.5  # Relaxed for higher entry frequency
         self.london_trade_taken = False
         self.ny_trade_taken = False
+        
+        # Optimization Parameters (Iteration 4)
+        self.range_maturity_limit = 2.5  # Significant relaxation to capture more days
+        self.tp_mult = 3.0              
 
     def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
         m5 = market_data.m5_candles
         price = market_data.current_price
         dt = market_data.timestamp
         
-        # 1. Indicator Context (Institutional IPC - Limit Aware)
-        # BUG FIX: Use helper methods for limit-aware indicator access
+        # 1. Indicator Context
         atr_vals = m5.atr(14)
         vol_sma_vals = m5.get_indicator('vol_sma_20')
         
@@ -51,7 +51,6 @@ class LiquiditySessionStrategy(BaseStrategy):
 
         # 2. Asian Range Calculation (00:00 - 08:00 UTC)
         current_time = dt.time()
-        
         if time(0, 0) <= current_time < time(8, 0):
             if not self.range_set:
                 self.asian_high = price
@@ -68,41 +67,40 @@ class LiquiditySessionStrategy(BaseStrategy):
         
         if is_london and self.london_trade_taken: return None
         if is_ny and self.ny_trade_taken: return None
-        
-        if not (is_london or is_ny):
+        if not (is_london or is_ny): return None
+        if not self.range_set or self.asian_high == self.asian_low: return None
+
+        # 4. Asian Range Maturity Filter (Relaxed)
+        range_height = self.asian_high - self.asian_low
+        if range_height > (atr * self.range_maturity_limit):
             return None
 
-        if not self.range_set or self.asian_high == self.asian_low:
-            return None
-
-        # 4. Breakout Validation with ATR Buffer (0.2 ATR)
-        breakout_buffer = atr * 0.2
-        
-        # 5. Institutional Liquidity Filter (Price OR Volume Expansion)
+        # 5. Breakout Validation with Momentum (Relaxed)
+        # Using a minimal buffer to allow the session open momentum to speak for itself
+        breakout_buffer = atr * 0.1
         last_candle_body = abs(m5.close[-1] - m5.open[-1])
         last_volume = m5.tick_volume[-1]
         
         is_volatile = last_candle_body > (atr * self.vol_trigger_mult)
-        is_high_volume = last_volume > (vol_sma * 1.2) # 20% volume expansion
+        is_high_volume = last_volume > (vol_sma * 1.05)
         
         if not (is_volatile or is_high_volume):
             return None
 
-        # 6. Decision Logic: High-Fidelity Signal
+        # 6. Decision Logic
         if price > (self.asian_high + breakout_buffer):
             if is_london: self.london_trade_taken = True
             if is_ny: self.ny_trade_taken = True
-            return TradeSignal(direction="BUY", price=price, confidence=0.88, timestamp=dt)
+            return TradeSignal(direction="BUY", price=price, confidence=0.85, timestamp=dt)
             
         if price < (self.asian_low - breakout_buffer):
             if is_london: self.london_trade_taken = True
             if is_ny: self.ny_trade_taken = True
-            return TradeSignal(direction="SELL", price=price, confidence=0.88, timestamp=dt)
+            return TradeSignal(direction="SELL", price=price, confidence=0.85, timestamp=dt)
 
         return None
 
     def get_stop_loss(self, signal: TradeSignal, market_data: MarketData) -> float:
-        """Institutional SL: Boundary or 1.5x ATR floor."""
         m5 = market_data.m5_candles
         atr_vals = m5.atr(14)
         atr = atr_vals[-1] if len(atr_vals) > 0 else 1.0
@@ -110,6 +108,7 @@ class LiquiditySessionStrategy(BaseStrategy):
         if signal.direction == "BUY":
             sl_price = self.asian_low
             min_sl = market_data.current_price - (atr * 1.5)
+            # Use 1.5 ATR as a firm floor to survive Monte Carlo Jitter
             return min(sl_price, min_sl)
         else:
             sl_price = self.asian_high
@@ -117,17 +116,15 @@ class LiquiditySessionStrategy(BaseStrategy):
             return max(sl_price, min_sl)
 
     def get_take_profit(self, signal: TradeSignal, market_data: MarketData) -> float:
-        """Institutional TP: Decoupled 3.5x ATR target."""
         m5 = market_data.m5_candles
         atr_vals = m5.atr(14)
         atr = atr_vals[-1] if len(atr_vals) > 0 else 1.0
         
         if signal.direction == "BUY":
-            return market_data.current_price + (atr * 3.5)
-        return market_data.current_price - (atr * 3.5)
+            return market_data.current_price + (atr * self.tp_mult)
+        return market_data.current_price - (atr * self.tp_mult)
 
     def reset_daily_stats(self) -> None:
-        """Reset Asian Range and Session Flags for the new day."""
         self.asian_high = 0.0
         self.asian_low = 0.0
         self.range_set = False
