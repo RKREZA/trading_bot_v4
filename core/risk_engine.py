@@ -118,8 +118,14 @@ class RiskEngine:
     def _apply_broker_constraints(self, lot: float, symbol: str) -> float:
         sym_cfg = self.config.get("symbols_config", {}).get(symbol, {})
         min_lot = float(sym_cfg.get("min_lot", 0.01))
-        max_lot = float(sym_cfg.get("max_lot", 10.0))
+        max_lot = float(sym_cfg.get("max_lot", 100.0))
         step = float(sym_cfg.get("lot_step", 0.01))
+        
+        # Institutional 'Liquidity Clamp' (Rule 5.1)
+        # We cap absolute risk exposure at $50k Notional per lot standard (XAUUSD Example)
+        # This prevents 'Jackpot' outcomes on tiny SL runs.
+        clamp_cap = float(sym_cfg.get("max_liquidity_lot", 25.0))
+        max_lot = min(max_lot, clamp_cap)
         
         # Return 0.0 if lot is below minimum (reject trade, don't force it)
         if lot < min_lot:
