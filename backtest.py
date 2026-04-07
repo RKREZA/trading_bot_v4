@@ -84,6 +84,17 @@ class BacktestCLI:
             rprint("[bold red]Error:[/] Insufficient data for benchmark.")
             return
 
+        # [ Range Capping ]: Slice all timeframes by dt_to
+        to_ts = dt_to.timestamp()
+        m1 = m1[m1.time < to_ts]
+        m5 = m5[m5.time < to_ts]
+        m15 = m15[m15.time < to_ts]
+        h1 = h1[h1.time < to_ts]
+
+        if len(m5) < 10:
+             rprint("[bold red]Error:[/] Date range results in zero bars for simulation.")
+             return
+
         # 2. Strategy Loader (Step 9)
         strategies = self._build_strategies(strategy_filter, symbol=symbol)
         if not strategies:
@@ -149,7 +160,7 @@ class BacktestCLI:
 
         # 8. Robustness: Monte Carlo (Step 15/16)
         if run_monte_carlo and history:
-            self._run_monte_carlo(history)
+            self._run_monte_carlo(history, partition_initial)
             
         if self.config.get("backtest", {}).get("run_stress_test", False):
             self._run_stress_test(symbol, strategies, {"M1": m1, "M5": m5, "M15": m15, "H1": h1})
@@ -175,10 +186,10 @@ class BacktestCLI:
                 rprint(f"[bold yellow]Warning:[/] Failed to load {sid}: {e}")
         return strategies
 
-    def _run_monte_carlo(self, history):
+    def _run_monte_carlo(self, history, initial_balance=1000.0):
         rprint("\n[bold yellow]Institutional Robustness Audit: Running Monte Carlo Stress Suite (2500 paths)...[/]")
         mc = MonteCarloSimulator(iterations=2500)
-        res = mc.run(history)
+        res = mc.run(history, initial_balance=initial_balance)
         score = float(res.get("robustness_score", 0))
         
         # Institutional Standard: Score > 80.0 and Ruin == 0.0%

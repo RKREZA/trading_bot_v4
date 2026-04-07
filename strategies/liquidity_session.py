@@ -20,6 +20,7 @@ class LiquiditySessionStrategy(BaseStrategy):
         self.asian_high = 0.0
         self.asian_low = 0.0
         self.range_set = False
+        self.vol_trigger_mult = 1.5 # Volatility breakout multiplier
 
     def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
         m5 = market_data.m5_candles
@@ -42,11 +43,16 @@ class LiquiditySessionStrategy(BaseStrategy):
             return None
 
         # 2. Breakout Windows (London/NY Open)
-        # London: 08:00 - 10:00 | NY: 13:00 - 15:00
+        # London: 08:00 - 10:00 | NY: 13:00 - 16:00 (Extended)
         is_london = time(8, 0) <= current_time < time(10, 0)
-        is_ny = time(13, 0) <= current_time < time(15, 0)
+        is_ny = time(13, 0) <= current_time < time(16, 0)
         
-        if not (is_london or is_ny):
+        # 3. Volatility Pre-Check (Institutional Expansion)
+        atr = m5.atr(14)[-1]
+        last_candle_body = abs(m5[-1].close - m5[-1].open)
+        is_volatile = last_candle_body > (atr * self.vol_trigger_mult)
+
+        if not (is_london or is_ny or is_volatile):
             return None
 
         if not self.range_set or self.asian_high == self.asian_low:

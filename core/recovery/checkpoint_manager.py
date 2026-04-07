@@ -1,9 +1,24 @@
 import os
 import json
 import logging
+import datetime
+import numpy as np
 from typing import Dict, Any, Optional
 
 logger = logging.getLogger("trading_bot.recovery.checkpoint")
+
+class InstitutionalEncoder(json.JSONEncoder):
+    """Handles V4-ULTRA native types for JSON serialization."""
+    def default(self, obj):
+        if isinstance(obj, datetime.datetime):
+            return obj.isoformat()
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
 
 class CheckpointManager:
     """
@@ -24,7 +39,7 @@ class CheckpointManager:
         temp_path = self.main_state_path + ".tmp"
         try:
             with open(temp_path, "w") as f:
-                json.dump(state, f, indent=4)
+                json.dump(state, f, indent=4, cls=InstitutionalEncoder)
             
             # Atomic swap
             if os.path.exists(self.main_state_path):

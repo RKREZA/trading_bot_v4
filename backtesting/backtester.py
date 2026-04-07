@@ -147,9 +147,9 @@ class PortfolioBacktester:
                 target_tf_data.set_limit(i) 
                 
                 # Update sub-timeframes only if they are different objects (Safe Indexing)
-                if m5_data is not target_tf_data: m5_data.set_limit(self._get_tf_idx(m5_data, t))
-                if m15_data is not target_tf_data: m15_data.set_limit(self._get_tf_idx(m15_data, t))
-                if h1_data is not target_tf_data: h1_data.set_limit(self._get_tf_idx(h1_data, t))
+                if m5_data is not target_tf_data: m5_data.set_limit(self._get_tf_idx(m5_data, t, side="left"))
+                if m15_data is not target_tf_data: m15_data.set_limit(self._get_tf_idx(m15_data, t, side="left"))
+                if h1_data is not target_tf_data: h1_data.set_limit(self._get_tf_idx(h1_data, t, side="left"))
                 
                 # 1. Regime Detection & Gating
                 regime_info = self.regime_detector.detect(target_tf_data)
@@ -329,9 +329,9 @@ class PortfolioBacktester:
             logger.critical(f"DATA ALIGNMENT ERROR: M1 data ({m1.time[-1]}) expires before M5 ({m5.time[-1]})")
             raise ValueError("CRITICAL_SYSTEM_ERROR: Data inconsistency.")
 
-    def _get_tf_idx(self, tf_data, target_time) -> int:
+    def _get_tf_idx(self, tf_data, target_time, side: str = "right") -> int:
         """Returns the current index of a higher timeframe candle relative to target_time."""
-        idx = np.searchsorted(tf_data.time, target_time, side="right")
+        idx = np.searchsorted(tf_data.time, target_time, side=side)
         return max(0, idx)
 
     def _get_m1_for_m5(self, m1, target_time):

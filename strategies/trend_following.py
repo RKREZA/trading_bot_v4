@@ -18,7 +18,8 @@ class TrendFollowingStrategy(BaseStrategy):
         self.ema_fast = 50
         self.ema_slow = 200
         self.adx_period = 14
-        self.adx_threshold = 25
+        self.adx_threshold = 32 # Increased to ensure strong trend
+        self.vol_exclusion_mult = 2.0 # Prevent entering parabolic exhaustion
         self.proximity_atr_mult = 1.5
 
     def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
@@ -27,10 +28,10 @@ class TrendFollowingStrategy(BaseStrategy):
         Requires H1 and M15 agreement before M5 entry.
         """
         # 1. MTF Alignment Check (Consensus)
-        # Optimized for V4 Benchmark: Requires H1 Bias agreement
         h1_trend = self.get_ema_trend(market_data.htf_candles)
-        if h1_trend == 0:
-            return None
+        m15_trend = self.get_ema_trend(market_data.m15_candles)
+        if h1_trend == 0 or m15_trend != h1_trend:
+            return None # Requires H1/M15 consensus
 
         # 2. Local M5 Entry Logic
         m5 = market_data.m5_candles
@@ -42,15 +43,21 @@ class TrendFollowingStrategy(BaseStrategy):
         if np.isnan(adx) or adx < self.adx_threshold:
             return None # Trend is too weak
         
-        # 4. Price Proximity Guard (Phase 2 Hardening)
+        # 4. Price Proximity & Volatility Guard (Phase 2 Hardening)
         ema50 = m5.ema(self.ema_fast)[-1]
-        atr = m5.atr(14)[-1]
+        atr_vals = m5.atr(14)
+        atr = atr_vals[-1]
+        avg_atr = np.mean(atr_vals[-14:])
         price = market_data.current_price
         
-        # We don't want to "chase" a trend that is already too far from the EMA 50
+        # Volatility Spike Check: Don't enter if market is "exploding" (Mean Reversion Risk)
+        if atr > (avg_atr * self.vol_exclusion_mult):
+            return None
+
+        # Distance from EMA: Don't chase
         dist_from_ema = abs(price - ema50)
         if dist_from_ema > (atr * self.proximity_atr_mult):
-            return None # Price is overextended/chasing
+            return None # Price is overextended
             
         # 5. Decision Logic (Subordinated to HTF)
         reasons = [f"ADX: {adx:.1f}"]

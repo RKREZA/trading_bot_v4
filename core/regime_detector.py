@@ -28,11 +28,12 @@ class RegimeDetector:
         if len(candles) < self.adx_period * 2:
             return RegimeInfo(MarketRegime.UNCERTAIN, VolatilityStatus.NORMAL, 0.0, 0.0, 0.0)
 
-        adx = self._calculate_adx(candles)
-        atr = self._calculate_atr(candles)
+        # Optimization: Use pre-calculated indicators from IndicatorEngine if available
+        adx = candles.get_indicator(f"adx_{self.adx_period}")[-1] if f"adx_{self.adx_period}" in candles.indicators else self._calculate_adx(candles)
+        atr = candles.get_indicator(f"atr_{self.atr_period}")[-1] if f"atr_{self.atr_period}" in candles.indicators else self._calculate_atr(candles)
         
-        all_tr = self._calculate_all_tr(candles)
-        atr_series = self._ema(all_tr, self.atr_period)
+        # We still need the series for volatility ratio
+        atr_series = candles.get_indicator(f"atr_{self.atr_period}") if f"atr_{self.atr_period}" in candles.indicators else self._ema(self._calculate_all_tr(candles), self.atr_period)
         avg_atr = np.mean(atr_series[-100:]) if len(atr_series) >= 100 else atr
         
         vol_ratio = atr / avg_atr if avg_atr > 0 else 1.0
@@ -57,7 +58,7 @@ class RegimeDetector:
         return RegimeInfo(market_type, vol_status, conf_type, adx, atr)
 
     def _calculate_adx(self, candles) -> float:
-        h, l, c = candles.high, candles.low, candles.close
+        h, l, c = candles.h, candles.l, candles.c
         up_move = h[1:] - h[:-1]
         down_move = l[:-1] - l[1:]
         
@@ -75,12 +76,12 @@ class RegimeDetector:
         return float(adx[-1])
 
     def _calculate_atr(self, candles) -> float:
-        h, l, c = candles.high, candles.low, candles.close
+        h, l, c = candles.h, candles.l, candles.c
         tr = np.maximum(h[1:] - l[1:], np.maximum(np.abs(h[1:] - c[:-1]), np.abs(l[1:] - c[:-1])))
         return float(np.mean(tr[-self.atr_period:]))
 
     def _calculate_all_tr(self, candles):
-        h, l, c = candles.high, candles.low, candles.close
+        h, l, c = candles.h, candles.l, candles.c
         tr = np.maximum(h[1:] - l[1:], np.maximum(np.abs(h[1:] - c[:-1]), np.abs(l[1:] - c[:-1])))
         return tr
 

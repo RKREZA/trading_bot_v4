@@ -16,7 +16,8 @@ class BreakoutStrategy(BaseStrategy):
     def __init__(self, strategy_id: str, config: dict):
         super().__init__(strategy_id, config)
         self.lookback = 20
-        self.body_thresh = 0.85 # Institutional Grade
+        self.body_thresh = 0.75 # Relaxed for higher frequency
+        self.h1_strength_thresh = 0.60
         self.min_confidence = 0.75
 
     def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
@@ -26,6 +27,9 @@ class BreakoutStrategy(BaseStrategy):
         """
         # 1. MTF Confirmation (H1 / M15) / Volume Consensus
         h1_candles = market_data.htf_candles
+        if len(h1_candles) < 22: # Min for volume SMA + 1 for current
+            return None
+            
         h1 = h1_candles[-1]
         m15_trend = self.get_ema_trend(market_data.m15_candles)
         
@@ -36,8 +40,9 @@ class BreakoutStrategy(BaseStrategy):
         h1_dir = 1 if h1.close > h1.open else -1
         
         # H1 Volume Confirmation (Consensus Validation)
+        # Fix: h1_v[-1] is the bar that just finished in our corrected backtester
         h1_v = h1_candles.v
-        h1_vol_sma = np.mean(h1_v[-21:-1]) if len(h1_v) > 20 else 0
+        h1_vol_sma = np.mean(h1_v[-21:-1]) # Avg of 20 bars BEFORE h1
         vol_confirmed = h1.tick_volume > h1_vol_sma
         
         m5 = market_data.m5_candles
@@ -57,7 +62,7 @@ class BreakoutStrategy(BaseStrategy):
 
         # 4. Integrated Decision Logic
         reasons = []
-        if h1_strength > 0.7: reasons.append(f"H1: Ultra-Strong {'Bullish' if h1_dir == 1 else 'Bearish'} ({h1_strength:.2f})")
+        if h1_strength > 0.6: reasons.append(f"H1: Strong {'Bullish' if h1_dir == 1 else 'Bearish'} ({h1_strength:.2f})")
         if m5_strength > self.body_thresh: reasons.append(f"M5: Institutional Break ({m5_strength:.2f})")
         if vol_confirmed: reasons.append("Volume: Above Average (Institutional Presence)")
         
@@ -65,14 +70,14 @@ class BreakoutStrategy(BaseStrategy):
         elif price < r_low: reasons.append("Price: Below Range Low")
         else: reasons.append("Price: Inside Range")
 
-        # BUY: Price > High AND Strength > 85% AND H1 Bullish + Ultra-Strong AND M15 NOT Bearish AND Volume OK
+        # BUY: Price > High AND Strength > 75% AND H1 Bullish + Strong AND M15 NOT Bearish AND Volume OK
         if price > r_high and m5_strength >= self.body_thresh:
-            if h1_dir == 1 and h1_strength > 0.7 and m15_trend != -1 and vol_confirmed:
+            if h1_dir == 1 and h1_strength >= self.h1_strength_thresh and m15_trend != -1 and vol_confirmed:
                 return TradeSignal(direction="BUY", price=price, confidence=0.95, timestamp=market_data.timestamp, reasons=reasons)
         
-        # SELL: Price < Low AND Strength > 85% AND H1 Bearish + Ultra-Strong AND M15 NOT Bullish AND Volume OK
+        # SELL: Price < Low AND Strength > 75% AND H1 Bearish + Strong AND M15 NOT Bullish AND Volume OK
         if price < r_low and m5_strength >= self.body_thresh:
-            if h1_dir == -1 and h1_strength > 0.7 and m15_trend != 1 and vol_confirmed:
+            if h1_dir == -1 and h1_strength >= self.h1_strength_thresh and m15_trend != 1 and vol_confirmed:
                 return TradeSignal(direction="SELL", price=price, confidence=0.95, timestamp=market_data.timestamp, reasons=reasons)
 
         # Fallback: Report Bias

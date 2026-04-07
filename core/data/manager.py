@@ -53,7 +53,15 @@ class DataManager:
         # Repair Loop: Up to 3 attempts
         for attempt in range(3):
             array = self.store.load(symbol, timeframe)
+            
+            # Institutional Constraint Check (Step 2.5): Does cache cover requested start?
+            if len(array) > 0 and array.time[0] > start_ts:
+                logger.warning(f"DataManager: Cache for {symbol} [{timeframe}] starts at {datetime.datetime.fromtimestamp(array.time[0])}, but {start_date} was requested. Triggering Backfill.")
+                self.sync.sync_full_history(symbol, timeframe, start_date)
+                array = self.store.load(symbol, timeframe)
+
             idx_start = np.searchsorted(array.time, start_ts)
+            # If start_ts is before the first bar, idx_start is 0
             safe_idx_start = max(0, idx_start - 210)
             relevant_array = array[safe_idx_start:]
             

@@ -97,7 +97,12 @@ class CandleArray:
         return self.limit
     
     def slice(self, start: int, end: int) -> "CandleArray":
-        """Returns a new CandleArray window. Use sparingly (O(N) copy)."""
+        """Returns a new CandleArray window. Preserves indicators (O(N) copy)."""
+        new_indicators = {}
+        for name, arr in self.indicators.items():
+            if len(arr) >= end:
+                new_indicators[name] = arr[start:end]
+        
         return CandleArray(
             time=self.time[start:end],
             open=self.open[start:end],
@@ -105,7 +110,8 @@ class CandleArray:
             low=self.low[start:end],
             close=self.close[start:end],
             tick_volume=self.tick_volume[start:end],
-            spread=self.spread[start:end]
+            spread=self.spread[start:end],
+            indicators=new_indicators
         )
 
     def __getitem__(self, idx):

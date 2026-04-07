@@ -17,8 +17,10 @@ class MeanReversionStrategy(BaseStrategy):
         super().__init__(strategy_id, config)
         self.rsi_period = 14
         self.bb_period = 20
-        self.bb_std = 2.0  # Increased for higher conviction
-        self.atr_threshold_mult = 2.5 # Max atr allowed relative to mean
+        self.bb_std = 2.5  # Increased for higher conviction
+        self.adx_cap = 35 # Don't fade strong trends
+        self.max_trigger_body_pct = 0.75 # Don't enter on high-momentum candles
+        self.atr_threshold_mult = 2.5
         self.loss_cooldown = 0
         self.last_loss_time = 0
 
@@ -37,7 +39,12 @@ class MeanReversionStrategy(BaseStrategy):
         rsi_vals = m5.rsi(self.rsi_period)
         rsi = rsi_vals[-1] if len(rsi_vals) > 0 else np.nan
         
-        # 3. ATR Volatility Guard (Phase 2 Hardening)
+        # 3. Trend Intensity Guard (ADX Cap)
+        adx_vals = m5.adx(14)
+        if len(adx_vals) == 0 or adx_vals[-1] > self.adx_cap:
+            return None # Trend is too strong to mean revert
+
+        # 4. ATR Volatility Guard (Phase 2 Hardening)
         atr_vals = m5.atr(14)
         if len(atr_vals) < 14 or np.isnan(rsi):
             return None
@@ -45,15 +52,20 @@ class MeanReversionStrategy(BaseStrategy):
         current_atr = atr_vals[-1]
         avg_atr = np.mean(atr_vals[-14:])
         if current_atr > (avg_atr * self.atr_threshold_mult):
-            # Market is moved too fast (Parabolic), Mean Reversion is high risk
             return None
 
-        # 4. Loss Cooldown Check
+        # 5. Candle Momentum Guard (Don't fade huge candles)
+        last = m5[-1]
+        body_pct = abs(last.close - last.open) / (last.high - last.low) if (last.high - last.low) > 0 else 0
+        if body_pct > self.max_trigger_body_pct:
+            return None
+
+        # 6. Loss Cooldown Check
         if self.loss_cooldown > 0:
             self.loss_cooldown -= 1
             return None
         
-        # 5. Bollinger Bands (20, 2)
+        # 7. Bollinger Bands (20, 2.5)
         upper_vals, lower_vals, _ = m5.bollinger_bands(self.bb_period, self.bb_std)
         upper, lower = upper_vals[-1], lower_vals[-1]
         if np.isnan(upper) or np.isnan(lower):
