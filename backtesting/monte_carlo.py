@@ -81,20 +81,30 @@ class MonteCarloSimulator:
         }
 
     def _calculate_robustness_score(self, history, worst_dd, ruin_prob):
-        """Calculates a 0-100 score for strategy professional readiness."""
+        """
+        Institutional Robustness Scoring (V4-ULTRA).
+        Targets: Worst Case DD < 15%, Probability of Ruin = 0.00%
+        """
         if not history: return 0
         
         # Base score starts at 100
-        score = 100
+        score = 100.0
         
-        # DD Penalty (Institutional target < 15%)
-        if worst_dd > 15: score -= (worst_dd - 15) * 2
+        # 1. DD Penalty (Institutional target < 15%)
+        # Exponential penalty for exceeding the 15% threshold
+        if worst_dd > 15:
+            excess = worst_dd - 15
+            score -= (excess ** 1.5) * 2.5
         
-        # Ruin Penalty
-        score -= ruin_prob * 5
+        # 2. Ruin Penalty (Extreme sensitivity to ruin)
+        # Any non-zero ruin probability is a major failure.
+        if ruin_prob > 0:
+            score -= (ruin_prob * 10) + 50 # Massive haircut
         
-        # Sample size bonus/penalty
-        if len(history) < 50: score -= (50 - len(history))
+        # 3. Sample Size Filter
+        # Institutional certification requires at least 150 trades for statistical significance
+        if len(history) < 150:
+            score -= (150 - len(history)) * 0.2
         
         return max(0, min(100, round(score, 1)))
 

@@ -172,6 +172,11 @@ class PortfolioBacktester:
                 # 3. Micro-service Strategy Replay
                 for strat in active_strategies:
                     sid = strat.strategy_id
+                    
+                    # Hard Institutional Gating (Step 11.4): Max DR < 15%
+                    if RegimeGater.is_drawdown_gated(self.max_drawdowns.get(sid, 0)):
+                        continue
+
                     if not RegimeGater.is_strategy_allowed(strat.__class__.__name__, regime): continue
                     if sid in self.open_trades: continue
                     

@@ -41,9 +41,16 @@ class ExecutionSimulator:
         Simulates institutional trade entry (Step 4.4).
         """
         # 1. Spread Check (Step 4.5)
-        # Variable spread simulation: base_spread + random noise (up to 20% of base)
-        # base_spread_points is assumed to be in RAW POINTS (e.g. 500 for XAUUSD $5.00 spread)
-        current_spread_pts = base_spread_points * (1.0 + self._rng.uniform(0, 0.2))
+        # Variable spread simulation: base_spread + random noise + Stress Spikes
+        spread_mult = 1.0 + self._rng.uniform(0, 0.2)
+        
+        # Institutional Stress: 5% chance of a 2x-5x spread spike (Liquidity Gap)
+        if self._rng.random() < 0.05:
+            spike = self._rng.uniform(2.0, 5.0)
+            spread_mult *= spike
+            logger.debug(f"!!! SPREAD SPIKE DETECTED: {spike:.1f}x Expansion !!!")
+
+        current_spread_pts = base_spread_points * spread_mult
         spread_price = current_spread_pts * point
         
         # Human-readable pips for gating (Institutional Standard: 10 pts = 1 pip)

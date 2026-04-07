@@ -47,3 +47,13 @@ class RegimeGater:
         if volatility == VolatilityStatus.LOW:
             return 0.15
         return 0.0
+
+    @staticmethod
+    def is_drawdown_gated(max_dd: float, threshold: float = 15.0) -> bool:
+        """
+        Hard Institutional Gate: Disable strategy if Max DD exceeds threshold.
+        Default threshold: 15.0%
+        """
+        if max_dd > threshold:
+            return True
+        return False

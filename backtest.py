@@ -176,23 +176,38 @@ class BacktestCLI:
         return strategies
 
     def _run_monte_carlo(self, history):
-        rprint("\n[bold yellow]Robustness Audit: Running Monte Carlo Simulation (2000 paths)...[/]")
-        mc = MonteCarloSimulator(iterations=2000)
+        rprint("\n[bold yellow]Institutional Robustness Audit: Running Monte Carlo Stress Suite (2500 paths)...[/]")
+        mc = MonteCarloSimulator(iterations=2500)
         res = mc.run(history)
         score = float(res.get("robustness_score", 0))
-        is_robust = score >= 40.0
         
-        mc_table = Table(title="Monte Carlo Institutional Robustness Report", show_header=False, padding=(0, 2))
+        # Institutional Standard: Score > 80.0 and Ruin == 0.0%
+        ruin_text = res.get("probability_of_ruin", "100%")
+        ruin_prob = float(ruin_text.replace("%", ""))
+        is_robust = (score >= 80.0) and (ruin_prob == 0.0)
+        
+        mc_table = Table(title="V4-ULTRA Institutional Robustness Certification", show_header=False, padding=(0, 2))
         for k, v in res.items():
+            k_display = k.replace("_", " ").title()
             if k == "robustness_score":
                 score_color = "green" if is_robust else "red"
-                mc_table.add_row(k.replace("_", " ").title(), f"[{score_color}]{v}/100[/]")
+                mc_table.add_row(k_display, f"[{score_color}]{v}/100[/]")
+            elif k == "probability_of_ruin":
+                ruin_color = "green" if ruin_prob == 0.0 else "red"
+                mc_table.add_row(k_display, f"[{ruin_color}]{v}[/]")
             else:
-                mc_table.add_row(k.replace("_", " ").title(), str(v))
+                mc_table.add_row(k_display, str(v))
         
         if not is_robust:
-            rprint("\n[bold red]!!! HARD CONSTRAINT VIOLATION: CURVE-FITTING DETECTED !!![/]")
-        self.console.print(Panel(mc_table, border_style="yellow" if is_robust else "red", title="Robustness Audit"))
+            rprint("\n[bold red]!!! AUDIT FAILURE: STRATEGY REJECTED FOR PRODUCTION !!![/]")
+            if ruin_prob > 0:
+                rprint("[bold red]Reason: Non-Zero Probability of Ruin detected under Execution Shock.[/]")
+            elif score < 80:
+                rprint(f"[bold red]Reason: Robustness Score ({score}) below institutional floor (80.0).[/]")
+        else:
+            rprint("\n[bold green]*** AUDIT PASSED: STRATEGY CERTIFIED FOR INSTITUTIONAL DEPLOYMENT ***[/]")
+
+        self.console.print(Panel(mc_table, border_style="bright_green" if is_robust else "red", title="Robustness Certification"))
         return is_robust
 
     def _run_stress_test(self, symbol, strategies, data):

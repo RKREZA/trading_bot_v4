@@ -16,15 +16,17 @@ class BreakoutStrategy(BaseStrategy):
     def __init__(self, strategy_id: str, config: dict):
         super().__init__(strategy_id, config)
         self.lookback = 20
-        self.body_thresh = 0.70
+        self.body_thresh = 0.85 # Institutional Grade
+        self.min_confidence = 0.75
 
     def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
         """
         Institutional MTF Breakout (Step 11).
         Requires H1 Momentum and M15 Trend alignment.
         """
-        # 1. MTF Confirmation (H1 / M15)
-        h1 = market_data.htf_candles[-1]
+        # 1. MTF Confirmation (H1 / M15) / Volume Consensus
+        h1_candles = market_data.htf_candles
+        h1 = h1_candles[-1]
         m15_trend = self.get_ema_trend(market_data.m15_candles)
         
         # H1 Candle Body Strength
@@ -32,6 +34,11 @@ class BreakoutStrategy(BaseStrategy):
         h1_body = abs(h1.close - h1.open)
         h1_strength = (h1_body / h1_candle_range) if h1_candle_range > 0 else 0
         h1_dir = 1 if h1.close > h1.open else -1
+        
+        # H1 Volume Confirmation (Consensus Validation)
+        h1_v = h1_candles.v
+        h1_vol_sma = np.mean(h1_v[-21:-1]) if len(h1_v) > 20 else 0
+        vol_confirmed = h1.tick_volume > h1_vol_sma
         
         m5 = market_data.m5_candles
         if len(m5) < self.lookback + 1:
@@ -50,22 +57,23 @@ class BreakoutStrategy(BaseStrategy):
 
         # 4. Integrated Decision Logic
         reasons = []
-        if h1_strength > 0.5: reasons.append(f"H1: Strong {'Bullish' if h1_dir == 1 else 'Bearish'} ({h1_strength:.2f})")
-        if m5_strength > self.body_thresh: reasons.append(f"M5: Solid Body ({m5_strength:.2f})")
+        if h1_strength > 0.7: reasons.append(f"H1: Ultra-Strong {'Bullish' if h1_dir == 1 else 'Bearish'} ({h1_strength:.2f})")
+        if m5_strength > self.body_thresh: reasons.append(f"M5: Institutional Break ({m5_strength:.2f})")
+        if vol_confirmed: reasons.append("Volume: Above Average (Institutional Presence)")
         
         if price > r_high: reasons.append("Price: Above Range High")
         elif price < r_low: reasons.append("Price: Below Range Low")
         else: reasons.append("Price: Inside Range")
 
-        # BUY: Price > High AND Strength > 70% AND H1 Bullish + Strong AND M15 NOT Bearish
+        # BUY: Price > High AND Strength > 85% AND H1 Bullish + Ultra-Strong AND M15 NOT Bearish AND Volume OK
         if price > r_high and m5_strength >= self.body_thresh:
-            if h1_dir == 1 and h1_strength > 0.5 and m15_trend != -1:
-                return TradeSignal(direction="BUY", price=price, confidence=0.9, timestamp=market_data.timestamp, reasons=reasons)
+            if h1_dir == 1 and h1_strength > 0.7 and m15_trend != -1 and vol_confirmed:
+                return TradeSignal(direction="BUY", price=price, confidence=0.95, timestamp=market_data.timestamp, reasons=reasons)
         
-        # SELL: Price < Low AND Strength > 70% AND H1 Bearish + Strong AND M15 NOT Bullish
+        # SELL: Price < Low AND Strength > 85% AND H1 Bearish + Ultra-Strong AND M15 NOT Bullish AND Volume OK
         if price < r_low and m5_strength >= self.body_thresh:
-            if h1_dir == -1 and h1_strength > 0.5 and m15_trend != 1:
-                return TradeSignal(direction="SELL", price=price, confidence=0.9, timestamp=market_data.timestamp, reasons=reasons)
+            if h1_dir == -1 and h1_strength > 0.7 and m15_trend != 1 and vol_confirmed:
+                return TradeSignal(direction="SELL", price=price, confidence=0.95, timestamp=market_data.timestamp, reasons=reasons)
 
         # Fallback: Report Bias
         return TradeSignal(direction="NONE", price=price, confidence=0.5, reasons=reasons)
@@ -76,8 +84,8 @@ class BreakoutStrategy(BaseStrategy):
         atr = atr_vals[-1] if len(atr_vals) > 0 and not np.isnan(atr_vals[-1]) else 1.0
         
         if signal.direction == "BUY":
-            return min(last.low, market_data.current_price - (atr * 1.5))
-        return max(last.high, market_data.current_price + (atr * 1.5))
+            return min(last.low, market_data.current_price - (atr * 2.5))
+        return max(last.high, market_data.current_price + (atr * 2.5))
 
     def get_take_profit(self, signal: TradeSignal, market_data: MarketData) -> float:
         sl_price = self.get_stop_loss(signal, market_data)
