@@ -31,6 +31,9 @@ class StrategyOrchestrator:
         self.notification_manager = notification_manager
         self.broker_clock = broker_clock
         
+        from core.news_filter import InstitutionalNewsFilter
+        self.news_filter = InstitutionalNewsFilter(self.config)
+        
         self.portfolio_manager = PortfolioManager(self.config)
         self.last_cycle_time: Optional[datetime] = None
         self.last_analysis: Dict[str, Any] = {}
@@ -52,13 +55,23 @@ class StrategyOrchestrator:
         market_type = regime_info.market_type
         volatility = regime_info.volatility
         
+        ts = market_data.timestamp.timestamp()
+        blocking_event = self.news_filter.is_blocked(symbol, ts)
+        
         # Pulse Telemetry Initialization
         pulse_report = {
             "regime": regime_info,
             "strategies": {},
             "execution": [],
+            "news_blocked": blocking_event,
+            "upcoming_news": [e["title"] for e in self.news_filter.get_upcoming_events(ts, 4)],
             "timestamp": market_data.timestamp.strftime("%H:%M:%S")
         }
+
+        # Hard Block Check
+        if blocking_event or is_news_blocked:
+            logger.info(f"Cycle Skip: {symbol} is blocked by news ({blocking_event})")
+            return pulse_report
         
         # 3. ACTIVATE RELEVANT STRATEGIES (Regime Gating)
         from core.regime_gater import RegimeGater
@@ -228,6 +241,29 @@ class StrategyOrchestrator:
         """Propagates daily reset and balance sync to all strategy runtimes."""
         for runtime in self.runtimes:
             runtime.reset_daily(new_balance)
+
+    def close_before_news(self, current_time: float):
+        """
+        Institutional Risk Reduction.
+        Flattens positions for currencies with upcoming high-impact news.
+        """
+        targets = self.news_filter.get_auto_close_targets(current_time)
+        if not targets:
+            return
+            
+        logger.info(f"News: Proactive Risk Reduction for currencies: {targets}")
+        
+        # Flatten positions for affected currencies
+        all_positions = self.position_manager.get_open_positions()
+        for pos in all_positions:
+            symbol = pos.symbol
+            # Check if any currency in the symbol is in targets
+            is_affected = any(curr in symbol for curr in targets)
+            if is_affected:
+                logger.warning(f"[NEWS CLOSE] Flattening {symbol} (Ticket: {pos.ticket}) before high-impact event.")
+                self.connection.close_position(pos.ticket, symbol)
+                if self.notification_manager:
+                    self.notification_manager.send_alert(f"NEWS BLOCK: Proactive closure of {symbol} @ {pos.price_open}")
 
     def __repr__(self):
         return f"<StrategyOrchestrator(runtimes={len(self.runtimes)})>"

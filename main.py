@@ -14,7 +14,7 @@ from core.connection import MT5Connection, PositionManager
 from core.data_handler import DataFetcher
 from core.strategy_orchestrator import StrategyOrchestrator
 from core.portfolio_manager import PortfolioManager
-from core.news_filter import SimpleNewsFilter
+from core.news_filter import InstitutionalNewsFilter
 from core.session_detector import SessionDetector
 from core.base_strategy import MarketData
 from core.strategy_runtime import StrategyRuntime
@@ -50,7 +50,7 @@ class LiveOrchestrator:
 
         # 2. INSTANTIATE MICRO-SERVICES
         self.data_manager = DataFetcher()
-        self.news_filter = SimpleNewsFilter()
+        self.news_filter = InstitutionalNewsFilter(self.config)
         self.order_manager = OrderManager(self.config)
         
         # 3. CONSTRUCT RUNTIMES
@@ -148,9 +148,12 @@ class LiveOrchestrator:
                         timestamp=dt_server
                     )
 
-                    # 3. Parallel Execution Logic
-                    is_news_blocked = self.news_filter.is_blocked(dt_server.timestamp())
-                    pulse_report = self.orchestrator.execute_cycle(self.symbol, md, is_news_blocked=is_news_blocked)
+                    # 3. Proactive Risk Reduction (Step 19)
+                    self.orchestrator.close_before_news(dt_server.timestamp())
+
+                    # 4. Parallel Execution Logic
+                    is_news_blocked = self.news_filter.is_blocked(self.symbol, dt_server.timestamp())
+                    pulse_report = self.orchestrator.execute_cycle(self.symbol, md, is_news_blocked=bool(is_news_blocked))
                     
                     # 4. UI SYNCHRONIZATION
                     raw_positions = self.pos_manager.get_open_positions()

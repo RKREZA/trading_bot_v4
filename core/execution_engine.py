@@ -30,8 +30,8 @@ class ExecutionEngine:
         self.deterministic = bool(bt_cfg.get("deterministic", False) or exe_cfg.get("deterministic", False))
         self.random_seed = exe_cfg.get("random_seed", bt_cfg.get("random_seed"))
 
-        from core.news_filter import SimpleNewsFilter
-        self.news_filter = SimpleNewsFilter()
+        from core.news_filter import InstitutionalNewsFilter
+        self.news_filter = InstitutionalNewsFilter(config)
 
         self._rng = random.Random()
         self.reset_rng(self.random_seed)
@@ -61,8 +61,9 @@ class ExecutionEngine:
 
         # Institutional Guard: News Filter (Step 15 Refinement)
         ts = timestamp if timestamp else time.time()
-        if self.news_filter.is_blocked(ts):
-            logger.warning("EX_ENGINE: Trading blocked due to high-impact economic noise.")
+        blocking_event = self.news_filter.is_blocked(symbol, ts)
+        if blocking_event:
+            logger.warning(f"[NEWS BLOCK] Trade rejected for {symbol} due to {blocking_event}")
             return None
 
         entry_slip = self.sample_slippage_points(point, event="entry")
