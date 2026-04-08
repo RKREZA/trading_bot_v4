@@ -48,3 +48,5 @@ performance_report.csv
 br.log
 btr.log
 /data_cache
+/state
+state/backtest_state.json

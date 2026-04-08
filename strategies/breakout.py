@@ -16,9 +16,9 @@ class BreakoutStrategy(BaseStrategy):
     def __init__(self, strategy_id: str, config: dict):
         super().__init__(strategy_id, config)
         self.lookback = 20
-        self.body_thresh = 0.75 # Relaxed for higher frequency
-        self.h1_strength_thresh = 0.60
-        self.min_confidence = 0.75
+        self.body_thresh = 0.65 # Relaxed from 0.75
+        self.h1_strength_thresh = 0.50 # Relaxed from 0.60
+        self.min_confidence = 0.70 # Relaxed from 0.75
 
     def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
         """
@@ -27,7 +27,8 @@ class BreakoutStrategy(BaseStrategy):
         """
         # 1. MTF Confirmation (H1 / M15) / Volume Consensus
         h1_candles = market_data.htf_candles
-        if len(h1_candles) < 22: # Min for volume SMA + 1 for current
+        if len(h1_candles) < 22: 
+            self.last_rejection_reason = "Breakout: H1 Insufficient data"
             return None
             
         h1 = h1_candles[-1]
@@ -42,11 +43,15 @@ class BreakoutStrategy(BaseStrategy):
         # H1 Volume Confirmation (Consensus Validation)
         # Fix: h1_v[-1] is the bar that just finished in our corrected backtester
         h1_v = h1_candles.v
-        h1_vol_sma = np.mean(h1_v[-21:-1]) # Avg of 20 bars BEFORE h1
+        h1_vol_sma = np.mean(h1_v[-21:-1]) 
         vol_confirmed = h1.tick_volume > h1_vol_sma
+        if not vol_confirmed:
+            self.last_rejection_reason = "Breakout: H1 Volume Spike missing"
+            # We don't return None yet, as it's checked later, but we track it.
         
         m5 = market_data.m5_candles
         if len(m5) < self.lookback + 1:
+            self.last_rejection_reason = "Breakout: M5 Insufficient data"
             return None
 
         # 2. Local Range Calculation
@@ -79,6 +84,15 @@ class BreakoutStrategy(BaseStrategy):
         if price < r_low and m5_strength >= self.body_thresh:
             if h1_dir == -1 and h1_strength >= self.h1_strength_thresh and m15_trend != 1 and vol_confirmed:
                 return TradeSignal(direction="SELL", price=price, confidence=0.95, timestamp=market_data.timestamp, reasons=reasons)
+        
+        # Diagnostics
+        if price > r_high or price < r_low:
+             if m5_strength < self.body_thresh: self.last_rejection_reason = f"Breakout: M5 Strength too low ({m5_strength:.2f})"
+             elif h1_strength < self.h1_strength_thresh: self.last_rejection_reason = f"Breakout: H1 Strength too low ({h1_strength:.2f})"
+             elif not vol_confirmed: self.last_rejection_reason = "Breakout: Volume not confirmed"
+             else: self.last_rejection_reason = "Breakout: MTF/Dir Mismatch"
+        else:
+             self.last_rejection_reason = "Breakout: Price inside range"
 
         # Fallback: Report Bias
         return TradeSignal(direction="NONE", price=price, confidence=0.5, reasons=reasons)

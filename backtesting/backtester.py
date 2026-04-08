@@ -178,43 +178,55 @@ class PortfolioBacktester:
                     
                     signal = strat.generate_signal(market_data)
                     
-                    if signal and signal.direction != "NONE":
-                        min_conf = getattr(strat, "min_confidence", 0.6)
-                        if signal.confidence < (min_conf + conf_buffer): continue
-                            
-                        sl = strat.get_stop_loss(signal, market_data)
-                        tp = strat.get_take_profit(signal, market_data)
-                        sl_dist = abs(market_data.current_price - sl)
+                    if not signal or signal.direction == "NONE":
+                        if self.config.get("backtest", {}).get("debug_signals"):
+                            reason = getattr(strat, "last_rejection_reason", "No specific reason")
+                            logger.info(f"[{dt}] [{sid}] Signal REJECTED: {reason}")
+                        continue
                         
-                        if sl_dist > 0:
-                            lot_size = self.risk_engine.calculate_lot_size(
-                                balance=self.balances[sid],
-                                stop_loss_distance=sl_dist,
-                                point=point,
-                                tick_value=tick_value,
-                                symbol=symbol
-                            )
-                            lot_size = lot_size * risk_mult
+                    min_conf = getattr(strat, "min_confidence", 0.6)
+                    if signal.confidence < (min_conf + conf_buffer):
+                        if self.config.get("backtest", {}).get("debug_signals"):
+                            logger.info(f"[{dt}] [{sid}] Confidence REJECTED: {signal.confidence:.2f} < {min_conf + conf_buffer:.2f}")
+                        continue
                             
-                            if lot_size >= 0.01:
-                                fill = self.simulator.simulate_entry(
-                                    signal=signal,
-                                    current_price=market_data.current_price,
-                                    base_spread_points=float(target_tf_data.spread[i]),
-                                    point=point
-                                )
-                                if fill:
-                                    entry_comm = lot_size * comm_per_lot
-                                    fill.update({
-                                        "sl": sl, 
-                                        "tp": tp, 
-                                        "strategy_id": sid, 
-                                        "lots": lot_size, 
-                                        "session": market_data.session,
-                                        "entry_comm": entry_comm
-                                    })
-                                    self.open_trades[sid] = fill
-                                    logger.debug(f"[{sid}] Trade Entered: {fill['direction']} @ {fill['fill_price']:.5f}")
+                    sl = strat.get_stop_loss(signal, market_data)
+                    tp = strat.get_take_profit(signal, market_data)
+                    sl_dist = abs(market_data.current_price - sl)
+                    
+                    if sl_dist > 0:
+                        lot_size = self.risk_engine.calculate_lot_size(
+                            balance=self.balances[sid],
+                            stop_loss_distance=sl_dist,
+                            point=point,
+                            tick_value=tick_value,
+                            symbol=symbol
+                        )
+                        lot_size = lot_size * risk_mult
+                        
+                        if lot_size >= 0.01:
+                            fill = self.simulator.simulate_entry(
+                                signal=signal,
+                                current_price=market_data.current_price,
+                                base_spread_points=float(target_tf_data.spread[i]),
+                                point=point
+                            )
+                            if fill:
+                                entry_comm = lot_size * comm_per_lot
+                                fill.update({
+                                    "sl": sl, 
+                                    "tp": tp, 
+                                    "strategy_id": sid, 
+                                    "lots": lot_size, 
+                                    "session": market_data.session,
+                                    "entry_comm": entry_comm
+                                })
+                                self.open_trades[sid] = fill
+                                logger.info(f"[{sid}] Trade Entered: {fill['direction']} @ {fill['fill_price']:.5f}")
+                            elif self.config.get("backtest", {}).get("debug_signals"):
+                                logger.info(f"[{dt}] [{sid}] Execution REJECTED: Simulator denied entry (Spread/Slip)")
+                        elif self.config.get("backtest", {}).get("debug_signals"):
+                             logger.info(f"[{dt}] [{sid}] Risk REJECTED: Lot size {lot_size:.3f} < 0.01")
 
                 # 4. M1 Intra-Bar Execution
                 m1_slice = self._get_m1_for_m5(m1_data, t)

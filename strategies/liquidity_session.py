@@ -28,8 +28,9 @@ class LiquiditySessionStrategy(BaseStrategy):
         self.ny_trade_taken = False
         
         # Optimization Parameters (Iteration 4)
-        self.range_maturity_limit = 2.5  # Significant relaxation to capture more days
+        self.range_maturity_limit = 4.0  # Relaxed from 2.5 to 4.0 for Gold
         self.tp_mult = 3.0              
+        self.min_confidence = 0.70 # Relaxed from 0.85
 
     def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
         m5 = market_data.m5_candles
@@ -47,6 +48,7 @@ class LiquiditySessionStrategy(BaseStrategy):
         vol_sma = vol_sma_vals[-1]
         
         if np.isnan(atr) or atr <= 0 or np.isnan(vol_sma) or vol_sma <= 0:
+            self.last_rejection_reason = "Liquidity: Missing Indicators (ATR/VOL)"
             return None
 
         # 2. Asian Range Calculation (00:00 - 08:00 UTC)
@@ -65,14 +67,23 @@ class LiquiditySessionStrategy(BaseStrategy):
         is_london = time(8, 0) <= current_time < time(11, 0)
         is_ny = time(13, 0) <= current_time < time(17, 0)
         
-        if is_london and self.london_trade_taken: return None
-        if is_ny and self.ny_trade_taken: return None
-        if not (is_london or is_ny): return None
-        if not self.range_set or self.asian_high == self.asian_low: return None
+        if is_london and self.london_trade_taken: 
+            self.last_rejection_reason = "Liquidity: London trade already taken"
+            return None
+        if is_ny and self.ny_trade_taken: 
+            self.last_rejection_reason = "Liquidity: NY trade already taken"
+            return None
+        if not (is_london or is_ny): 
+            self.last_rejection_reason = "Liquidity: Outside session windows"
+            return None
+        if not self.range_set or self.asian_high == self.asian_low: 
+            self.last_rejection_reason = "Liquidity: Asian range not set"
+            return None
 
         # 4. Asian Range Maturity Filter (Relaxed)
         range_height = self.asian_high - self.asian_low
         if range_height > (atr * self.range_maturity_limit):
+            self.last_rejection_reason = f"Liquidity: Asian Range too mature ({range_height/atr:.1f}x ATR)"
             return None
 
         # 5. Breakout Validation with Momentum (Relaxed)
@@ -85,6 +96,7 @@ class LiquiditySessionStrategy(BaseStrategy):
         is_high_volume = last_volume > (vol_sma * 1.05)
         
         if not (is_volatile or is_high_volume):
+            self.last_rejection_reason = f"Liquidity: Insufficient Breakout Momentum (Vol={last_candle_body/atr:.2f}x ATR)"
             return None
 
         # 6. Decision Logic
@@ -98,6 +110,7 @@ class LiquiditySessionStrategy(BaseStrategy):
             if is_ny: self.ny_trade_taken = True
             return TradeSignal(direction="SELL", price=price, confidence=0.85, timestamp=dt)
 
+        self.last_rejection_reason = "Liquidity: Price inside breakout buffer"
         return None
 
     def get_stop_loss(self, signal: TradeSignal, market_data: MarketData) -> float:

@@ -18,9 +18,9 @@ class TrendFollowingStrategy(BaseStrategy):
         self.ema_fast = 50
         self.ema_slow = 200
         self.adx_period = 14
-        self.adx_threshold = 32 # Increased to ensure strong trend
-        self.vol_exclusion_mult = 2.0 # Prevent entering parabolic exhaustion
-        self.proximity_atr_mult = 1.5
+        self.adx_threshold = 25 # Relaxed from 32
+        self.vol_exclusion_mult = 3.0 # Relaxed from 2.0
+        self.proximity_atr_mult = 2.0 # Relaxed from 1.5
 
     def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
         """
@@ -30,8 +30,12 @@ class TrendFollowingStrategy(BaseStrategy):
         # 1. MTF Alignment Check (Consensus)
         h1_trend = self.get_ema_trend(market_data.htf_candles)
         m15_trend = self.get_ema_trend(market_data.m15_candles)
-        if h1_trend == 0 or m15_trend != h1_trend:
-            return None # Requires H1/M15 consensus
+        if h1_trend == 0:
+            self.last_rejection_reason = "Trend: H1 Neutral"
+            return None 
+        if m15_trend != h1_trend:
+            self.last_rejection_reason = "Trend: M15 non-consensus"
+            return None
 
         # 2. Local M5 Entry Logic
         m5 = market_data.m5_candles
@@ -41,7 +45,8 @@ class TrendFollowingStrategy(BaseStrategy):
         # 3. ADX Intensity Filter (Phase 2 Hardening)
         adx = m5.adx(self.adx_period)[-1]
         if np.isnan(adx) or adx < self.adx_threshold:
-            return None # Trend is too weak
+            self.last_rejection_reason = f"Trend: ADX too weak ({adx:.1f} < {self.adx_threshold})"
+            return None 
         
         # 4. Price Proximity & Volatility Guard (Phase 2 Hardening)
         ema50 = m5.ema(self.ema_fast)[-1]
@@ -52,12 +57,14 @@ class TrendFollowingStrategy(BaseStrategy):
         
         # Volatility Spike Check: Don't enter if market is "exploding" (Mean Reversion Risk)
         if atr > (avg_atr * self.vol_exclusion_mult):
+            self.last_rejection_reason = f"Trend: Volatility Spike ({atr/avg_atr:.1f}x)"
             return None
 
         # Distance from EMA: Don't chase
         dist_from_ema = abs(price - ema50)
         if dist_from_ema > (atr * self.proximity_atr_mult):
-            return None # Price is overextended
+            self.last_rejection_reason = f"Trend: Overextended ({dist_from_ema/atr:.1f} ATR)"
+            return None 
             
         # 5. Decision Logic (Subordinated to HTF)
         reasons = [f"ADX: {adx:.1f}"]
@@ -66,7 +73,8 @@ class TrendFollowingStrategy(BaseStrategy):
         
         if h1_trend == -1 and m5_trend == -1 and price < ema50:
             return TradeSignal(direction="SELL", price=price, confidence=0.85, timestamp=market_data.timestamp, reasons=reasons)
-
+        
+        self.last_rejection_reason = "Trend: M5 non-alignment"
         return None
 
     def get_stop_loss(self, signal: TradeSignal, market_data: MarketData) -> float:

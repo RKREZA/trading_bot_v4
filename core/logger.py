@@ -96,6 +96,19 @@ def setup_logging(log_dir: str = "logs", level: int = logging.INFO, console: boo
     file_handler = RotatingFileHandler(
         log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
     )
+    
+    def log_namer(default_name):
+        """
+        Custom namer for log rotation to format as trading_bot_X.log instead of trading_bot.log.X
+        """
+        if not (default_name.split('.')[-1]).isdigit():
+            return default_name
+            
+        base, ext = os.path.splitext(file_handler.baseFilename)
+        index = default_name.split('.')[-1]
+        return f"{base}_{index}{ext}"
+        
+    file_handler.namer = log_namer
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(StructuredFormatter(datefmt="%Y-%m-%d %H:%M:%S"))
     

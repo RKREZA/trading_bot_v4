@@ -49,7 +49,8 @@ class BacktestCLI:
         run_stress_test: bool = False,
         seed: Optional[int] = None,
         deterministic: Optional[bool] = None,
-        resume: bool = False
+        resume: bool = False,
+        debug_signals: bool = False
     ):
         setup_logging()
         if not self.connection.connect():
@@ -142,6 +143,9 @@ class BacktestCLI:
         if deterministic is not None:
             runtime_backtest["deterministic"] = bool(deterministic)
         runtime_config["backtest"] = runtime_backtest
+        if debug_signals:
+            runtime_config["backtest"]["debug_signals"] = True
+            rprint("[bold yellow]DIAGNOSTIC MODE ENABLED: Signal rejection reasons will be logged.[/]")
 
         backtester = PortfolioBacktester(runtime_config)
         history, equity_history = backtester.run(symbol, strategies, primary_data, h1, m15, m5, m1, resume=resume)
@@ -283,6 +287,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--deterministic", choices=["on", "off"], default=None)
     parser.add_argument("--resume", action="store_true", help="Resume from last crash checkpoint")
+    parser.add_argument("--debug-signals", action="store_true", help="Log reason for every signal rejection")
 
     args = parser.parse_args()
     cli = BacktestCLI()
@@ -290,4 +295,4 @@ if __name__ == "__main__":
         cli.config.setdefault("backtest", {})["run_stress_test"] = True
 
     cli.run(args.symbol, args.start_date, args.end_date, args.strategy, args.monte_carlo, args.walk_forward, args.stress_test, args.seed, 
-            None if args.deterministic is None else (args.deterministic == "on"), resume=args.resume)
+            None if args.deterministic is None else (args.deterministic == "on"), resume=args.resume, debug_signals=args.debug_signals)

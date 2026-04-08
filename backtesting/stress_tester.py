@@ -59,10 +59,17 @@ class StressTester:
             for s in scenario_strategies:
                 s.enabled = True
                 
-            # Inject slippage multiplier directly into execution engine
-            bt.execution_engine.slippage_multiplier = params["slip_mult"]
+            # Inject slippage multiplier directly into simulator
+            mult = params["slip_mult"]
+            bt.simulator.entry_slip_pips *= mult
+            bt.simulator.tp_exit_slip_pips *= mult
+            bt.simulator.sl_exit_slip_pips *= mult
             
-            history, equity_history = bt.run(symbol, scenario_strategies, m5, h1, m15, m1)
+            # Resolve target timeframe data
+            target_tf = self.config.get("symbols_config", {}).get(symbol, {}).get("backtest_timeframe", "M5")
+            target_tf_data = m5 if target_tf == "M5" else (m15 if target_tf == "M15" else h1)
+            
+            history, equity_history = bt.run(symbol, scenario_strategies, target_tf_data, h1, m15, m5, m1)
             
             partition_initial = float(self.config.get("initial_balance", 1000.0))
             total_initial = len(strategies) * partition_initial

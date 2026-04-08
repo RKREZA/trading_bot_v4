@@ -70,6 +70,7 @@ class BaseStrategy(ABC):
         self.strategy_id = strategy_id
         self.config = config
         self.enabled = config.get("enabled", True)
+        self.last_rejection_reason = ""
         
         # Institutional Gating Attributes
         self.min_confidence = float(config.get("min_confidence", 0.6))
@@ -125,17 +126,21 @@ class BaseStrategy(ABC):
         
         # Institutional Gating: Use pre-calculation validity instead of length check
         if len(ema_fast) == 0 or len(ema_slow) == 0:
+            self.last_rejection_reason = "EMA: No data"
             return 0
             
         f_val, s_val = ema_fast[-1], ema_slow[-1]
         
         if np.isnan(f_val) or np.isnan(s_val):
+            self.last_rejection_reason = "EMA: NaN"
             return 0
             
         if f_val > s_val:
             return 1
         elif f_val < s_val:
             return -1
+        
+        self.last_rejection_reason = "EMA: Neutral"
         return 0
 
     def check_mtf_consensus(self, market_data: MarketData) -> bool:
