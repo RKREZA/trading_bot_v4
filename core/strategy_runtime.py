@@ -90,6 +90,9 @@ class StrategyRuntime:
             
             logger.info(f"[{self.strategy_id}] Trade Closed. PnL: {realized_pnl:.2f} | Bal: {self.balance:.2f} | DD: {self.drawdown_pct:.1f}%")
             
+            # FIX: Propagate trade result to RiskGuardian for equity history tracking
+            self.risk_guardian.record_trade_result(realized_pnl, self.equity)
+            
         self.strategy.on_trade_closed(trade_record)
 
     def reset_daily(self, new_balance: float):

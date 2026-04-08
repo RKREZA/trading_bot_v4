@@ -132,8 +132,8 @@ class StrategyOrchestrator:
             allowed, reason = risk_guardian.check_governance(current_balance, current_equity)
             if not allowed:
                 if reason == "EMERGENCY_FLATTEN_REQUIRED":
-                    logger.critical(f"CIRCUIT BREAKER: {reason}. Liquidating all positions for {symbol}!")
-                    self.flatten_all_positions(symbol)
+                    logger.critical(f"CIRCUIT BREAKER: {reason}. Liquidating all positions!")
+                    self.flatten_all_positions() # Global flatten
                 else:
                     logger.warning(f"Flow HALTED: {reason}")
                 return pulse_report
@@ -297,19 +297,20 @@ class StrategyOrchestrator:
                 if self.notification_manager:
                     self.notification_manager.send_alert(f"NEWS BLOCK: Proactive closure of {symbol} @ {pos.price_open}")
 
-    def flatten_all_positions(self, symbol: str):
+    def flatten_all_positions(self, symbol: str = None):
         """
         Emergency Liquidation.
-        Closes all open positions for the specified symbol immediately.
+        Closes all open positions immediately (globally if no symbol specified).
         """
-        logger.critical(f"EMERGENCY FLATTEN: Closing all positions for {symbol}")
+        target = symbol if symbol else "ALL SYMBOLS"
+        logger.critical(f"EMERGENCY FLATTEN: Closing all positions for {target}")
         all_positions = self.position_manager.get_open_positions(symbol)
         for pos in all_positions:
-            success = self.connection.close_position(pos.ticket, symbol)
+            success = self.connection.close_position(pos.ticket, pos.symbol)
             if success:
-                logger.info(f"Emergency closed position {pos.ticket}")
+                logger.info(f"Emergency closed position {pos.ticket} ({pos.symbol})")
             else:
-                logger.error(f"Failed to emergency close position {pos.ticket}")
+                logger.error(f"Failed to emergency close position {pos.ticket} ({pos.symbol})")
         
     def _trailing_stop_loop(self):
         """Background thread for high-frequency stop management."""
