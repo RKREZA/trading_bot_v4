@@ -98,6 +98,19 @@ class MeanReversionStrategy(BaseStrategy):
             self.loss_cooldown = 3
             logger.info(f"[{self.strategy_id}] Loss detected. Cooldown activated.")
 
+    def get_metrics(self, market_data: MarketData) -> dict:
+        m5 = market_data.m5_candles
+        rsi_vals = m5.rsi(self.rsi_period)
+        adx_vals = m5.adx(14)
+        upper, lower, _ = m5.bollinger_bands(self.bb_period, self.bb_std)
+        
+        return {
+            "rsi": rsi_vals[-1] if len(rsi_vals) > 0 else 0,
+            "adx": adx_vals[-1] if len(adx_vals) > 0 else 0,
+            "bb_upper": upper[-1] if len(upper) > 0 else 0,
+            "bb_lower": lower[-1] if len(lower) > 0 else 0
+        }
+
     def get_stop_loss(self, signal: TradeSignal, market_data: MarketData) -> float:
         atr_vals = market_data.m5_candles.atr(14)
         atr = atr_vals[-1] if len(atr_vals) > 0 and not np.isnan(atr_vals[-1]) else 1.0

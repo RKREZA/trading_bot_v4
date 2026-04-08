@@ -1,6 +1,6 @@
 import numpy as np
 import logging
-from typing import Optional
+from typing import Optional, Dict, Any
 from core.base_strategy import BaseStrategy, MarketData
 from core.common.types import TradeSignal
 
@@ -103,6 +103,53 @@ class BreakoutStrategy(BaseStrategy):
 
         # Fallback: Report Bias
         return TradeSignal(direction="NONE", price=price, confidence=0.5, reasons=reasons)
+
+    def get_metrics(self, market_data: MarketData) -> Dict[str, Any]:
+        if not market_data.htf_candles or len(market_data.htf_candles) < 22:
+            return {}
+            
+        h1 = market_data.htf_candles[-1]
+        m5 = market_data.m5_candles
+        price = market_data.current_price
+        
+        h1_candle_range = h1.high - h1.low
+        h1_body = abs(h1.close - h1.open)
+        h1_strength = (h1_body / h1_candle_range) if h1_candle_range > 0 else 0
+        
+        h1_v = market_data.htf_candles.v
+        h1_vol_sma = np.mean(h1_v[-21:-1])
+        minutes_into_hour = market_data.timestamp.minute
+        completion_pct = max(0.05, (minutes_into_hour + 1) / 60.0)
+        dynamic_threshold = h1_vol_sma * completion_pct
+        
+        if len(m5) < self.lookback + 1:
+            return {"H1 Strength": h1_strength, "H1 Volume": h1.tick_volume}
+
+        prev_range = m5[-self.lookback-1:-1]
+        r_high = np.max(prev_range.high)
+        r_low = np.min(prev_range.low)
+        last = m5[-1]
+        m5_range = last.high - last.low
+        m5_strength = (abs(last.close - last.open) / m5_range) if m5_range > 0 else 0
+        
+        price_state = "Inside Range"
+        if price > r_high: price_state = "Break High"
+        elif price < r_low: price_state = "Break Low"
+        
+        return {
+            "H1 Body": h1_strength,
+            "M5 Body": m5_strength,
+            "Volume": h1.tick_volume / dynamic_threshold if dynamic_threshold > 0 else 0,
+            "Range": price_state
+        }
+
+    def get_thresholds(self) -> Dict[str, Any]:
+        return {
+            "H1 Body": f"> {self.h1_strength_thresh:.2f}",
+            "M5 Body": f"> {self.body_thresh:.2f}",
+            "Volume": "> 1.0x",
+            "Range": "Breakout"
+        }
 
     def get_stop_loss(self, signal: TradeSignal, market_data: MarketData) -> float:
         last = market_data.m5_candles[-1]

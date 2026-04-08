@@ -200,7 +200,8 @@ class PortfolioBacktester:
                             stop_loss_distance=sl_dist,
                             point=point,
                             tick_value=tick_value,
-                            symbol=symbol
+                            symbol=symbol,
+                            price=market_data.current_price
                         )
                         lot_size = lot_size * risk_mult
                         

@@ -94,6 +94,15 @@ class BaseStrategy(ABC):
         """Calculate the absolute price for Take Profit."""
         ...
 
+    @abstractmethod
+    def get_metrics(self, market_data: MarketData) -> Dict[str, Any]:
+        """Returns live metrics used for strategy decision making."""
+        ...
+
+    def get_thresholds(self) -> Dict[str, Any]:
+        """Returns target thresholds from strategy configuration."""
+        return self.config
+
     def on_trade_closed(self, trade_record: dict) -> None:
         pass
 

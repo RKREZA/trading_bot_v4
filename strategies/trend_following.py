@@ -1,6 +1,6 @@
 import numpy as np
 import logging
-from typing import Optional
+from typing import Optional, Dict, Any
 from core.base_strategy import BaseStrategy, MarketData
 from core.common.types import TradeSignal
 
@@ -43,7 +43,11 @@ class TrendFollowingStrategy(BaseStrategy):
         m5_trend = self.get_ema_trend(m5)
         
         # 3. ADX Intensity Filter (Phase 2 Hardening)
-        adx = m5.adx(self.adx_period)[-1]
+        adx_vals = m5.adx(self.adx_period)
+        if len(adx_vals) == 0:
+            self.last_rejection_reason = "Trend: No ADX data"
+            return None
+        adx = adx_vals[-1]
         if np.isnan(adx) or adx < self.adx_threshold:
             self.last_rejection_reason = f"Trend: ADX too weak ({adx:.1f} < {self.adx_threshold})"
             return None 
@@ -76,6 +80,33 @@ class TrendFollowingStrategy(BaseStrategy):
         
         self.last_rejection_reason = "Trend: M5 non-alignment"
         return None
+
+    def get_metrics(self, market_data: MarketData) -> Dict[str, Any]:
+        m5 = market_data.m5_candles
+        adx_vals = m5.adx(self.adx_period)
+        adx = adx_vals[-1] if len(adx_vals) > 0 else 0
+        ema_vals = m5.ema(self.ema_fast)
+        ema50 = ema_vals[-1] if len(ema_vals) > 0 else 0
+        atr_vals = m5.atr(14)
+        if len(atr_vals) < 14 or ema50 == 0: return {}
+        
+        atr = atr_vals[-1]
+        avg_atr = np.mean(atr_vals[-14:])
+        price = market_data.current_price
+        dist_from_ema = abs(price - ema50)
+        
+        return {
+            "ADX": adx,
+            "Vol Spike": atr/avg_atr if avg_atr > 0 else 0,
+            "EMA Dist": dist_from_ema/atr if atr > 0 else 0
+        }
+
+    def get_thresholds(self) -> Dict[str, Any]:
+        return {
+            "ADX": f"> {self.adx_threshold}",
+            "Vol Spike": f"< {self.vol_exclusion_mult}x",
+            "EMA Dist": f"< {self.proximity_atr_mult}x"
+        }
 
     def get_stop_loss(self, signal: TradeSignal, market_data: MarketData) -> float:
         atr_vals = market_data.m5_candles.atr(14)

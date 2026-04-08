@@ -1,6 +1,7 @@
 import logging
 from typing import List, Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, timezone
+import threading
 
 from core.strategy_runtime import StrategyRuntime
 from core.portfolio_manager import PortfolioManager
@@ -23,16 +24,15 @@ class StrategyOrchestrator:
                  connection,
                  position_manager, 
                  notification_manager,
-                 broker_clock):
+                 broker_clock,
+                 news_filter):
         self.runtimes = runtimes
         self.config = config
         self.connection = connection
         self.position_manager = position_manager
         self.notification_manager = notification_manager
         self.broker_clock = broker_clock
-        
-        from core.news_filter import InstitutionalNewsFilter
-        self.news_filter = InstitutionalNewsFilter(self.config)
+        self.news_filter = news_filter
         
         self.portfolio_manager = PortfolioManager(self.config)
         self.last_cycle_time: Optional[datetime] = None
@@ -40,7 +40,6 @@ class StrategyOrchestrator:
         self._analysis_lock = threading.Lock() # Fix: Lock for thread-safe cross-thread state access
 
         # Asynchronous Trailing Stop Management (Rule 3.1)
-        import threading
         self._stop_thread = threading.Thread(target=self._trailing_stop_loop, daemon=True)
         self._stop_thread.start()
 
@@ -65,12 +64,17 @@ class StrategyOrchestrator:
         blocking_event = self.news_filter.is_blocked(symbol, ts)
         
         # Pulse Telemetry Initialization
+        upcoming_obj = self.news_filter.get_upcoming_events(ts, 4)
+        for ev in upcoming_obj:
+            ev['time'] = datetime.fromtimestamp(ev['timestamp'], tz=timezone.utc).strftime("%H:%M")
+            
         pulse_report = {
             "regime": regime_info,
             "strategies": {},
             "execution": [],
             "news_blocked": blocking_event,
-            "upcoming_news": [e["title"] for e in self.news_filter.get_upcoming_events(ts, 4)],
+            "upcoming_news": [e["title"] for e in upcoming_obj],
+            "upcoming_news_obj": upcoming_obj,
             "timestamp": market_data.timestamp.strftime("%H:%M:%S")
         }
         
@@ -101,8 +105,12 @@ class StrategyOrchestrator:
             sid = runtime.strategy_id
             sig = runtime.strategy.generate_signal(market_data)
             
-            # Telemetry: Record Full Signal (including Reasons)
-            pulse_report["strategies"][sid] = sig if sig else "NONE"
+            # Telemetry: Record Full Signal (including Comparative Metrics)
+            pulse_report["strategies"][sid] = {
+                "signal": sig if sig else "NONE",
+                "metrics": runtime.strategy.get_metrics(market_data),
+                "thresholds": runtime.strategy.get_thresholds()
+            }
             
             if sig and sig.direction != "NONE":
                 # Attach SL for risk validation

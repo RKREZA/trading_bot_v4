@@ -113,6 +113,15 @@ class LiquiditySessionStrategy(BaseStrategy):
         self.last_rejection_reason = "Liquidity: Price inside breakout buffer"
         return None
 
+    def get_metrics(self, market_data: MarketData) -> dict:
+        return {
+            "asian_high": self.asian_high,
+            "asian_low": self.asian_low,
+            "range_set": self.range_set,
+            "london_trade_taken": self.london_trade_taken,
+            "ny_trade_taken": self.ny_trade_taken
+        }
+
     def get_stop_loss(self, signal: TradeSignal, market_data: MarketData) -> float:
         m5 = market_data.m5_candles
         atr_vals = m5.atr(14)

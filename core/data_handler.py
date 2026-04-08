@@ -152,6 +152,8 @@ class DataFetcher:
                         temp_count //= 2
             
             if rates is None or len(rates) == 0:
+                err = mt5.last_error()
+                logger.error("MT5 Fetch Empty (%s %s): %s", symbol, timeframe, err)
                 return cached["array"] if cached else CandleArray.from_dicts([])
 
             # Convert to dicts
@@ -163,7 +165,7 @@ class DataFetcher:
                 candles = self._merge_candles(cached["data"], new_candles, count)
             else:
                 candles = new_candles
-
+            
             # Update cache with thread safety
             array = CandleArray.from_dicts(candles)
             with self._cache_lock:
@@ -312,9 +314,16 @@ class DataFetcher:
             actual_diff = diffs[idx]
             missing = int((actual_diff / expected_diff) - 1)
             
-            # Is it a weekend? (roughly 48h+)
-            is_weekend = actual_diff >= 172800 
-            if not is_weekend:
+            # Refined Gap Classification (Institutional Alignment)
+            # Weekend: 48h+
+            # Session Break: 5min to 2h (Daily Close)
+            # Ghost Candle: 2h to 48h (Actual Data Integrity Loss)
+            if actual_diff >= 172800:
+                gap_type = "WEEKEND"
+            elif actual_diff <= 14400: # 4 Hour tolerance for all institutional session closures
+                gap_type = "SESSION_BREAK"
+            else:
+                gap_type = "GHOST"
                 ghost_candles_found = True
                 
             missing_total += missing
@@ -322,14 +331,18 @@ class DataFetcher:
                 "from": datetime.datetime.fromtimestamp(candles.time[idx], tz=datetime.timezone.utc),
                 "to": datetime.datetime.fromtimestamp(candles.time[idx+1], tz=datetime.timezone.utc),
                 "missing": missing,
-                "type": "WEEKEND" if is_weekend else "GHOST"
+                "type": gap_type
             })
             
         status = "OK"
         if ghost_candles_found:
             status = "CRITICAL"
+            logger.error("MT5 Integrity Failure: %d ghost candles detected (Gaps > 2h)", missing_total)
         elif missing_total > (len(candles) * 0.05):
             status = "WARNING"
+            logger.warning("MT5 Integrity Warning: High missing candle count (%d)", missing_total)
+        else:
+            logger.info("MT5 Integrity Check: OK (%d gaps, mostly session breaks)", len(gaps))
             
         return {
             "status": status,

@@ -1,83 +1,136 @@
-import time
+"""
+TRADING BOT V4 — Stress Test Suite
+==================================
+Institutional "Worst Case" execution simulation.
+Evaluates strategy robustness under toxic market conditions (high spread, high slippage).
+"""
+
 import logging
-from unittest.mock import MagicMock
-from core.strategy_orchestrator import StrategyOrchestrator
-from core.common.types import MarketRegime, VolatilityStatus
+import copy
+from typing import List, Dict, Any
+from backtesting.backtester import PortfolioBacktester
+from core.performance_tracker import PerformanceTracker
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("stress_test")
+logger = logging.getLogger("trading_bot.stress_test")
 
-class MockPosition:
-    def __init__(self, ticket, symbol, price_open, sl, tp, type):
-        self.ticket = ticket
-        self.symbol = symbol
-        self.price_open = price_open
-        self.sl = sl
-        self.tp = tp
-        self.type = type # 0 for BUY, 1 for SELL
+class StressTester:
+    """
+    V4 Institutional Stress Tester.
+    Runs multiple backtest passes with degraded execution conditions.
+    """
 
-def run_stress_test():
-    logger.info("Starting Institutional Stress Test: Connection Recovery Logic")
-    
-    # 1. Setup Mock environment
-    config = {
-        "magic_number": 234000,
-        "trailing_stop": {
-            "enabled": True,
-            "phase1_rr_threshold": 1.5,
-            "phase2_be_offset_pct": 0.1,
-            "phase3_trail_mult": 1.5
-        },
-        "symbols_config": {
-            "XAUUSDm": {"min_lot": 0.01, "max_lot": 20.0, "lot_step": 0.01, "point": 0.01}
+    def __init__(self, config: Dict):
+        self.config = config
+
+    def run_stress_test(self, symbol: str, strategies: list, data: dict) -> Dict[str, Dict]:
+        """
+        Executes a battery of stress scenarios.
+        
+        Args:
+            symbol (str): Trading pair.
+            strategies (list): List of strategy instances.
+            data (dict): Dict containing CandleArrays for all timeframes.
+            
+        Returns:
+            Dict[str, Dict]: Results for each scenario.
+        """
+        results = {}
+        
+        # 1. Baseline Performance
+        logger.info("Stress Test: Running Baseline Scenario...")
+        baseline_history, baseline_equity = self._run_pass(symbol, strategies, data, self.config)
+        baseline_metrics = PerformanceTracker.calculate_metrics(
+            baseline_history, 
+            len(strategies) * 1000.0, 
+            equity_curve=self._aggregate_equity(baseline_equity, len(strategies))
+        )
+        baseline_profit = baseline_metrics.get("net_profit", 0.0)
+        
+        results["baseline"] = {
+            "metrics": baseline_metrics,
+            "profit_retention": 100.0
         }
-    }
-    
-    connection_mock = MagicMock()
-    position_manager_mock = MagicMock()
-    
-    # Simulate an open position
-    # Entry: 2000.00, SL: 1990.00 (Risk: 10.0), TP: 2050.0
-    mock_pos = MockPosition(ticket=12345, symbol="XAUUSDm", price_open=2000.00, sl=1990.00, tp=2050.0, type=0)
-    position_manager_mock.get_open_positions.return_value = [mock_pos]
-    
-    orchestrator = StrategyOrchestrator(
-        runtimes=[], 
-        config=config, 
-        connection=connection_mock,
-        position_manager=position_manager_mock,
-        notification_manager=None,
-        broker_clock=MagicMock()
-    )
-    
-    # 2. Simulate Connection Drop during trailing stop update
-    logger.info("Simulating price move to 2017.0 (1.7R profit)...")
-    # Current RR = 17 / 10 = 1.7 > 1.5 (Threshold)
-    # Expected behavior: Move SL to BE + offset (2000.0 + 1.0 = 2001.0)
-    
-    # Mock connection failure on first attempt
-    connection_mock.modify_sl_tp.side_effect = [False, True] # First fails, second succeeds (after recovery)
-    
-    # Call trailing stop logic
-    # manage_trailing_stops(self, symbol, bid, ask, atr, last_candle, session)
-    orchestrator.manage_trailing_stops("XAUUSDm", 2017.0, 2017.1, 5.0, None, "GLOBAL")
-    
-    # 3. Verify interaction
-    logger.info("Verifying modify_sl_tp calls...")
-    assert connection_mock.modify_sl_tp.call_count >= 1
-    
-    # 4. Simulate Background Thread Recovery
-    logger.info("Verifying recovery in next cycle...")
-    # The background thread should keep trying until it succeeds
-    # (In this mock, we just call it again)
-    orchestrator.manage_trailing_stops("XAUUSDm", 2017.0, 2017.1, 5.0, None, "GLOBAL")
-    
-    # Check if the second call (which returns True) was made
-    if connection_mock.modify_sl_tp.call_count == 2:
-        logger.info("SUCCESS: System attempted recovery after initial failure.")
-    else:
-        logger.error(f"FAILURE: Unexpected call count: {connection_mock.modify_sl_tp.call_count}")
 
-if __name__ == "__main__":
-    run_stress_test()
+        # 2. Scenario: Spread Shock (3x Spread)
+        logger.info("Stress Test: Running Spread Shock (3x)...")
+        shock_data = self._apply_spread_multiplier(data, 3.0)
+        s_history, s_equity = self._run_pass(symbol, strategies, shock_data, self.config)
+        s_metrics = PerformanceTracker.calculate_metrics(
+            s_history, 
+            len(strategies) * 1000.0, 
+            equity_curve=self._aggregate_equity(s_equity, len(strategies))
+        )
+        results["spread_shock"] = {
+            "metrics": s_metrics,
+            "profit_retention": (s_metrics.get("net_profit", 0.0) / baseline_profit * 100) if baseline_profit > 0 else 0.0
+        }
+
+        # 3. Scenario: Slippage Shock (5x Slippage)
+        logger.info("Stress Test: Running Slippage Shock (5x)...")
+        slip_config = copy.deepcopy(self.config)
+        exec_cfg = slip_config.setdefault("execution", {})
+        exec_cfg["entry_slippage_pips"] = exec_cfg.get("entry_slippage_pips", 0.15) * 5.0
+        exec_cfg["sl_exit_slippage_pips"] = exec_cfg.get("sl_exit_slippage_pips", 0.25) * 5.0
+        
+        sl_history, sl_equity = self._run_pass(symbol, strategies, data, slip_config)
+        sl_metrics = PerformanceTracker.calculate_metrics(
+            sl_history, 
+            len(strategies) * 1000.0, 
+            equity_curve=self._aggregate_equity(sl_equity, len(strategies))
+        )
+        results["slippage_shock"] = {
+            "metrics": sl_metrics,
+            "profit_retention": (sl_metrics.get("net_profit", 0.0) / baseline_profit * 100) if baseline_profit > 0 else 0.0
+        }
+
+        # 4. Scenario: Toxic Flow (Combined Shock)
+        logger.info("Stress Test: Running Toxic Flow Scenario...")
+        toxic_history, toxic_equity = self._run_pass(symbol, strategies, shock_data, slip_config)
+        toxic_metrics = PerformanceTracker.calculate_metrics(
+            toxic_history, 
+            len(strategies) * 1000.0, 
+            equity_curve=self._aggregate_equity(toxic_equity, len(strategies))
+        )
+        results["toxic_flow"] = {
+            "metrics": toxic_metrics,
+            "profit_retention": (toxic_metrics.get("net_profit", 0.0) / baseline_profit * 100) if baseline_profit > 0 else 0.0
+        }
+
+        return results
+
+    def _run_pass(self, symbol, strategies, data, config):
+        """Helper to run a single backtest pass."""
+        backtester = PortfolioBacktester(config)
+        
+        # Determine primary timeframe from config (Harmonize with backtest.py)
+        symbol_cfg = config.get("symbols_config", {}).get(symbol, {})
+        primary_tf = symbol_cfg.get("backtest_timeframe", "M5")
+        primary_data = data.get(primary_tf, data.get("M5"))
+        
+        return backtester.run(
+            symbol, 
+            strategies, 
+            primary_data, 
+            data.get("H1"), 
+            data.get("M15"), 
+            data.get("M5"), 
+            data.get("M1")
+        )
+
+    def _apply_spread_multiplier(self, data, multiplier):
+        """Creates a copy of data with boosted spreads."""
+        new_data = {}
+        for tf, candles in data.items():
+            # Deep copy the CandleArray to avoid mutating original data
+            c_copy = copy.copy(candles)
+            c_copy.spread = candles.spread * multiplier
+            new_data[tf] = c_copy
+        return new_data
+
+    def _aggregate_equity(self, equity_history, num_strategies):
+        """Helper to aggregate multi-strategy equity into a single curve."""
+        if not equity_history:
+            return []
+        import pandas as pd
+        df = pd.DataFrame(equity_history)
+        return df.groupby('time')['equity'].sum().tolist()

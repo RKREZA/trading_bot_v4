@@ -44,7 +44,7 @@ class RiskEngine:
         
         self.logger = logging.getLogger("trading_bot.risk_engine")
 
-    def calculate_lot_size(self, balance: float, stop_loss_distance: float, point: float, tick_value: float, symbol: str, spread_points: float = 0.0, commission_per_lot: float = 0.0) -> float:
+    def calculate_lot_size(self, balance: float, stop_loss_distance: float, point: float, tick_value: float, symbol: str, price: float = 0.0, spread_points: float = 0.0, commission_per_lot: float = 0.0) -> float:
         if stop_loss_distance <= 0:
             return 0.0
 
@@ -83,7 +83,7 @@ class RiskEngine:
             self.logger.warning(f"Trade rejected on {symbol}: Cost-to-Risk ratio {fixed_cost/risk_amount:.2f} exceeds limit {allowed_ratio:.2f}")
             return 0.0
 
-        return self._apply_broker_constraints(potential_lot, symbol)
+        return self._apply_broker_constraints(potential_lot, symbol, price)
 
     def check_circuit_breakers(self, current_balance: float, current_equity: float) -> tuple[bool, str]:
         if self.kill_switch_active:
@@ -131,7 +131,7 @@ class RiskEngine:
         self.daily_trades = 0
         self.last_reset_date = date.today()
 
-    def _apply_broker_constraints(self, lot: float, symbol: str) -> float:
+    def _apply_broker_constraints(self, lot: float, symbol: str, price: float = 0.0) -> float:
         sym_cfg = self.config.get("symbols_config", {}).get(symbol, {})
         min_lot = float(sym_cfg.get("min_lot", 0.01))
         max_lot = float(sym_cfg.get("max_lot", 100.0))
@@ -152,8 +152,13 @@ class RiskEngine:
         # Avoids overestimating notional for Gold/Indices
         contract_size = float(sym_cfg.get("contract_size", 100000.0))
         
-        # We assume 1.0 lot = contract_size of base currency.
+        # Institutional Notional Calculation: Lot * ContractSize * CurrentPrice
+        # For Forex (e.g., EURUSD), contract_size is 100,000 and price is ~1.0, notional is correct.
+        # For Gold (XAUUSD), contract_size is 100 and price is ~$2,300, notional is ~230,000 per lot.
         notional_estimate = final_lot * contract_size
+        if price > 0:
+            notional_estimate *= price
+            
         if notional_estimate < self.min_notional_value:
              self.logger.warning(f"Trade REJECTED for {symbol}: Estimated notional ${notional_estimate:,.2f} is below threshold ${self.min_notional_value:,.2f}.")
              return 0.0

@@ -1,4 +1,5 @@
 import time
+import re
 import logging
 from datetime import datetime
 from typing import List, Dict, Any, Optional
@@ -15,6 +16,8 @@ class TradingDashboard:
     def __init__(self):
         self.console = Console()
         self.layout = Text("V4-ULTRA INITIALIZING...")
+        self.prev_price = 0.0
+        self.pulse_toggle = True
         
     def _get_ordinal_suffix(self, day: int) -> str:
         """Calculate ordinal suffix for day of month."""
@@ -23,13 +26,9 @@ class TradingDashboard:
         return {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
 
     def _get_formatted_time(self) -> str:
-        """Return date in format like: 8th April 2026 - 1:44:40PM"""
+        """Return date in format like: 09-Apr-2026 01:44:40"""
         now = datetime.now()
-        day = now.day
-        suffix = self._get_ordinal_suffix(day)
-        date_part = f"{day}{suffix} {now.strftime('%B %Y')}"
-        time_part = now.strftime("%I:%M:%S%p")
-        return f"{date_part} - {time_part}"
+        return now.strftime("%d-%b-%Y %H:%M:%S")
 
     def update(self, state: dict) -> Text:
         """Pulse the entire dashboard with triple-aligned header."""
@@ -50,14 +49,21 @@ class TradingDashboard:
         # Environment Info Extraction
         symbol = state.get("symbol", "N/A")
         price = state.get("price", 0)
+        ask = state.get("ask", 0)
+        bid = state.get("bid", 0)
         spread = state.get("spread", 0)
+        pips = state.get("pips", 0)
         regime = state.get("regime_type", "N/A")
         volatility = state.get("volatility", "N/A")
         session = state.get("session", "N/A")
         
         status_text = "ONLINE" if conn.get("connected") else "OFFLINE"
         status_color = "bold green" if conn.get("connected") else "bold red"
-        current_time_str = self._get_formatted_time()
+        
+        # Priority: Broker Time > State Provided Time > Local fallback
+        current_time_str = state.get("server_time") or acc.get("server_time")
+        if not current_time_str:
+            current_time_str = self._get_formatted_time() + " (LOCAL)"
         
         # TRIPLE ALIGNMENT LOGIC
         bot_name = "T-BOT (V4-ULTRA)"
@@ -74,8 +80,16 @@ class TradingDashboard:
         
         # End of center text is center_start + center_len
         # Start of right text should be width - right_len
+        # Start of right text should be width - right_len
         right_start = max(center_start + center_len + 1, width - right_len)
         pad_right = " " * (right_start - (center_start + center_len))
+
+        # Environment Monitor Data Preparation
+        digits = state.get("digits", 2)
+        price_color = "white"
+        if self.prev_price > 0:
+            if price > self.prev_price: price_color = "bright_green"
+            elif price < self.prev_price: price_color = "bright_red"
         
         # Assemble Header with markup for the status
         header_markup = f"{current_time_str}{pad_left}[bold blue]{bot_name}[/]{pad_right}STATUS : [{status_color}]{status_text}[/]"
@@ -86,25 +100,84 @@ class TradingDashboard:
         lines.append(header_markup)
         lines.append(sep)
         
-        lines.append("Account Information")
-        lines.append(f"ID : {login} | SERVER : {server} | ")
-        lines.append(f"Balance : ${balance:,.2f} | EQUITY : ${equity:,.2f} | FREE MARGIN : ${free_margin:,.2f} | LEVERAGE : {leverage}x")
-        lines.append(f"LIVE PnL : [bold cyan]${profit:,.2f}[/]")
+        lines.append("Environment Monitor")
+        # Resolution & Pulse Logic
+        heartbeat = "●" if self.pulse_toggle else "○"
+        self.pulse_toggle = not self.pulse_toggle
+        
+        self.prev_price = price
+
+        spread_color = "bold cyan"
+        if spread > 50: spread_color = "bold yellow"
+        if spread > 100: spread_color = "bold red"
+
+        # Account Verification & Lag Monitor
+        login_val = state.get("login", "N/A")
+        name = state.get("account_name", "N/A")
+        path = state.get("terminal_path", "N/A")
+        lag = state.get("tick_lag", 0)
+        
+        lag_color = "green" if lag < 3 else "yellow" if lag < 10 else "bold red"
+        
+        lines.append(f"SYMBOL   : [bold yellow]{symbol}[/] | PRICE : [{price_color}]{ask:,.{digits}f}(ask) - {bid:,.{digits}f} (bid)[/] | SPREAD : [{spread_color}]{spread:,.1f} pts ({pips:,.1f} pips)[/] | LIVE : {heartbeat}")
+        lines.append(f"SESSION  : {session} | REGIME : {regime} | VOLATILE : {volatility} | LAG: [{lag_color}]{lag}s[/]")
         
         lines.append(sep)
-        lines.append("Environment Monitor")
-        lines.append(f"SYMBOL : {symbol} | PRICE : {price:,.2f} | SPREAD : {spread:.1f} pts")
-        lines.append(f"REGIME : {regime} | VOLATILITY : {volatility} | SESSION : {session}")
+        lines.append("Account Information")
+        lines.append(f"ID : {login_val} | SERVER : {server}")
+        lines.append(f"Balance : ${balance:,.2f} | EQUITY : ${equity:,.2f} | FREE MARGIN : ${free_margin:,.2f} | LEVERAGE : {leverage}x | LIVE PnL : [bold cyan]${profit:,.2f}[/]")
         
         lines.append(sep)
         lines.append("Institutional Setup")
         setups = state.get("setups", {}) or {}
         found_setup = False
-        for sid, reasons in setups.items():
-            if reasons:
-                reason_str = " | ".join(reasons)
-                lines.append(f"[bold yellow]{sid}[/]: {reason_str}")
-                found_setup = True
+        
+        for sid, s_info in setups.items():
+            found_setup = True
+            metrics = s_info.get("metrics", {})
+            thresholds = s_info.get("thresholds", {})
+            signal = s_info.get("signal", "NONE")
+            sig_dir = signal.direction if hasattr(signal, "direction") else str(signal)
+            
+            # Professional Display Name Mapping
+            display_names = {
+                "breakout_v4": "Breakout",
+                "trendfollowing_v4": "Trend Following",
+                "meanreversion_v4": "Mean Reversion",
+                "liquidity_session_v4": "Liquidity Session"
+            }
+            clean_name = display_names.get(sid.lower(), sid.replace("_", " ").replace("v4", "").strip().title())
+
+            # Header for Strategy
+            color = "green" if sig_dir != "NONE" else "yellow"
+            lines.append(f"[bold {color}]{clean_name}[/] | Bias: [bold]{sig_dir}[/]")
+            
+            if metrics:
+                lines.append(f"  {'Metric':<12} | {'Required':<12} | {'Actual':<10} | Status")
+                for m_name, live_val in metrics.items():
+                    target = thresholds.get(m_name, "N/A")
+                    
+                    # Status logic (Simple substring/numeric check)
+                    status_icon = "[green]✅[/]"
+                    if "Inside" in str(live_val) or "Neutral" in str(live_val):
+                        status_icon = "[red]❌[/]"
+                    elif isinstance(live_val, (int, float)):
+                        try:
+                            # Try to extract the number from target string like "> 25"
+                            import re
+                            t_num_match = re.search(r"(\d+\.?\d*)", str(target))
+                            if t_num_match:
+                                t_num = float(t_num_match.group(1))
+                                if ">" in str(target) and live_val < t_num: status_icon = "[red]❌[/]"
+                                elif "<" in str(target) and live_val > t_num: status_icon = "[red]❌[/]"
+                        except: pass
+                    
+                    val_repr = f"{live_val:.2f}" if isinstance(live_val, float) else str(live_val)
+                    if m_name == "Volume": val_repr += "x"
+                    
+                    lines.append(f"  {m_name:<12} | {str(target):<12} | {val_repr:<10} | {status_icon}")
+            lines.append("") # Spacer
+            
         if not found_setup:
             lines.append("[dim]NO ACTIVE STRATEGY SIGNALS[/]")
         
@@ -123,6 +196,11 @@ class TradingDashboard:
             
         lines.append(sep)
         lines.append("Economic Calendar")
+        # News Status Indicator (Relocated)
+        news_stale = state.get("news_stale", True)
+        # Relaxed status: Economic calendars stay valid for days.
+        news_status = "[bold green]SYNCED[/]" if not news_stale else "[bold yellow]SYNCED (STALE)[/]"
+        lines.append(f"STATUS: {news_status}")
         news = state.get("news_list", [])
         if not news:
             lines.append("[dim]NO UPCOMING HIGH-IMPACT NEWS[/]")
@@ -152,4 +230,4 @@ def start_dashboard(layout):
     """Factory for the live renderer - uses full-screen mode."""
     import warnings
     warnings.filterwarnings("ignore", category=UserWarning)
-    return Live(layout, refresh_per_second=2, screen=True)
+    return Live(layout, auto_refresh=False, screen=True)

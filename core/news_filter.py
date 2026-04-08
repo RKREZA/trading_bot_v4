@@ -23,6 +23,12 @@ class InstitutionalNewsFilter:
         self.impact_levels = self.news_cfg.get("impact_levels", ["High"])
         self.buffer_before = self.news_cfg.get("buffer_before_min", 30)
         self.buffer_after = self.news_cfg.get("buffer_after_min", 15)
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': 'https://www.forexfactory.com/calendar'
+        })
         
         self.events: List[Dict[str, Any]] = []
         self._load_events()
@@ -49,43 +55,119 @@ class InstitutionalNewsFilter:
             self.fetch_news()
 
     def fetch_news(self):
-        """Fetches news from the dynamic source."""
+        """Fetches news with advanced spoofing, DailyFX fallback, and manual overrides."""
+        # 1. Check for Manual Override
+        manual_file = "config/news_manual.json"
+        if os.path.exists(manual_file):
+            try:
+                with open(manual_file, 'r') as f:
+                    self.events = json.load(f)
+                logger.info(f"News: [MANUAL OVERRIDE] Loaded {len(self.events)} events from {manual_file}.")
+                return
+            except Exception as e:
+                logger.error(f"News: Failed to load manual override: {e}")
+
+        # 2. DailyFX Institutional Fallback (Highly Stable)
+        if self.fetch_from_dailyfx():
+            return
+
+        # 3. ForexFactory Mirror Strategy (Advanced Spoofing)
+        urls = [
+            "https://www.forexfactory.com/ff_calendar_thisweek.json",
+            "https://nfs.forexfactory.com/ff_calendar_thisweek.json",
+            "https://cdn-ffc.forexfactory.com/ff_calendar_thisweek.json"
+        ]
+        
+        last_error = ""
+        for url in urls:
+            try:
+                logger.info(f"News: Attempting {url}...")
+                response = self.session.get(url, timeout=12)
+                response.raise_for_status()
+                
+                # Verify JSON integrity
+                try:
+                    raw_data = response.json()
+                except:
+                    logger.warning(f"News: {url} returned non-JSON content. (Likely HTML block)")
+                    continue
+
+                # Filter for High Impact and relevant currencies
+                filtered_events = []
+                for event in raw_data:
+                    if event.get("impact") in self.impact_levels:
+                        try:
+                            dt = datetime.fromisoformat(event["date"])
+                            utc_ts = dt.timestamp()
+                            
+                            filtered_events.append({
+                                "title": event.get("title"),
+                                "country": event.get("country"),
+                                "impact": event.get("impact"),
+                                "timestamp": utc_ts
+                            })
+                        except Exception as e:
+                            logger.debug(f"News: Skip parsing malformed event: {e}")
+                
+                self.events = filtered_events
+                
+                # Save to cache
+                os.makedirs(os.path.dirname(self.cache_file), exist_ok=True)
+                with open(self.cache_file, 'w') as f:
+                    json.dump(self.events, f, indent=2)
+                    
+                logger.info(f"News: Successfully fetched {len(self.events)} events using {url}")
+                return # Exit on success
+                
+            except Exception as e:
+                last_error = str(e)
+                # Suppress DNS errors to trace (too noisy for dashboard)
+                if "getaddrinfo failed" in last_error:
+                    logger.debug(f"News: DNS resolve failed for {url}")
+                else:
+                    logger.warning(f"News: Source {url} failed: {last_error}")
+        
+        logger.error(f"News: All automated sources failed. System using 'Persistence Mode' (Stale cache).")
+
+    def fetch_from_dailyfx(self) -> bool:
+        """Fetches high-impact news from the DailyFX API (Stable Institutional Source)."""
         try:
-            logger.info(f"News: Fetching from {self.source_url}")
-            response = requests.get(self.source_url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
+            # Fetch current and next week
+            url = "https://www.dailyfx.com/api/v1/calendar/events"
+            logger.info("News: Attempting fetch from DailyFX...")
+            response = self.session.get(url, timeout=12)
             response.raise_for_status()
-            raw_data = response.json()
+            data = response.json()
             
-            # Filter for High Impact and relevant currencies
-            filtered_events = []
-            for event in raw_data:
-                if event.get("impact") in self.impact_levels:
-                    # Parse date: "2024-03-07T08:30:00-05:00"
-                    # We convert everything to UTC timestamp
-                    try:
-                        dt = datetime.fromisoformat(event["date"])
-                        utc_ts = dt.timestamp()
-                        
-                        filtered_events.append({
-                            "title": event.get("title"),
-                            "country": event.get("country"),
-                            "impact": event.get("impact"),
-                            "timestamp": utc_ts
-                        })
-                    except Exception as e:
-                        logger.error(f"News: Error parsing date {event.get('date')}: {e}")
+            new_events = []
+            for item in data:
+                if item.get("importance") == "high":
+                    # DailyFX timestamp is in milliseconds
+                    ts = item.get("date", 0) / 1000.0
+                    new_events.append({
+                        "title": item.get("title"),
+                        "country": item.get("countryCode", "").upper(),
+                        "impact": "High",
+                        "timestamp": ts
+                    })
             
-            self.events = filtered_events
-            
-            # Save to cache
+            if new_events:
+                self.events = new_events
+                self._save_cache()
+                logger.info(f"News: Successfully fetched {len(new_events)} events from DailyFX.")
+                return True
+        except Exception as e:
+            logger.warning(f"News: DailyFX source failed: {e}")
+        return False
+
+    def _save_cache(self):
+        """Internal helper to persist events."""
+        try:
             os.makedirs(os.path.dirname(self.cache_file), exist_ok=True)
             with open(self.cache_file, 'w') as f:
                 json.dump(self.events, f, indent=2)
-                
-            logger.info(f"News: Successfully fetched and cached {len(self.events)} high-impact events.")
-            
         except Exception as e:
-            logger.error(f"News: Fetch failed: {e}. Using stale cache if available.")
+            logger.error(f"News: Cache save failed: {e}")
 
     def is_blocked(self, symbol: str, current_time: float) -> Optional[str]:
         """

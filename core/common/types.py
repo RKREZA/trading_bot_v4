@@ -27,6 +27,8 @@ class Candle:
     def bid(self): return self.close
     @property
     def ask(self): return self.close + self.spread
+    @property
+    def spread_val(self): return self.spread
 
 @dataclass(slots=True)
 class CandleArray:
@@ -69,7 +71,7 @@ class CandleArray:
     @property
     def t(self) -> np.ndarray: return self.time[:self.limit]
 
-    def to_df(self) -> "pd.DataFrame":
+    def to_df(self) -> Any:
         import pandas as pd
         return pd.DataFrame({
             "time": self.time,
@@ -152,23 +154,30 @@ class CandleArray:
     def ema(self, period: int) -> np.ndarray:
         key = f"ema_{period}"
         if key in self.indicators: return self.get_indicator(key)
-        # Fallback to manual (inefficient) or raise error in Production
-        return self._calc_ema(self.c, period)
+        res = self._calc_ema(self.c, period)
+        self.indicators[key] = res
+        return res
 
     def rsi(self, period: int = 14) -> np.ndarray:
         key = f"rsi_{period}"
         if key in self.indicators: return self.get_indicator(key)
-        return self._calc_rsi(self.c, period)
+        res = self._calc_rsi(self.c, period)
+        self.indicators[key] = res
+        return res
 
     def atr(self, period: int = 14) -> np.ndarray:
         key = f"atr_{period}"
         if key in self.indicators: return self.get_indicator(key)
-        return self._calc_atr(period)
+        res = self._calc_atr(period)
+        self.indicators[key] = res
+        return res
 
     def adx(self, period: int = 14) -> np.ndarray:
         key = f"adx_{period}"
         if key in self.indicators: return self.get_indicator(key)
-        return self._calc_adx(period)
+        res = self._calc_adx(period)
+        self.indicators[key] = res
+        return res
 
     def _calc_ema(self, data: np.ndarray, period: int) -> np.ndarray:
         if len(data) < period: return np.full_like(data, np.nan)

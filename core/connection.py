@@ -34,7 +34,7 @@ class MT5Connection:
     
     # Global lock for all mt5.* library calls across the entire application.
     # This prevents race conditions and segmentation faults in the non-thread-safe C-wrapper.
-    MT5_LOCK = threading.Lock()
+    MT5_LOCK = threading.RLock()
 
     def __init__(self, max_retries: int = 5, health_check_interval: int = 30):
         """
@@ -227,10 +227,31 @@ class MT5Connection:
             "server_time": server_time,
         }
 
+    def get_symbol_snapshot(self, symbol: str) -> dict:
+        """Fetch current Bid, Ask, Spread, and Point for a specific symbol."""
+        if not self.ensure_connected():
+            return {"price": 0, "spread": 0, "point": 0}
+            
+        with self.MT5_LOCK:
+            tick = mt5.symbol_info_tick(symbol)
+            if tick:
+                # Basic spread calculation: (Ask - Bid) / Point
+                point = mt5.symbol_info(symbol).point
+                spread_pts = (tick.ask - tick.bid) / point if point > 0 else 0
+                return {
+                    "price": tick.bid,
+                    "spread": spread_pts,
+                    "point": point,
+                    "bid": tick.bid,
+                    "ask": tick.ask
+                }
+        return {"price": 0, "spread": 0, "point": 0}
+
     def get_broker_time(self, symbol: str = None) -> datetime:
         """Fetch the current broker server time as a timezone-aware datetime."""
+        # Check connection status BEFORE taking the lock to prevent unnecessary contention
         if not self.ensure_connected():
-            return datetime.now(timezone.utc)
+            return None
             
         with self.MT5_LOCK:
             # Most accurate broker time is the last tick of a major symbol
