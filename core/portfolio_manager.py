@@ -37,9 +37,15 @@ class PortfolioManager:
         if not active_signals:
             return []
 
-        # In parallel mode, we approve all valid signals from different strategies.
-        # Directional Filtering: We keep only the best signal per strategy (already handled by pulse loop)
-        # and ensure we aren't overloaded.
+        # Institutional Conflict Resolution (Rule: No Hegded positions on same symbol)
+        buy_signals = {sid: sig for sid, sig in active_signals.items() if sig.direction == "BUY"}
+        sell_signals = {sid: sig for sid, sig in active_signals.items() if sig.direction == "SELL"}
+
+        # If conflicting signals exist on the same symbol, cancel both to prevent hedging traps
+        if buy_signals and sell_signals:
+            logger.warning("Signal Conflict detected! Canceling opposing trades on same symbol to prevent hedging.")
+            return []
+
         approved = []
         for sid, sig in active_signals.items():
             approved.append((sid, sig))

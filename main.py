@@ -115,7 +115,7 @@ class LiveOrchestrator:
                     # 1. Fetch Multi-Timeframe Institutional Data (HTF, M15, M5, D1)
                     m5_data = self.data_manager.fetch_candles(self.symbol, "M5", 500)
                     m15_data = self.data_manager.fetch_candles(self.symbol, "M15", 300)
-                    h1_data = self.data_manager.fetch_candles(self.symbol, "H1", 200)
+                    h1_data = self.data_manager.fetch_candles(self.symbol, "H1", 300)
                     d1_data = self.data_manager.fetch_candles(self.symbol, "D1", 100)
                     
                     if m5_data is None or h1_data is None or m15_data is None or d1_data is None or len(m5_data) < 20:

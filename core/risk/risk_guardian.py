@@ -55,8 +55,8 @@ class RiskGuardian:
             # For now, we assume the strategy logic is accessible or SL is attached.
             sl_price = signal.stop_loss if hasattr(signal, 'stop_loss') and signal.stop_loss != 0 else 0
             if sl_price == 0:
-                # If SL not calculated, use a safety ATR or assume strategy will provide it
-                return True # Can't fully validate without SL
+                self.logger.error("[RISK] Signal REJECTED: Missing or zero Stop Loss.")
+                return False # STRICT ENFORCEMENT: No SL, No Trade
                 
             sl_dist = abs(market_data.current_price - sl_price)
             lot = self.calculate_lot_size(balance, sl_dist, symbol_info)
