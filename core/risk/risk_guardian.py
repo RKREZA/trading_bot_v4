@@ -59,7 +59,7 @@ class RiskGuardian:
                 return False # STRICT ENFORCEMENT: No SL, No Trade
                 
             sl_dist = abs(market_data.current_price - sl_price)
-            lot = self.calculate_lot_size(balance, sl_dist, symbol_info)
+            lot = self.calculate_lot_size(balance, sl_dist, symbol_info, current_price=market_data.current_price)
             
             return lot > 0
         except Exception as e:
@@ -70,7 +70,8 @@ class RiskGuardian:
                            balance: float, 
                            stop_loss_dist: float, 
                            symbol_info: Dict[str, Any],
-                           last_pnl: float = 0.0) -> float:
+                           last_pnl: float = 0.0,
+                           current_price: float = 1.0) -> float:
         """
         Institutional Position Sizing: risk_amount / stop_loss_dist
         HARD CONSTRAINTS (Step 13):
@@ -101,14 +102,14 @@ class RiskGuardian:
         
         points_dist = stop_loss_dist / point if point > 0 else 0.0
         
-        # FIX: Ensure the entire denominator is greater than zero
+        # FIX: Ensure the entire denominator is evaluated against zero before division
         denominator = points_dist * tick_value
         if denominator > 0:
             raw_lot = risk_amount / denominator
         else:
             raw_lot = 0.0
         
-        return self._normalize_lots(raw_lot, symbol_info)
+        return self._normalize_lots(raw_lot, symbol_info, current_price)
 
     def check_governance(self, current_balance: float, current_equity: float, slippage: float = 0.0, is_error: bool = False, open_positions: int = 0) -> Tuple[bool, str]:
         """Global safety check (Kill Switch, Equity Protection, and Parallel Thresholds)"""
@@ -134,7 +135,8 @@ class RiskGuardian:
         # 2. Equity Protection (Step 5.4)
         # Only block if equity is materially below the MA50 (>3% drawdown from MA)
         # This prevents minor dips from permanently blocking trading
-        self.equity_history.append(current_equity)
+        # FIX: self.equity_history.append(current_equity) removed to prevent high-frequency corruption.
+        
         if len(self.equity_history) > 50:
             ma_equity = np.mean(list(self.equity_history)[-50:])
             equity_gap_pct = ((ma_equity - current_equity) / ma_equity) * 100 if ma_equity > 0 else 0
@@ -145,13 +147,20 @@ class RiskGuardian:
         if current_equity > self.max_equity: self.max_equity = current_equity
         total_dd = ((self.max_equity - current_equity) / self.max_equity) * 100 if self.max_equity > 0 else 0
         if total_dd >= self.max_drawdown_halt_pct:
-            self.kill_switch_active = True
+            if not self.kill_switch_active:
+                self.kill_switch_active = True
+                self.logger.critical(f"MAX DRAWDOWN {total_dd:.1f}% REACHED! INITIATING EMERGENCY FLATTEN.")
+                return False, "EMERGENCY_FLATTEN_REQUIRED"
             return False, f"MAX_DRAWDOWN_REACHED ({total_dd:.1f}%)"
 
         return True, "OK"
 
-    def record_trade_result(self, pnl: float):
+    def record_trade_result(self, pnl: float, current_equity: float = None):
         """Updates internal risk state after trade closure."""
+        # FIX: Append to equity history ONLY on trade result recording to maintain fidelity
+        if current_equity is not None:
+            self.equity_history.append(current_equity)
+
         if pnl < 0:
             self.daily_loss += abs(pnl)
             self.consecutive_losses += 1
@@ -163,7 +172,7 @@ class RiskGuardian:
         self.daily_loss = 0.0
         self.initial_balance = new_balance
 
-    def _normalize_lots(self, lot: float, sym: Dict[str, Any]) -> float:
+    def _normalize_lots(self, lot: float, sym: Dict[str, Any], current_price: float = 1.0) -> float:
         min_lot = sym.get('min_lot', 0.01)
         max_lot = sym.get('max_lot', 10.0)
         step = sym.get('lot_step', 0.01)
@@ -178,9 +187,8 @@ class RiskGuardian:
         min_notional = self.config.get("risk_governance", {}).get("min_notional_value", 0.0)
         
         if min_notional > 0:
-            # We use local tick price if available, else assume 1.0 for crude check
-            # Notional = lot * contract_size
-            notional = lot * contract_size
+            # FIX: Include price multiplier to derive true USD-equivalent notional volume
+            notional = lot * contract_size * current_price
             if notional < min_notional:
                 self.logger.warning(f"Trade REJECTED: Notional {notional:.2f} < Min {min_notional:.2f}")
                 return 0.0

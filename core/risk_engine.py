@@ -74,7 +74,10 @@ class RiskEngine:
         
         # Calculate lots such that (SL distance in points * tick_value) matches risk_amount
         points_dist = (actual_sl_dist / point) if point > 0 else actual_sl_dist
-        potential_lot = risk_amount / (points_dist * tick_value) if points_dist > 0 else 0.0
+        
+        # FIX: Ensure the entire denominator is evaluated against zero before division
+        denominator = points_dist * tick_value
+        potential_lot = (risk_amount / denominator) if denominator > 0 else 0.0
         
         # Cost = (Spread in points * tick_value * lot) + (lot * commission)
         fixed_cost = (spread_points * potential_lot * tick_value) + (potential_lot * commission_per_lot)
@@ -95,7 +98,10 @@ class RiskEngine:
 
         total_dd = ((self.initial_balance - current_equity) / self.initial_balance) * 100 if self.initial_balance > 0 else 0
         if total_dd >= self.max_total_drawdown_pct:
-            self.kill_switch_active = True
+            if not self.kill_switch_active:
+                self.kill_switch_active = True
+                self.logger.critical(f"MAX DRAWDOWN {total_dd:.1f}% REACHED! INITIATING EMERGENCY FLATTEN.")
+                return False, "EMERGENCY_FLATTEN_REQUIRED"
             return False, f"Max Total DD Reached: {total_dd:.2f}%"
 
         if len(self.equity_history) >= 50:

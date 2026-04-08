@@ -304,12 +304,11 @@ class MT5Connection:
                 
             last_candle_time = rates[0][0] # time field
             
-            # Ensure we compare broker time with broker time
-            with self.MT5_LOCK:
-                current_tick = mt5.symbol_info_tick(symbol)
-            current_broker_time = current_tick.time if current_tick else time.time()
+            # Ensure we compare broker time with TRUE LOCAL time to catch stale ticks
+            # On weekends, current_tick.time freezes, resulting in false 'Market Open' reports.
+            current_system_time = time.time()
             
-            if current_broker_time - last_candle_time > 36000: # 10 hours (Very safe margin for weekends)
+            if current_system_time - last_candle_time > 36000: # 10 hours (Very safe margin for weekends)
                 return False
         except Exception:
             return False

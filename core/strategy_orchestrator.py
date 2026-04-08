@@ -131,7 +131,11 @@ class StrategyOrchestrator:
             # 5.1 Global circuit breaker
             allowed, reason = risk_guardian.check_governance(current_balance, current_equity)
             if not allowed:
-                logger.warning(f"Flow HALTED: {reason}")
+                if reason == "EMERGENCY_FLATTEN_REQUIRED":
+                    logger.critical(f"CIRCUIT BREAKER: {reason}. Liquidating all positions for {symbol}!")
+                    self.flatten_all_positions(symbol)
+                else:
+                    logger.warning(f"Flow HALTED: {reason}")
                 return pulse_report
             
             # 5.2 Individual signal vetting & HARD CONSTRAINTS (Step 13)
@@ -293,6 +297,20 @@ class StrategyOrchestrator:
                 if self.notification_manager:
                     self.notification_manager.send_alert(f"NEWS BLOCK: Proactive closure of {symbol} @ {pos.price_open}")
 
+    def flatten_all_positions(self, symbol: str):
+        """
+        Emergency Liquidation.
+        Closes all open positions for the specified symbol immediately.
+        """
+        logger.critical(f"EMERGENCY FLATTEN: Closing all positions for {symbol}")
+        all_positions = self.position_manager.get_open_positions(symbol)
+        for pos in all_positions:
+            success = self.connection.close_position(pos.ticket, symbol)
+            if success:
+                logger.info(f"Emergency closed position {pos.ticket}")
+            else:
+                logger.error(f"Failed to emergency close position {pos.ticket}")
+        
     def _trailing_stop_loop(self):
         """Background thread for high-frequency stop management."""
         import time
