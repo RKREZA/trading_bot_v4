@@ -30,15 +30,22 @@ CACHE_TTL = {
     "D1": 3600,
 }
 
-TIMEFRAME_MAP = {
-    "M1": mt5.TIMEFRAME_M1 if mt5 else None,
-    "M5": mt5.TIMEFRAME_M5 if mt5 else None,
-    "M15": mt5.TIMEFRAME_M15 if mt5 else None,
-    "M30": mt5.TIMEFRAME_M30 if mt5 else None,
-    "H1": mt5.TIMEFRAME_H1 if mt5 else None,
-    "H4": mt5.TIMEFRAME_H4 if mt5 else None,
-    "D1": mt5.TIMEFRAME_D1 if mt5 else None,
-}
+class TimeframeMapper:
+    """Dynamic MT5 timeframe lookup with fallback mechanisms."""
+    _MAP = {
+        "M1": 1, "M2": 2, "M3": 3, "M4": 4, "M5": 5, "M6": 6, "M10": 10, "M12": 12, "M15": 15, "M20": 20, "M30": 30,
+        "H1": 16385, "H2": 16386, "H3": 16387, "H4": 16388, "H6": 16390, "H8": 16392, "H12": 16396,
+        "D1": 16401, "W1": 32769, "MN1": 49153
+    }
+
+    @classmethod
+    def get(cls, tf: str) -> Optional[int]:
+        if mt5:
+            # Try to get from mt5 library dynamically if it's there
+            mt5_attr = f"TIMEFRAME_{tf.upper()}"
+            if hasattr(mt5, mt5_attr):
+                return getattr(mt5, mt5_attr)
+        return cls._MAP.get(tf.upper())
 
 
 class DataFetcher:
@@ -87,7 +94,7 @@ class DataFetcher:
         Returns:
             CandleArray: The requested data wrapped in a CandleArray object.
         """
-        if timeframe not in TIMEFRAME_MAP or TIMEFRAME_MAP[timeframe] is None:
+        if not TimeframeMapper.get(timeframe):
             logger.warning("Invalid timeframe: %s", timeframe)
             return CandleArray.from_dicts([])
 
@@ -125,7 +132,8 @@ class DataFetcher:
                          "INC" if is_incremental else "FULL", symbol, timeframe, fetch_count)
             
             with MT5Connection.MT5_LOCK:
-                rates = mt5.copy_rates_from_pos(symbol, TIMEFRAME_MAP[timeframe], 0, fetch_count)
+                tf_constant = TimeframeMapper.get(timeframe)
+                rates = mt5.copy_rates_from_pos(symbol, tf_constant, 0, fetch_count)
             
             if rates is None or len(rates) == 0:
                 if not is_incremental:
@@ -134,7 +142,7 @@ class DataFetcher:
                     temp_count = count // 2
                     while temp_count >= 100:
                         with MT5Connection.MT5_LOCK:
-                            rates = mt5.copy_rates_from_pos(symbol, TIMEFRAME_MAP[timeframe], 0, temp_count)
+                            rates = mt5.copy_rates_from_pos(symbol, tf_constant, 0, temp_count)
                         if rates is not None and len(rates) > 0:
                             logger.info("%s %s: Recovered %d candles (requested %d)", symbol, timeframe, len(rates), count)
                             break
@@ -175,7 +183,7 @@ class DataFetcher:
         Returns:
             CandleArray: The requested historical data.
         """
-        if timeframe not in TIMEFRAME_MAP or TIMEFRAME_MAP[timeframe] is None:
+        if not TimeframeMapper.get(timeframe):
             return CandleArray.from_dicts([])
 
         try:
@@ -184,7 +192,7 @@ class DataFetcher:
                     return CandleArray.from_dicts([])
 
                 logger.debug("MT5 Range Fetch: %s %s (%s to %s)...", symbol, timeframe, date_from, date_to)
-                rates = mt5.copy_rates_range(symbol, TIMEFRAME_MAP[timeframe], date_from, date_to)
+                rates = mt5.copy_rates_range(symbol, TimeframeMapper.get(timeframe), date_from, date_to)
             
             if rates is None or len(rates) == 0:
                 logger.warning("No range data for %s %s", symbol, timeframe)
@@ -273,34 +281,57 @@ class DataFetcher:
         """
         Institutional Grade: detects gaps in historical data.
         Returns a report with missing candle counts and gap locations.
+        Flags "Ghost Candles" (intra-day gaps) vs Weekend Gaps.
         """
         if len(candles) < 2:
             return {"status": "OK", "missing_count": 0}
         
         # Determine expected interval
-        intervals = {"M1": 60, "M5": 300, "M15": 900, "M30": 1800, "H1": 3600, "H4": 14400, "D1": 86400}
-        expected_diff = intervals.get(timeframe, 300)
+        intervals = {
+            "M1": 60, "M2": 120, "M5": 300, "M15": 900, "M30": 1800, 
+            "H1": 3600, "H4": 14400, "H8": 28800, "H12": 43200, "D1": 86400
+        }
+        expected_diff = intervals.get(timeframe.upper(), 300)
         
         diffs = np.diff(candles.time)
-        # We allow for weekend gaps (anything > 48 hours is considered a weekend/market close)
-        gap_indices = np.where((diffs > expected_diff) & (diffs < 172800))[0]
+        
+        # Gap Detection Logic
+        # Weekend gaps > 48 hours are normalized.
+        # Ghost Candles < 48 hours during trading days are flagged as CRITICAL.
+        gap_indices = np.where(diffs > expected_diff)[0]
         
         missing_total = 0
         gaps = []
+        ghost_candles_found = False
+        
         for idx in gap_indices:
             actual_diff = diffs[idx]
             missing = int((actual_diff / expected_diff) - 1)
+            
+            # Is it a weekend? (roughly 48h+)
+            is_weekend = actual_diff >= 172800 
+            if not is_weekend:
+                ghost_candles_found = True
+                
             missing_total += missing
             gaps.append({
                 "from": datetime.datetime.fromtimestamp(candles.time[idx], tz=datetime.timezone.utc),
                 "to": datetime.datetime.fromtimestamp(candles.time[idx+1], tz=datetime.timezone.utc),
-                "missing": missing
+                "missing": missing,
+                "type": "WEEKEND" if is_weekend else "GHOST"
             })
             
+        status = "OK"
+        if ghost_candles_found:
+            status = "CRITICAL"
+        elif missing_total > (len(candles) * 0.05):
+            status = "WARNING"
+            
         return {
-            "status": "CRITICAL" if missing_total > (len(candles) * 0.05) else "WARNING" if missing_total > 0 else "OK",
+            "status": status,
             "missing_total": missing_total,
             "gap_count": len(gaps),
+            "ghost_candles": ghost_candles_found,
             "gaps": gaps[:5] # Show first 5 gaps
         }
 

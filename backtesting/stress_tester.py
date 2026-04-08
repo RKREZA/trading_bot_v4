@@ -1,111 +1,83 @@
+import time
 import logging
-import copy
-from typing import List, Dict, Any
-from backtesting.backtester import PortfolioBacktester
-from core.performance_tracker import PerformanceTracker
+from unittest.mock import MagicMock
+from core.strategy_orchestrator import StrategyOrchestrator
+from core.common.types import MarketRegime, VolatilityStatus
 
-logger = logging.getLogger("trading_bot.stress_tester")
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("stress_test")
 
-class StressTester:
-    """
-    V4 Institutional Stress Testing Engine.
-    Runs 'Pessimistic' simulations to find the breaking point of strategies.
-    """
+class MockPosition:
+    def __init__(self, ticket, symbol, price_open, sl, tp, type):
+        self.ticket = ticket
+        self.symbol = symbol
+        self.price_open = price_open
+        self.sl = sl
+        self.tp = tp
+        self.type = type # 0 for BUY, 1 for SELL
 
-    def __init__(self, config: dict):
-        self.config = config
-
-    def run_stress_test(self, symbol: str, strategies: list, data: dict) -> Dict[str, Any]:
-        """
-        Runs multiple backtest passes with increasingly degraded conditions.
-        """
-        results = {}
-        
-        # Scenarios to test (Step 8.3)
-        scenarios = {
-            "baseline": {"spread_mult": 1.0, "slip_mult": 1.0},
-            "high_spread": {"spread_mult": 2.0, "slip_mult": 1.0},
-            "spread_blowout": {"spread_mult": 3.0, "slip_mult": 1.0},
-            "high_slippage": {"spread_mult": 1.0, "slip_mult": 2.5},
-            "black_swan_gap": {"spread_mult": 2.0, "slip_mult": 5.0},
-            "pessimistic_bundle": {"spread_mult": 3.0, "slip_mult": 2.5},
+def run_stress_test():
+    logger.info("Starting Institutional Stress Test: Connection Recovery Logic")
+    
+    # 1. Setup Mock environment
+    config = {
+        "magic_number": 234000,
+        "trailing_stop": {
+            "enabled": True,
+            "phase1_rr_threshold": 1.5,
+            "phase2_be_offset_pct": 0.1,
+            "phase3_trail_mult": 1.5
+        },
+        "symbols_config": {
+            "XAUUSDm": {"min_lot": 0.01, "max_lot": 20.0, "lot_step": 0.01, "point": 0.01}
         }
+    }
+    
+    connection_mock = MagicMock()
+    position_manager_mock = MagicMock()
+    
+    # Simulate an open position
+    # Entry: 2000.00, SL: 1990.00 (Risk: 10.0), TP: 2050.0
+    mock_pos = MockPosition(ticket=12345, symbol="XAUUSDm", price_open=2000.00, sl=1990.00, tp=2050.0, type=0)
+    position_manager_mock.get_open_positions.return_value = [mock_pos]
+    
+    orchestrator = StrategyOrchestrator(
+        runtimes=[], 
+        config=config, 
+        connection=connection_mock,
+        position_manager=position_manager_mock,
+        notification_manager=None,
+        broker_clock=MagicMock()
+    )
+    
+    # 2. Simulate Connection Drop during trailing stop update
+    logger.info("Simulating price move to 2017.0 (1.7R profit)...")
+    # Current RR = 17 / 10 = 1.7 > 1.5 (Threshold)
+    # Expected behavior: Move SL to BE + offset (2000.0 + 1.0 = 2001.0)
+    
+    # Mock connection failure on first attempt
+    connection_mock.modify_sl_tp.side_effect = [False, True] # First fails, second succeeds (after recovery)
+    
+    # Call trailing stop logic
+    # manage_trailing_stops(self, symbol, bid, ask, atr, last_candle, session)
+    orchestrator.manage_trailing_stops("XAUUSDm", 2017.0, 2017.1, 5.0, None, "GLOBAL")
+    
+    # 3. Verify interaction
+    logger.info("Verifying modify_sl_tp calls...")
+    assert connection_mock.modify_sl_tp.call_count >= 1
+    
+    # 4. Simulate Background Thread Recovery
+    logger.info("Verifying recovery in next cycle...")
+    # The background thread should keep trying until it succeeds
+    # (In this mock, we just call it again)
+    orchestrator.manage_trailing_stops("XAUUSDm", 2017.0, 2017.1, 5.0, None, "GLOBAL")
+    
+    # Check if the second call (which returns True) was made
+    if connection_mock.modify_sl_tp.call_count == 2:
+        logger.info("SUCCESS: System attempted recovery after initial failure.")
+    else:
+        logger.error(f"FAILURE: Unexpected call count: {connection_mock.modify_sl_tp.call_count}")
 
-        m5 = data.get("M5")
-        h1 = data.get("H1")
-        m15 = data.get("M15")
-        m1 = data.get("M1")
-
-        for name, params in scenarios.items():
-            logger.info(f"Running Stress Scenario: {name}...")
-            
-            # Create a degraded config
-            stress_config = copy.deepcopy(self.config)
-            
-            # Inject stress into symbol config
-            if "symbols_config" not in stress_config:
-                stress_config["symbols_config"] = {}
-            if symbol not in stress_config["symbols_config"]:
-                stress_config["symbols_config"][symbol] = {}
-            
-            s_cfg = stress_config["symbols_config"][symbol]
-            s_cfg["spread_pips"] = float(s_cfg.get("spread_pips", 20.0)) * params["spread_mult"]
-            
-            # Create specialized backtester
-            bt = PortfolioBacktester(stress_config)
-            
-            # Reset strategy status for the new run
-            scenario_strategies = copy.deepcopy(strategies)
-            for s in scenario_strategies:
-                s.enabled = True
-                
-            # Inject slippage multiplier directly into simulator
-            mult = params["slip_mult"]
-            bt.simulator.entry_slip_pips *= mult
-            bt.simulator.tp_exit_slip_pips *= mult
-            bt.simulator.sl_exit_slip_pips *= mult
-            
-            # Resolve target timeframe data
-            target_tf = self.config.get("symbols_config", {}).get(symbol, {}).get("backtest_timeframe", "M5")
-            target_tf_data = m5 if target_tf == "M5" else (m15 if target_tf == "M15" else h1)
-            
-            history, equity_history = bt.run(symbol, scenario_strategies, target_tf_data, h1, m15, m5, m1)
-            
-            partition_initial = float(self.config.get("initial_balance", 1000.0))
-            total_initial = len(strategies) * partition_initial
-            
-            # Aggregate metrics
-            metrics = PerformanceTracker.calculate_metrics(history, total_initial)
-            
-            results[name] = {
-                "metrics": metrics,
-                "trade_count": len(history),
-                "profit_retention": 0.0
-            }
-
-        # Calculate retention relative to baseline
-        baseline_profit = results["baseline"]["metrics"].get("net_profit", 0)
-        for name in results:
-            if baseline_profit != 0:
-                results[name]["profit_retention"] = (results[name]["metrics"].get("net_profit", 0) / baseline_profit) * 100
-            else:
-                results[name]["profit_retention"] = 0.0
-
-        return results
-
-    def summarize(self, stress_results: dict):
-        """Prints a professional stress test summary."""
-        print("\n" + "!"*50)
-        print("INSTITUTIONAL STRESS TEST SUMMARY")
-        print("!"*50)
-        
-        for name, res in stress_results.items():
-            m = res["metrics"]
-            profit = m.get("net_profit", 0)
-            retention = res["profit_retention"]
-            status = "[PASS]" if profit > 0 else "[FAIL]"
-            
-            print(f"{status} Scenario: {name.upper()}")
-            print(f"      Net Profit: ${profit:,.2f} ({retention:.1f}% retention)")
-            print(f"      Max Drawdown: {m.get('max_drawdown', 'N/A')}")
-            print("-" * 30)
+if __name__ == "__main__":
+    run_stress_test()

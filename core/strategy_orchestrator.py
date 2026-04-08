@@ -38,6 +38,11 @@ class StrategyOrchestrator:
         self.last_cycle_time: Optional[datetime] = None
         self.last_analysis: Dict[str, Any] = {}
 
+        # Asynchronous Trailing Stop Management (Rule 3.1)
+        import threading
+        self._stop_thread = threading.Thread(target=self._trailing_stop_loop, daemon=True)
+        self._stop_thread.start()
+
     def execute_cycle(self, symbol: str, market_data: MarketData, is_news_blocked: bool = False) -> Dict[str, Any]:
         """
         STRICT 8-STEP INSTITUTIONAL EXECUTION FLOW (Step 12).
@@ -66,6 +71,14 @@ class StrategyOrchestrator:
             "news_blocked": blocking_event,
             "upcoming_news": [e["title"] for e in self.news_filter.get_upcoming_events(ts, 4)],
             "timestamp": market_data.timestamp.strftime("%H:%M:%S")
+        }
+        
+        # Update cache for async services (Rule 3.1)
+        self.last_analysis[symbol] = {
+            "bid": market_data.current_price, # Simplified, should use tick if available
+            "ask": market_data.current_price + (symbol_info.get("spread", 0) * symbol_info.get("point", 0)),
+            "atr": regime_info.atr,
+            "timestamp": ts
         }
 
         # Hard Block Check
@@ -113,16 +126,19 @@ class StrategyOrchestrator:
             
             # 5.2 Individual signal vetting & HARD CONSTRAINTS (Step 13)
             for sid, sig in raw_signals.items():
-                # NO-GRID Check (Rule 13.2)
-                if hasattr(self.position_manager, 'get_positions_by_strategy'):
+                # S-ID MAGIC Logic (Rule 2.2 Hardening)
+                # Derived from sid to ensure persistence across sessions
+                magic = self.runtimes[0].risk_guardian.get_magic_number(sid) if self.runtimes else 234000
+                
+                if hasattr(self.position_manager, 'get_positions_by_magic'):
+                    open_pos = self.position_manager.get_positions_by_magic(magic, symbol)
+                elif hasattr(self.position_manager, 'get_positions_by_strategy'):
                     open_pos = self.position_manager.get_positions_by_strategy(sid, symbol)
-                elif hasattr(self.position_manager, 'get_open_positions'):
-                    all_pos = self.position_manager.get_open_positions(symbol) if hasattr(self.position_manager, 'get_open_positions') else []
-                    open_pos = [p for p in all_pos if sid.upper() in str(getattr(p, 'comment', '')).upper()]
                 else:
                     open_pos = []
+
                 if len(open_pos) >= 1:
-                    logger.debug(f"[{sid}] Signal REJECTED: Anti-Grid Constraint (Already has position)")
+                    logger.warning(f"[RISK] Rejecting {symbol}: Strategy {sid} already has active exposure (Magic: {magic})")
                     continue
                 
                 # Sizing & Margin Validation
@@ -155,12 +171,14 @@ class StrategyOrchestrator:
             sig.volume = risk_guardian.calculate_lot_size(strat_balance, sl_dist, symbol_info)
             
             if sig.volume > 0:
-                # 8. LIVE EXECUTION BRIDGE
+                # 8. LIVE EXECUTION BRIDGE (with Strategy-Specific Magic)
+                magic = runtime.risk_guardian.get_magic_number(sid)
                 execution_result = self.connection.place_order(
                     symbol, 
                     sig, 
                     sig.volume,
-                    comment=f"V4 {sid.upper()} PARALLEL"
+                    comment=f"V4 {sid.upper()} PARALLEL",
+                    magic=magic
                 )
                 
                 # 9. PERFORMANCE TRACKER LOGS RESULT
@@ -264,6 +282,34 @@ class StrategyOrchestrator:
                 self.connection.close_position(pos.ticket, symbol)
                 if self.notification_manager:
                     self.notification_manager.send_alert(f"NEWS BLOCK: Proactive closure of {symbol} @ {pos.price_open}")
+
+    def _trailing_stop_loop(self):
+        """Background thread for high-frequency stop management."""
+        import time
+        logger.info("Trailing Stop Service started.")
+        while True:
+            try:
+                # We need Bid/Ask/ATR per symbol. 
+                # This threaded version requires a way to get latest state.
+                # For now, we use the last_analysis state if available or wait for next tick data.
+                if not self.last_analysis:
+                    time.sleep(0.5)
+                    continue
+
+                for symbol, data in self.last_analysis.items():
+                    # We only manage symbols that have open positions
+                    self.manage_trailing_stops(
+                        symbol, 
+                        data['bid'], 
+                        data['ask'], 
+                        data['atr'], 
+                        None, 
+                        "GLOBAL"
+                    )
+                time.sleep(0.2) # 5Hz update rate
+            except Exception as e:
+                logger.error(f"Trailing Stop Thread Error: {e}")
+                time.sleep(1)
 
     def __repr__(self):
         return f"<StrategyOrchestrator(runtimes={len(self.runtimes)})>"

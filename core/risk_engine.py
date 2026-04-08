@@ -38,6 +38,9 @@ class RiskEngine:
         self.last_reset_date = date.today()
         self.kill_switch_active = False
         
+        # Institutional Minimum Notional (e.g., $1000 standard)
+        self.min_notional_value = float(config.get("risk_governance", {}).get("min_notional_value", 1000.0))
+        
         self.logger = logging.getLogger("trading_bot.risk_engine")
 
     def calculate_lot_size(self, balance: float, stop_loss_distance: float, point: float, tick_value: float, symbol: str, spread_points: float = 0.0, commission_per_lot: float = 0.0) -> float:
@@ -110,6 +113,18 @@ class RiskEngine:
         else:
             self.consecutive_losses = 0
             
+    def get_magic_number(self, strategy_id: str) -> int:
+        """
+        Dynamically derives a unique magic number for a strategy instance.
+        Base: magic_number from config (default 234000).
+        Offset: hash of strategy_id to ensure persistence.
+        """
+        base_magic = int(self.config.get("magic_number", 234000))
+        # Simple deterministic offset based on strategy ID hash
+        import hashlib
+        sid_hash = int(hashlib.md5(strategy_id.encode()).hexdigest(), 16) % 1000
+        return base_magic + sid_hash
+
     def reset_daily(self, balance: float):
         self.daily_loss = 0.0
         self.daily_trades = 0
@@ -121,15 +136,26 @@ class RiskEngine:
         max_lot = float(sym_cfg.get("max_lot", 100.0))
         step = float(sym_cfg.get("lot_step", 0.01))
         
-        # Institutional 'Liquidity Clamp' (Rule 5.1)
-        # We cap absolute risk exposure at $50k Notional per lot standard (XAUUSD Example)
-        # This prevents 'Jackpot' outcomes on tiny SL runs.
+        # 1. Institutional 'Liquidity Clamp' (Rule 5.1 Hardened)
+        # Strictly enforced cap to prevent extreme exposure.
         clamp_cap = float(sym_cfg.get("max_liquidity_lot", 25.0))
-        max_lot = min(max_lot, clamp_cap)
+        final_lot = min(lot, clamp_cap)
         
-        # Return 0.0 if lot is below minimum (reject trade, don't force it)
-        if lot < min_lot:
+        # 2. Minimum Notional Guard
+        # Rejects trades that are too small to be institutionally viable or below broker minimum.
+        if final_lot < min_lot:
+            self.logger.warning(f"Trade REJECTED for {symbol}: Lot {final_lot:.4f} is below broker minimum {min_lot}.")
             return 0.0
+            
+        # Get current price for notional check
+        # (This usually requires external info or assuming $100k contract size)
+        contract_size = float(sym_cfg.get("contract_size", 100000.0))
+        # We assume 1.0 lot = contract_size of base currency.
+        # Notional = lot * contract_size * price (if price is provided, but here we can at least check lot * contract_size)
+        notional_estimate = final_lot * contract_size
+        if notional_estimate < self.min_notional_value:
+             self.logger.warning(f"Trade REJECTED for {symbol}: Estimated notional ${notional_estimate:,.2f} is below threshold ${self.min_notional_value:,.2f}.")
+             return 0.0
         
-        normalized = round(lot / step) * step
+        normalized = round(final_lot / step) * step
         return min(max_lot, normalized)

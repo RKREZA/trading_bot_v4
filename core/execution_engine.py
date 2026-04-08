@@ -19,7 +19,7 @@ class ExecutionEngine:
         bt_cfg = config.get("backtest", {}) if isinstance(config.get("backtest", {}), dict) else {}
 
         self.latency_ms = int(exe_cfg.get("latency_ms", 150))
-        self.max_spread_points = float(exe_cfg.get("max_spread_points", 50.0))
+        self.base_max_spread = float(exe_cfg.get("max_spread_points", 50.0))
 
         base_slip = float(exe_cfg.get("slippage_points", 0.5))
         self.entry_slippage_points = float(exe_cfg.get("entry_slippage_points", base_slip))
@@ -50,13 +50,24 @@ class ExecutionEngine:
         spread: float,
         point: float,
         timestamp: float = None,
+        atr: float = None
     ) -> Optional[dict]:
         if signal.direction == "NONE":
             return None
 
         spread_points = spread / point if point > 0 else 0
-        if spread_points > self.max_spread_points:
-            logger.warning(f"EX_ENGINE: Spread too high ({spread_points:.1f} points). Rejecting signal.")
+        
+        # Dynamic Spread Logic (Rule 3.2 Optimization)
+        # We allow higher spreads during high volatility (high ATR)
+        max_spread = self.base_max_spread
+        if atr and point > 0:
+            atr_points = atr / point
+            # Heuristic: If ATR is high, we scale max_spread up to 2.5x
+            volatility_mult = min(2.5, max(1.0, atr_points / 200.0)) # Assuming 200 is 'normal'
+            max_spread *= volatility_mult
+
+        if spread_points > max_spread:
+            logger.warning(f"EX_ENGINE: Spread too high ({spread_points:.1f} vs limit {max_spread:.1f}). Rejecting signal.")
             return None
 
         # Institutional Guard: News Filter (Step 15 Refinement)

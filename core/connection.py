@@ -323,7 +323,7 @@ class MT5Connection:
         else:
             return mt5.ORDER_FILLING_RETURN
 
-    def place_order(self, symbol: str, signal, lot_size: float, max_retries: int = 3, delay: float = 1.0, comment: str = "Bot V3") -> Optional[dict]:
+    def place_order(self, symbol: str, signal, lot_size: float, max_retries: int = 3, delay: float = 1.0, comment: str = "Bot V3", magic: int = None) -> Optional[dict]:
         """
         Sends a trade request to the MT5 server.
         Includes automatic retries for requotes and price changes,
@@ -336,6 +336,7 @@ class MT5Connection:
             max_retries (int): Number of retries on transient errors.
             delay (float): Wait time between retries.
             comment (str): Order comment for trade attribution (default: "Bot V3").
+            magic (Optional[int]): Specific magic number for this trade (default: from config).
             
         Returns:
             Optional[dict]: Dict containing 'ticket', 'volume', and 'price' if successful.
@@ -373,7 +374,8 @@ class MT5Connection:
 
         # Get deviation from config
         deviation = self.config.get("symbols_config", {}).get(symbol, {}).get("deviation", 20)
-        magic = self.config.get("magic_number", BOT_MAGIC_NUMBER)
+        if magic is None:
+            magic = self.config.get("magic_number", BOT_MAGIC_NUMBER)
 
         # Stop Level Check
         stops_level = symbol_info.trade_stops_level
@@ -619,6 +621,23 @@ class PositionManager:
             
         except Exception as e:
             logger.error("Error fetching positions: %s", e)
+            return []
+
+    def get_positions_by_magic(self, magic: int, symbol: str = None) -> List:
+        """
+        Institutional: Retrieves positions filtered by a specific magic number.
+        Essential for Anti-Grid logic and strategy isolation.
+        """
+        if not self.connection.ensure_connected():
+            return []
+        try:
+            with self.connection.MT5_LOCK:
+                positions = mt5.positions_get(symbol=symbol)
+            if not positions:
+                return []
+            return [p for p in positions if p.magic == magic]
+        except Exception as e:
+            logger.error("Error in get_positions_by_magic: %s", e)
             return []
 
     def count_open_positions(self, symbol: str = None) -> int:

@@ -112,17 +112,19 @@ class LiveOrchestrator:
                     else:
                         dt_server = datetime.now(timezone.utc)
                     
-                    # 1. Fetch Multi-Timeframe Institutional Data (HTF, M15, M5)
+                    # 1. Fetch Multi-Timeframe Institutional Data (HTF, M15, M5, D1)
                     m5_data = self.data_manager.fetch_candles(self.symbol, "M5", 500)
                     m15_data = self.data_manager.fetch_candles(self.symbol, "M15", 300)
                     h1_data = self.data_manager.fetch_candles(self.symbol, "H1", 200)
+                    d1_data = self.data_manager.fetch_candles(self.symbol, "D1", 100)
                     
-                    if m5_data is None or h1_data is None or m15_data is None or len(m5_data) < 20:
+                    if m5_data is None or h1_data is None or m15_data is None or d1_data is None or len(m5_data) < 20:
                         missing = []
                         if m5_data is None: missing.append("M5")
                         elif len(m5_data) < 20: missing.append("M5(Sync)")
                         if m15_data is None: missing.append("M15")
                         if h1_data is None: missing.append("H1")
+                        if d1_data is None: missing.append("D1")
                         
                         msg = f"Waiting for {', '.join(missing)} data synchronization..."
                         self.logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
@@ -142,8 +144,8 @@ class LiveOrchestrator:
                         htf_candles=h1_data,
                         m15_candles=m15_data,
                         m5_candles=m5_data,
-                        d1_candles=None,
-                        current_price=float(m5_data.c[-1]),
+                        d1_candles=d1_data,
+                        current_price=float(m5_data.c[0]) if len(m5_data) > 0 else 0.0,
                         session=SessionDetector.get_session(dt_server),
                         timestamp=dt_server
                     )
