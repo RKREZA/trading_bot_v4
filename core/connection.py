@@ -281,10 +281,12 @@ class MT5Connection:
                 
             last_candle_time = rates[0][0] # time field
             
-            # Use current UTC time as reference (most brokers are UTC+2/3)
-            # 1 hour (3600s) threshold is safe for session/weekend detection
-            import time
-            if time.time() - last_candle_time > 36000: # 10 hours (Very safe margin for weekends)
+            # Ensure we compare broker time with broker time
+            with self.MT5_LOCK:
+                current_tick = mt5.symbol_info_tick(symbol)
+            current_broker_time = current_tick.time if current_tick else time.time()
+            
+            if current_broker_time - last_candle_time > 36000: # 10 hours (Very safe margin for weekends)
                 return False
         except Exception:
             return False
@@ -419,6 +421,14 @@ class MT5Connection:
             with self.MT5_LOCK:
                 result = mt5.order_send(request)
             
+            # FIX #1: Guard against None return from mt5.order_send (Terminal unresponsive)
+            if result is None:
+                with self.MT5_LOCK:
+                    err = mt5.last_error()
+                logger.error("order_send returned None for %s. Terminal may be unresponsive. Error: %s", symbol, err)
+                time.sleep(delay)
+                continue
+
             if result.retcode in [mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_DONE_PARTIAL, mt5.TRADE_RETCODE_PLACED]:
                 logger.info("Order placed successfully. Ticket: %s", result.order)
                 return {"ticket": result.order, "volume": result.volume, "price": result.price}
@@ -505,11 +515,63 @@ class MT5Connection:
         return {
             "point": info.point,
             "trade_tick_value": info.trade_tick_value,
+            "tick_value": info.trade_tick_value,  # Alias for RiskGuardian
             "volume_min": info.volume_min,
+            "min_lot": info.volume_min,           # Alias for RiskGuardian
             "volume_max": info.volume_max,
+            "max_lot": info.volume_max,           # Alias for RiskGuardian
             "volume_step": info.volume_step,
+            "lot_step": info.volume_step,         # Alias for RiskGuardian
             "trade_stops_level": info.trade_stops_level
         }
+
+    def close_position(self, ticket: int, symbol: str) -> bool:
+        """
+        Institutional Grade: Fully closes an open position.
+        Required for news circuit breakers and proactive risk reduction.
+        """
+        if not self.ensure_connected():
+            return False
+
+        with self.MT5_LOCK:
+            position = mt5.positions_get(ticket=ticket)
+        if not position:
+            logger.error("Close failed: Position %s not found.", ticket)
+            return False
+
+        pos = position[0]
+        order_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
+        
+        with self.MT5_LOCK:
+            tick = mt5.symbol_info_tick(symbol)
+        if not tick:
+            return False
+            
+        price = tick.bid if pos.type == mt5.POSITION_TYPE_BUY else tick.ask
+
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": symbol,
+            "volume": float(pos.volume),
+            "type": order_type,
+            "position": ticket,
+            "price": price,
+            "deviation": 20,
+            "magic": pos.magic,
+            "comment": "Bot V3 - Flatten",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": self.get_filling_mode(symbol),
+        }
+
+        with self.MT5_LOCK:
+            result = mt5.order_send(request)
+        
+        if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+            logger.info("Position %s closed successfully.", ticket)
+            return True
+        else:
+            logger.warning("Close failed for %s: %s", ticket, result.comment if result else "No Result")
+            return False
 
     def modify_sl_tp(self, ticket: int, symbol: str, sl: float, tp: float):
         """Request to modify SL/TP for an existing position."""
@@ -674,12 +736,17 @@ class PositionManager:
 
         sl_distance = abs(signal.entry_price - signal.stop_loss)
         
-        # Simplified V4 Lot Sizing (Replacing deleted LotCalculator)
-        if sl_distance > 0 and symbol_info.trade_tick_value > 0:
-            lot = risk_amount / (sl_distance * (symbol_info.trade_tick_value / symbol_info.point))
+        # Guard against zero distance or null symbol info values
+        point = symbol_info.point if symbol_info.point > 0 else 0.00001
+        tick_val = symbol_info.trade_tick_value if symbol_info.trade_tick_value > 0 else 1.0
+
+        if sl_distance > 0:
+            # FIX #3: Use standardized tick_val/point ratio for institutional precision
+            lot = risk_amount / (sl_distance * (tick_val / point))
             lot = max(symbol_info.volume_min, min(symbol_info.volume_max, round(lot / symbol_info.volume_step) * symbol_info.volume_step))
         else:
-            lot = 0.01
+            logger.warning("Zero SL distance for %s. Sizing invalid.", symbol)
+            lot = 0.0 # Safety: Don't trade if distance is 0
 
         # Scale down lot proportionally if SL is too tight (to avoid risk inflation)
         point = symbol_info.point

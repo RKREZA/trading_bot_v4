@@ -46,8 +46,10 @@ class IndicatorEngine:
         loss = (-delta.where(delta < 0, 0))
         avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
         avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-        rs = avg_gain / avg_loss
-        features["rsi_14"] = (100 - (100 / (1 + rs))).values
+        with np.errstate(divide='ignore', invalid='ignore'):
+            rs = avg_gain / avg_loss
+            # Vectorized guard for RSI: where avg_loss is 0, RSI stays neutral or NaN handled
+            features["rsi_14"] = (100 - (100 / (1 + rs))).fillna(50.0).values
         
         # 4. Bollinger Bands (calculates sma_20 as bb_mid)
         ma_20 = df['close'].rolling(20).mean()
@@ -72,9 +74,13 @@ class IndicatorEngine:
         plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
         minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
         
-        plus_di = 100 * (plus_dm_smooth / tr_smooth)
-        minus_di = 100 * (minus_dm_smooth / tr_smooth)
-        dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di)
-        features["adx_14"] = dx.ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
+        with np.errstate(divide='ignore', invalid='ignore'):
+            plus_di = 100 * (plus_dm_smooth / tr_smooth)
+            minus_di = 100 * (minus_dm_smooth / tr_smooth)
+            # Guard for DX calculation to prevent division by zero sum
+            di_sum = plus_di + minus_di
+            dx = 100 * (plus_di - minus_di).abs() / di_sum.replace(0, np.nan)
+        
+        features["adx_14"] = dx.fillna(0).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
         
         return features

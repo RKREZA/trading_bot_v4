@@ -62,7 +62,8 @@ class RiskGuardian:
             lot = self.calculate_lot_size(balance, sl_dist, symbol_info)
             
             return lot > 0
-        except Exception:
+        except Exception as e:
+            self.logger.error(f"[RISK] Signal validation failed due to error: {e}", exc_info=True)
             return False
 
     def calculate_lot_size(self, 
@@ -98,8 +99,14 @@ class RiskGuardian:
         point = symbol_info.get('point', 0.00001)
         tick_value = symbol_info.get('tick_value', 1.0)
         
-        points_dist = stop_loss_dist / point if point > 0 else stop_loss_dist
-        raw_lot = risk_amount / (points_dist * tick_value) if points_dist > 0 else 0.0
+        points_dist = stop_loss_dist / point if point > 0 else 0.0
+        
+        # FIX: Ensure the entire denominator is greater than zero
+        denominator = points_dist * tick_value
+        if denominator > 0:
+            raw_lot = risk_amount / denominator
+        else:
+            raw_lot = 0.0
         
         return self._normalize_lots(raw_lot, symbol_info)
 

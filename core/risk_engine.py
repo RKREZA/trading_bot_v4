@@ -1,6 +1,7 @@
 import logging
 import numpy as np
 from datetime import datetime, date
+from collections import deque
 
 class RiskEngine:
     """
@@ -34,7 +35,7 @@ class RiskEngine:
         self.daily_loss = 0.0
         self.daily_trades = 0
         self.consecutive_losses = 0
-        self.equity_history = []
+        self.equity_history = deque(maxlen=200)
         self.last_reset_date = date.today()
         self.kill_switch_active = False
         

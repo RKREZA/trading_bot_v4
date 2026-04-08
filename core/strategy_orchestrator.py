@@ -37,6 +37,7 @@ class StrategyOrchestrator:
         self.portfolio_manager = PortfolioManager(self.config)
         self.last_cycle_time: Optional[datetime] = None
         self.last_analysis: Dict[str, Any] = {}
+        self._analysis_lock = threading.Lock() # Fix: Lock for thread-safe cross-thread state access
 
         # Asynchronous Trailing Stop Management (Rule 3.1)
         import threading
@@ -73,13 +74,14 @@ class StrategyOrchestrator:
             "timestamp": market_data.timestamp.strftime("%H:%M:%S")
         }
         
-        # Update cache for async services (Rule 3.1)
-        self.last_analysis[symbol] = {
-            "bid": market_data.current_price, # Simplified, should use tick if available
-            "ask": market_data.current_price + (symbol_info.get("spread", 0) * symbol_info.get("point", 0)),
-            "atr": regime_info.atr,
-            "timestamp": ts
-        }
+        # Update cache for async services (Rule 3.1) - Thread Safe
+        with self._analysis_lock:
+            self.last_analysis[symbol] = {
+                "bid": market_data.current_price, # Simplified, should use tick if available
+                "ask": market_data.current_price + (symbol_info.get("spread", 0) * symbol_info.get("point", 0)),
+                "atr": regime_info.atr,
+                "timestamp": ts
+            }
 
         # Hard Block Check
         if blocking_event or is_news_blocked:
@@ -289,14 +291,15 @@ class StrategyOrchestrator:
         logger.info("Trailing Stop Service started.")
         while True:
             try:
-                # We need Bid/Ask/ATR per symbol. 
-                # This threaded version requires a way to get latest state.
-                # For now, we use the last_analysis state if available or wait for next tick data.
-                if not self.last_analysis:
+                # Use a snapshot of the analysis dictionary to avoid ConcurrentModificationException
+                with self._analysis_lock:
+                    analysis_snapshot = dict(self.last_analysis)
+
+                if not analysis_snapshot:
                     time.sleep(0.5)
                     continue
 
-                for symbol, data in self.last_analysis.items():
+                for symbol, data in analysis_snapshot.items():
                     # We only manage symbols that have open positions
                     self.manage_trailing_stops(
                         symbol, 

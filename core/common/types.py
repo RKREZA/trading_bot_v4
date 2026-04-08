@@ -192,8 +192,11 @@ class CandleArray:
         for i in range(period + 1, len(data)):
             avg_gain[i] = (gain[i-1] - avg_gain[i-1]) * alpha + avg_gain[i-1]
             avg_loss[i] = (loss[i-1] - avg_loss[i-1]) * alpha + avg_loss[i-1]
-        rs = avg_gain / avg_loss
-        return 100 - (100 / (1 + rs))
+        # FIXED: Guard against zero loss to prevent ZeroDivisionError
+        with np.errstate(divide='ignore', invalid='ignore'):
+            rs = avg_gain / avg_loss
+            rsi = 100 - (100 / (1 + rs))
+        return np.nan_to_num(rsi, nan=50.0) # Fallback to neutral 50
 
     def _calc_atr(self, period: int) -> np.ndarray:
         if self.limit < period + 1: return np.full(self.limit, np.nan)
@@ -230,9 +233,16 @@ class CandleArray:
         str_pdm = wilders_smooth(pos_dm)
         str_ndm = wilders_smooth(neg_dm)
         
-        plus_di = 100 * (str_pdm / str_tr)
-        minus_di = 100 * (str_ndm / str_tr)
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            plus_di = 100 * (str_pdm / str_tr)
+            minus_di = 100 * (str_ndm / str_tr)
+            # Guard against zero sum in DX calculation
+            di_sum = plus_di + minus_di
+            dx = 100 * np.abs(plus_di - minus_di) / di_sum
+        
+        plus_di = np.nan_to_num(plus_di)
+        minus_di = np.nan_to_num(minus_di)
+        dx = np.nan_to_num(dx)
         
         adx = np.full(self.limit, np.nan)
         # Shift DX to align with CandleArray indices (tr is size limit-1)
