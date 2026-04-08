@@ -40,14 +40,21 @@ class BreakoutStrategy(BaseStrategy):
         h1_strength = (h1_body / h1_candle_range) if h1_candle_range > 0 else 0
         h1_dir = 1 if h1.close > h1.open else -1
         
-        # H1 Volume Confirmation (Consensus Validation)
-        # Fix: h1_v[-1] is the bar that just finished in our corrected backtester
+        # H1 Volume Confirmation with Time-Weighted Scaling (Audit Fix)
+        # Prevents rejection during the first minutes of a new hour
         h1_v = h1_candles.v
         h1_vol_sma = np.mean(h1_v[-21:-1]) 
-        vol_confirmed = h1.tick_volume > h1_vol_sma
+        
+        # Calculate completion percentage of the current H1 candle
+        minutes_into_hour = market_data.timestamp.minute
+        completion_pct = max(0.05, (minutes_into_hour + 1) / 60.0) # Min 5% to avoid zero-vol pass
+        
+        # Scale the threshold by completion percentage
+        dynamic_threshold = h1_vol_sma * completion_pct
+        vol_confirmed = h1.tick_volume > dynamic_threshold
+        
         if not vol_confirmed:
-            self.last_rejection_reason = "Breakout: H1 Volume Spike missing"
-            # We don't return None yet, as it's checked later, but we track it.
+            self.last_rejection_reason = f"Breakout: Vol {h1.tick_volume:.0f} < Dynamic {dynamic_threshold:.0f} ({completion_pct:.1%})"
         
         m5 = market_data.m5_candles
         if len(m5) < self.lookback + 1:

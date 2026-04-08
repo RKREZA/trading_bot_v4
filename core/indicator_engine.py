@@ -81,6 +81,6 @@ class IndicatorEngine:
             di_sum = plus_di + minus_di
             dx = 100 * (plus_di - minus_di).abs() / di_sum.replace(0, np.nan)
         
-        features["adx_14"] = dx.fillna(0).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
+        features["adx_14"] = dx.ffill().fillna(0).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
         
         return features

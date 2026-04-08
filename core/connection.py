@@ -246,7 +246,9 @@ class MT5Connection:
             if server_ts:
                 return datetime.fromtimestamp(server_ts, tz=timezone.utc)
                 
-            return datetime.now(timezone.utc)
+            # Institutional Guard: Do NOT fallback to local clock if broker sync fails.
+            # This prevents "Premature Candle Evaluation" in MTF strategies.
+            return None
 
     def get_market_status(self, symbol: str) -> bool:
         """
@@ -433,8 +435,10 @@ class MT5Connection:
                 logger.info("Order placed successfully. Ticket: %s", result.order)
                 return {"ticket": result.order, "volume": result.volume, "price": result.price}
 
-            logger.warning("Order attempt %d/%d failed: retcode=%s, comment=%s",
-                           attempt+1, max_retries, result.retcode, result.comment)
+            # SAFE LOGGING (Audit Fix): Guard against NoneType return in final warning
+            comment = result.comment if result else "TERMINAL_TIMEOUT"
+            retcode = result.retcode if result else "NO_RESPONSE"
+            logger.warning(f"Order attempt {attempt+1}/{max_retries} failed: retcode={retcode}, comment={comment}")
             
             if attempt < max_retries - 1:
                 # 10004 REQUOTE, 10006 REJECTED, 10020 PRICE_CHANGED

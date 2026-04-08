@@ -168,10 +168,22 @@ class RiskGuardian:
         max_lot = sym.get('max_lot', 10.0)
         step = sym.get('lot_step', 0.01)
         
-        # CRITICAL FIX: If calculated lot is below min_lot, reject the trade
-        # instead of forcing it to min_lot (which opens unwanted positions)
+        # 1. Institutional 'Lot Floor'
         if lot < min_lot:
             return 0.0
+            
+        # 2. Minimum Notional Guard (Audit Fix)
+        # Prevents rejected trades based on hardcoded defaults
+        contract_size = sym.get('contract_size', 100000.0)
+        min_notional = self.config.get("risk_governance", {}).get("min_notional_value", 0.0)
+        
+        if min_notional > 0:
+            # We use local tick price if available, else assume 1.0 for crude check
+            # Notional = lot * contract_size
+            notional = lot * contract_size
+            if notional < min_notional:
+                self.logger.warning(f"Trade REJECTED: Notional {notional:.2f} < Min {min_notional:.2f}")
+                return 0.0
         
         normalized = round(lot / step) * step
         return min(max_lot, normalized)

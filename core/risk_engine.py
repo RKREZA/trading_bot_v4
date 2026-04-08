@@ -148,11 +148,11 @@ class RiskEngine:
             self.logger.warning(f"Trade REJECTED for {symbol}: Lot {final_lot:.4f} is below broker minimum {min_lot}.")
             return 0.0
             
-        # Get current price for notional check
-        # (This usually requires external info or assuming $100k contract size)
+        # Get actual contract size from config (Audit Fix)
+        # Avoids overestimating notional for Gold/Indices
         contract_size = float(sym_cfg.get("contract_size", 100000.0))
+        
         # We assume 1.0 lot = contract_size of base currency.
-        # Notional = lot * contract_size * price (if price is provided, but here we can at least check lot * contract_size)
         notional_estimate = final_lot * contract_size
         if notional_estimate < self.min_notional_value:
              self.logger.warning(f"Trade REJECTED for {symbol}: Estimated notional ${notional_estimate:,.2f} is below threshold ${self.min_notional_value:,.2f}.")

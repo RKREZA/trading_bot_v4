@@ -7,6 +7,7 @@ import logging
 import time
 import datetime
 import numpy as np
+import threading
 from typing import Dict, List, Optional
 from core.common.types import CandleArray
 
@@ -60,6 +61,7 @@ class DataFetcher:
     def __init__(self):
         """Initializes the DataFetcher with an empty internal cache."""
         self._cache: Dict[str, dict] = {}  # key -> {data, timestamp}
+        self._cache_lock = threading.Lock() # Fix: Prevents race conditions during cache updates
 
     def _cache_key(self, symbol: str, timeframe: str) -> str:
         """Generate a unique cache key."""
@@ -76,9 +78,9 @@ class DataFetcher:
         for c in new:
             combined[c['time']] = c
             
-        # Sort by time and trim to max_len
-        sorted_times = sorted(combined.keys())
-        return [combined[t] for t in sorted_times[-max_len:]]
+        # Sort by time and trim to max_len (Audit Fix: Ensure explicit temporal ordering)
+        sorted_candles = sorted(combined.items()) 
+        return [c[1] for c in sorted_candles[-max_len:]]
 
     def fetch_candles(self, symbol: str, timeframe: str, count: int = 500, force_refresh: bool = False) -> CandleArray:
         """
@@ -102,7 +104,8 @@ class DataFetcher:
         ttl = CACHE_TTL.get(timeframe, 60)
         now = time.time()
 
-        cached = self._cache.get(key)
+        with self._cache_lock:
+            cached = self._cache.get(key)
         
         # 1. Light Cache Check (Return if extremely fresh)
         if not force_refresh and cached and (now - cached["timestamp"]) < (ttl / 2):
@@ -161,9 +164,10 @@ class DataFetcher:
             else:
                 candles = new_candles
 
-            # Update cache
+            # Update cache with thread safety
             array = CandleArray.from_dicts(candles)
-            self._cache[key] = {"data": candles, "array": array, "timestamp": now}
+            with self._cache_lock:
+                self._cache[key] = {"data": candles, "array": array, "timestamp": now}
             return array
 
         except Exception as e:

@@ -25,11 +25,12 @@ from dashboard import TradingDashboard, start_dashboard
 
 def setup_live_logging():
     os.makedirs("logs", exist_ok=True)
+    from logging.handlers import RotatingFileHandler
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=[
-            logging.FileHandler("logs/v4_live.log"),
+            RotatingFileHandler("logs/v4_live.log", maxBytes=20 * 1024 * 1024, backupCount=10),
             logging.StreamHandler()
         ]
     )
@@ -105,12 +106,8 @@ class LiveOrchestrator:
                         last_reset_date = today
                         self.logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] Daily reset triggered. Balance synced: ${current_balance:,.2f}")
                     
-                    # Sync with Broker Server Time (Every Cycle)
-                    server_info = self.connection.get_symbol_info(self.symbol)
-                    if server_info and isinstance(server_info, dict):
-                        dt_server = datetime.now(timezone.utc)
-                    else:
-                        dt_server = datetime.now(timezone.utc)
+                    # Sync with Broker Server Time (Every Cycle) - FIX (Sync Pillar)
+                    dt_server = self.connection.get_broker_time(self.symbol)
                     
                     # 1. Fetch Multi-Timeframe Institutional Data (HTF, M15, M5, D1)
                     m5_data = self.data_manager.fetch_candles(self.symbol, "M5", 500)
@@ -137,6 +134,22 @@ class LiveOrchestrator:
                         }))
                         time.sleep(2)
                         continue
+
+                    # 1.5 Data Integrity & Synchronization Guard (Sync Pillar)
+                    # Detect "Ghost Candles" (intra-day gaps) before generating signals
+                    m5_report = self.data_manager.validate_data_integrity(m5_data, "M5")
+                    if m5_report["status"] == "CRITICAL":
+                        self.logs.append(f"[{dt_server.strftime('%H:%M:%S')}] DATA CRITICAL: Ghost candles found in M5 history. Halting for backfill...")
+                        time.sleep(5)
+                        continue
+                    
+                    # Ensure HTF data is not older than M5 freshness (Temporal Drift protection)
+                    # If H1 data in cache is > 5 minutes old relative to current M5 tip, force refresh.
+                    m5_tip = m5_data.time[0]
+                    h1_tip = h1_data.time[0]
+                    if (m5_tip - h1_tip) > 3600 + 300: # 1 hour + 5 min tolerance
+                        self.logs.append(f"[{dt_server.strftime('%H:%M:%S')}] SYNC GUARD: HTF data skew detected. Refreshing H1...")
+                        h1_data = self.data_manager.fetch_candles(self.symbol, "H1", 300, force_refresh=True)
 
                     # 2. Package Market State (Satisfy V4 MarketData contract)
                     md = MarketData(
