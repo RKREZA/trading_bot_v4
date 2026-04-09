@@ -31,6 +31,14 @@ class TrendFollowingStrategy(BaseStrategy):
         self.sl_atr = strat_config.get("sl_atr", 2.0)
         self.tp_atr = strat_config.get("tp_atr", 4.0)
         self.min_confidence = strat_config.get("min_confidence", 0.70)
+        
+        self.session_multipliers = {
+            "TOKYO": {"adx_boost": 0, "conf_boost": 0.10},
+            "LONDON": {"adx_boost": 5, "conf_boost": 0.05},
+            "NEW_YORK": {"adx_boost": 0, "conf_boost": 0.05},
+            "LONDON/NY": {"adx_boost": 8, "conf_boost": 0.00},
+            "GLOBAL": {"adx_boost": 0, "conf_boost": 0.05}
+        }
 
     def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
         strat_config = self.config.get(self.strategy_id, self.config.get("TrendFollowing", {}))
@@ -49,6 +57,9 @@ class TrendFollowingStrategy(BaseStrategy):
             self.last_rejection_reason = "Signal cooldown active"
             return None
         
+        session_mult = self.session_multipliers.get(market_data.session, {"adx_boost": 0, "conf_boost": 0})
+        effective_adx_threshold = self.adx_threshold + session_mult["adx_boost"]
+        
         adx_vals = m5.adx(self.adx_period)
         if len(adx_vals) < 2:
             return None
@@ -56,8 +67,8 @@ class TrendFollowingStrategy(BaseStrategy):
         adx = adx_vals[-1]
         adx_prev = adx_vals[-2]
         
-        if adx < self.adx_threshold:
-            self.last_rejection_reason = f"ADX too low ({adx:.1f} < {self.adx_threshold})"
+        if adx < effective_adx_threshold:
+            self.last_rejection_reason = f"ADX too low ({adx:.1f} < {effective_adx_threshold})"
             return None
         
         if adx <= adx_prev:
@@ -125,7 +136,7 @@ class TrendFollowingStrategy(BaseStrategy):
         current_price = market_data.current_price
         direction = "BUY" if m5_dir == 1 else "SELL"
         
-        base_conf = 0.70
+        base_conf = 0.70 + session_mult["conf_boost"]
         adx_conf = min(0.20, (adx - self.adx_threshold) / 25.0) if adx >= self.adx_threshold else 0.0
         momentum_conf = 0.1 if adx >= self.adx_strong else 0.0
         confidence = base_conf + adx_conf + momentum_conf

@@ -13,6 +13,7 @@ from core.portfolio_manager import PortfolioManager
 from core.regime_gater import RegimeGater
 from core.recovery.checkpoint_manager import CheckpointManager
 from core.execution.order_manager import OrderManager
+from strategies.adaptive_manager import AdaptiveStrategyManager, RegimeAwareStrategy
 
 logger = logging.getLogger("trading_bot.backtester")
 
@@ -104,6 +105,7 @@ class PortfolioBacktester:
         Implements 'Step 15' development loop with Checkpoint support.
         """
         logger.info(f"Starting V4-ULTRA Production Backtest on {symbol}...")
+        logger.info(f"DATA SIZES: target_tf={len(target_tf_data)}, m1={len(m1_data)}, m5={len(m5_data)}, m15={len(m15_data)}, h1={len(h1_data)}")
         
         # Institutional Gating Filter: Must be enabled AND have an allocation > 0
         active_strategies = []
@@ -124,6 +126,12 @@ class PortfolioBacktester:
             active_strategies.append(s)
             
         sid_list = [s.strategy_id for s in active_strategies]
+        
+        # Initialize Adaptive Strategy Manager
+        use_adaptive = self.config.get("backtest", {}).get("adaptive_strategy", True)
+        if use_adaptive and len(active_strategies) > 1:
+            adaptive_manager = AdaptiveStrategyManager(active_strategies, self.config)
+            logger.info(f"Adaptive Strategy Manager initialized with {len(active_strategies)} strategies")
         
         if not resume:
             self.reset(active_strategies)
@@ -204,8 +212,16 @@ class PortfolioBacktester:
                     timestamp=dt
                 )
                 
-                # 3. Micro-service Strategy Replay
-                for strat in active_strategies:
+                # 3. Micro-service Strategy Replay (Adaptive Selection)
+                if use_adaptive and len(active_strategies) > 1:
+                    # Adaptive: Select best strategy based on regime
+                    selected_strat = adaptive_manager.select_strategy(regime_info, market_data)
+                    strategies_to_try = [selected_strat] if selected_strat else []
+                else:
+                    # Legacy: Run all strategies
+                    strategies_to_try = active_strategies
+                
+                for strat in strategies_to_try:
                     sid = strat.strategy_id
                     
                     if RegimeGater.is_drawdown_gated(self.max_drawdowns.get(sid, 0)): continue
@@ -295,14 +311,18 @@ class PortfolioBacktester:
                             self.time = np.array([time])
                         def __len__(self): return 1
                         
-                    m1_fallback = SyntheticM1(
-                        target_tf_data.h[i], 
-                        target_tf_data.l[i], 
-                        target_tf_data.c[i], 
-                        target_tf_data.s[i], 
-                        target_tf_data.time[i]
-                    )
-                    self._manage_active_trades(m1_fallback, tick_value, point, comm_per_lot, active_strategies)
+                    if i < len(target_tf_data.h):
+                        m1_fallback = SyntheticM1(
+                            target_tf_data.h[i], 
+                            target_tf_data.l[i], 
+                            target_tf_data.c[i], 
+                            target_tf_data.s[i], 
+                            target_tf_data.time[i]
+                        )
+                        self._manage_active_trades(m1_fallback, tick_value, point, comm_per_lot, active_strategies)
+                    else:
+                        logger.warning(f"[{dt}] DATA ALERT: Index {i} exceeds target_tf_data bounds ({len(target_tf_data)}). Forcing trade close.")
+                        self._force_close_at_end(target_tf_data, point, tick_value, comm_per_lot, active_strategies)
                 
                 # 5. Equity Sampling & Drawdown Track
                 for sid in self.balances:

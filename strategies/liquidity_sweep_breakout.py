@@ -29,6 +29,14 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
         
         self.min_bars_between_signals = strat_config.get("min_bars_between_signals", 25)
         self._last_signal_bar = 0
+        
+        self.session_multipliers = {
+            "TOKYO": {"body_boost": 0.05, "h1_boost": 0.05, "conf_boost": 0.05},
+            "LONDON": {"body_boost": 0.05, "h1_boost": 0.05, "conf_boost": 0.05},
+            "NEW_YORK": {"body_boost": 0.0, "h1_boost": 0.0, "conf_boost": 0.0},
+            "LONDON/NY": {"body_boost": 0.10, "h1_boost": 0.10, "conf_boost": 0.10},
+            "GLOBAL": {"body_boost": 0.0, "h1_boost": 0.0, "conf_boost": 0.0}
+        }
 
     def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
         strat_config = self.config.get(self.strategy_id, self.config.get("LiquiditySweepBreakout", {}))
@@ -46,6 +54,10 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
         if bars_since_last < self.min_bars_between_signals:
             self.last_rejection_reason = "Signal cooldown active"
             return None
+
+        session_mult = self.session_multipliers.get(market_data.session, {"body_boost": 0, "h1_boost": 0, "conf_boost": 0})
+        effective_body_thresh = self.body_thresh + session_mult["body_boost"]
+        effective_h1_thresh = self.h1_strength_thresh + session_mult["h1_boost"]
 
         h1_candles = market_data.htf_candles
         if len(h1_candles) < 22:
@@ -76,21 +88,21 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
         m5_range = last.high - last.low
         m5_strength = (abs(last.close - last.open) / m5_range) if m5_range > 0 else 0
 
-        if price > r_high and m5_strength >= self.body_thresh:
-            if h1_dir == 1 and h1_strength >= self.h1_strength_thresh and m15_trend != -1 and vol_confirmed:
+        if price > r_high and m5_strength >= effective_body_thresh:
+            if h1_dir == 1 and h1_strength >= effective_h1_thresh and m15_trend != -1 and vol_confirmed:
                 self._last_signal_bar = len(m5)
-                confidence = 0.80 + min(0.15, h1_strength * 0.2)
+                confidence = 0.80 + session_mult["conf_boost"] + min(0.15, h1_strength * 0.2)
                 return TradeSignal(direction="BUY", price=price, confidence=min(0.98, confidence))
         
-        if price < r_low and m5_strength >= self.body_thresh:
-            if h1_dir == -1 and h1_strength >= self.h1_strength_thresh and m15_trend != 1 and vol_confirmed:
+        if price < r_low and m5_strength >= effective_body_thresh:
+            if h1_dir == -1 and h1_strength >= effective_h1_thresh and m15_trend != 1 and vol_confirmed:
                 self._last_signal_bar = len(m5)
-                confidence = 0.80 + min(0.15, h1_strength * 0.2)
+                confidence = 0.80 + session_mult["conf_boost"] + min(0.15, h1_strength * 0.2)
                 return TradeSignal(direction="SELL", price=price, confidence=min(0.98, confidence))
         
         if price > r_high or price < r_low:
-             if m5_strength < self.body_thresh: self.last_rejection_reason = f"Breakout: M5 Strength too low ({m5_strength:.2f})"
-             elif h1_strength < self.h1_strength_thresh: self.last_rejection_reason = f"Breakout: H1 Strength too low ({h1_strength:.2f})"
+             if m5_strength < effective_body_thresh: self.last_rejection_reason = f"Breakout: M5 Strength too low ({m5_strength:.2f})"
+             elif h1_strength < effective_h1_thresh: self.last_rejection_reason = f"Breakout: H1 Strength too low ({h1_strength:.2f})"
              elif not vol_confirmed: self.last_rejection_reason = "Breakout: Volume not confirmed"
              else: self.last_rejection_reason = "Breakout: MTF/Dir Mismatch"
         else:

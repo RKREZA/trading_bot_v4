@@ -3,7 +3,7 @@
   "_version": "4.1-PROFIT",
   "magic_number": 234000,
   "risk_governance": {
-    "risk_per_trade_pct": 1.5,
+    "risk_per_trade_pct": 1.25,
     "max_daily_loss_pct": 3.0,
     "max_drawdown_halt_pct": 8.0,
     "max_consecutive_losses": 3,
@@ -18,54 +18,48 @@
     "LiquiditySession": 0.0
   },
   "TrendFollowing": {
-    "enabled": true,
+    "enabled": false,
     "allowed_sessions": [
       "TOKYO",
-      "LONDON",
-      "NEW_YORK",
-      "LONDON/NY"
+      "NEW_YORK"
     ],
-    "adx_threshold": 30,
-    "adx_strong": 35,
+    "adx_threshold": 25,
+    "adx_strong": 30,
     "rsi_period": 14,
     "sl_atr": 2.0,
     "tp_atr": 4.0,
     "min_confidence": 0.70,
-    "min_bars_between_signals": 30
+    "min_bars_between_signals": 25
   },
   "LiquiditySweepBreakout": {
     "enabled": true,
     "allowed_sessions": [
       "TOKYO",
-      "LONDON",
-      "NEW_YORK",
-      "LONDON/NY"
+      "NEW_YORK"
     ],
     "lookback": 20,
     "body_thresh": 0.70,
     "h1_strength_thresh": 0.55,
-    "sl_atr": 2.0,
+    "sl_atr": 1.5,
     "tp_atr": 6.0,
     "min_confidence": 0.75,
     "min_bars_between_signals": 25
   },
   "SmartMeanReversion": {
-    "enabled": true,
+    "enabled": false,
     "allowed_sessions": [
       "TOKYO",
-      "LONDON",
-      "NEW_YORK",
-      "LONDON/NY"
+      "NEW_YORK"
     ],
     "bb_period": 20,
     "bb_std": 2.0,
     "rsi_period": 14,
-    "rsi_overbought": 75,
-    "rsi_oversold": 25,
-    "sl_atr": 1.5,
-    "tp_atr": 4.5,
-    "min_confidence": 0.70,
-    "min_bars_between_signals": 15
+    "rsi_overbought": 70,
+    "rsi_oversold": 30,
+    "sl_atr": 2.0,
+    "tp_atr": 3.0,
+    "min_confidence": 0.65,
+    "min_bars_between_signals": 20
   },
   "LiquiditySession": {
     "enabled": false,
@@ -98,11 +92,12 @@
     }
   },
   "backtest": {
-    "initial_balance_per_strategy": 10000,
+    "initial_balance_per_strategy": 1000,
     "utc_offset": 3,
     "leverage": 100,
     "deterministic": true,
     "random_seed": 42,
+    "adaptive_strategy": false,
     "costs": {
       "entry_commission_sides": 1.0,
       "exit_commission_sides": 1.0,
