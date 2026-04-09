@@ -48,3 +48,4 @@ btr.log
 /data_cache
 /state
 state/backtest_state.json
+bot.lock
