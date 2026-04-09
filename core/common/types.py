@@ -46,7 +46,7 @@ class CandleArray:
     
     # Internal state for simulation fidelity
     _limit: Optional[int] = field(default=None, repr=False)
-    indicators: Dict[str, np.ndarray] = field(default_factory=dict, repr=False)
+    _indicators: Dict[str, np.ndarray] = field(default_factory=dict, repr=False)
 
     @property
     def limit(self) -> int:
@@ -101,7 +101,7 @@ class CandleArray:
     def slice(self, start: int, end: int) -> "CandleArray":
         """Returns a new CandleArray window. Preserves indicators (O(N) copy)."""
         new_indicators = {}
-        for name, arr in self.indicators.items():
+        for name, arr in self._indicators.items():
             if len(arr) >= end:
                 new_indicators[name] = arr[start:end]
         
@@ -113,7 +113,7 @@ class CandleArray:
             close=self.close[start:end],
             tick_volume=self.tick_volume[start:end],
             spread=self.spread[start:end],
-            indicators=new_indicators
+            _indicators=new_indicators
         )
 
     def __getitem__(self, idx):
@@ -146,37 +146,37 @@ class CandleArray:
 
     def get_indicator(self, name: str) -> np.ndarray:
         """Accesses pre-calculated indicators up to the current limit (O(1) view)."""
-        if name not in self.indicators:
+        if name not in self._indicators:
             return np.full(self.limit, np.nan)
-        return self.indicators[name][:self.limit]
+        return self._indicators[name][:self.limit]
 
     # Legacy helper methods updated to use pre-calculation if available
     def ema(self, period: int) -> np.ndarray:
         key = f"ema_{period}"
-        if key in self.indicators: return self.get_indicator(key)
+        if key in self._indicators: return self.get_indicator(key)
         res = self._calc_ema(self.c, period)
-        self.indicators[key] = res
+        self._indicators[key] = res
         return res
 
     def rsi(self, period: int = 14) -> np.ndarray:
         key = f"rsi_{period}"
-        if key in self.indicators: return self.get_indicator(key)
+        if key in self._indicators: return self.get_indicator(key)
         res = self._calc_rsi(self.c, period)
-        self.indicators[key] = res
+        self._indicators[key] = res
         return res
 
     def atr(self, period: int = 14) -> np.ndarray:
         key = f"atr_{period}"
-        if key in self.indicators: return self.get_indicator(key)
+        if key in self._indicators: return self.get_indicator(key)
         res = self._calc_atr(period)
-        self.indicators[key] = res
+        self._indicators[key] = res
         return res
 
     def adx(self, period: int = 14) -> np.ndarray:
         key = f"adx_{period}"
-        if key in self.indicators: return self.get_indicator(key)
+        if key in self._indicators: return self.get_indicator(key)
         res = self._calc_adx(period)
-        self.indicators[key] = res
+        self._indicators[key] = res
         return res
 
     def _calc_ema(self, data: np.ndarray, period: int) -> np.ndarray:
@@ -209,7 +209,9 @@ class CandleArray:
 
     def _calc_atr(self, period: int) -> np.ndarray:
         if self.limit < period + 1: return np.full(self.limit, np.nan)
-        h, l, cp = self.high[1:self.limit], self.low[1:self.limit], self.close[:self.limit-1]
+        # Institutional Standard: True Range needs |high - prev_close|
+        # h, l are from candle[1:], cp (prev_close) is candle[:-1]
+        h, l, cp = self.h[1:], self.l[1:], self.c[:-1]
         tr = np.maximum(h - l, np.maximum(np.abs(h - cp), np.abs(l - cp)))
         atr = np.full(self.limit, np.nan)
         atr[period] = np.mean(tr[:period])
@@ -220,11 +222,12 @@ class CandleArray:
 
     def _calc_adx(self, period: int) -> np.ndarray:
         if self.limit < period * 2: return np.full(self.limit, np.nan)
-        h, l, cp = self.high[1:self.limit], self.low[1:self.limit], self.close[:self.limit-1]
+        # Institutional Standard: True Range needs |high - prev_close|
+        h, l, cp = self.h[1:], self.l[1:], self.c[:-1]
         
         tr = np.maximum(h - l, np.maximum(np.abs(h - cp), np.abs(l - cp)))
-        up_move = h - self.high[:self.limit-1]
-        down_move = self.low[:self.limit-1] - l
+        up_move = h - self.h[:-1]
+        down_move = self.l[:-1] - l
         
         pos_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
         neg_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)

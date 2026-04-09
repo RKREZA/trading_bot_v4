@@ -12,7 +12,7 @@ from core.session_detector import SessionDetector
 from core.portfolio_manager import PortfolioManager
 from core.regime_gater import RegimeGater
 from core.recovery.checkpoint_manager import CheckpointManager
-from backtesting.simulator import ExecutionSimulator
+from core.execution.order_manager import OrderManager
 
 logger = logging.getLogger("trading_bot.backtester")
 
@@ -32,7 +32,7 @@ class PortfolioBacktester:
         self.config = config
         self.regime_detector = RegimeDetector()
         self.risk_guardian = RiskGuardian(config)
-        self.simulator = ExecutionSimulator(config)
+        self.order_manager = OrderManager(config)
         self.portfolio_manager = PortfolioManager(config)
         self.checkpoint_manager = CheckpointManager()
 
@@ -140,10 +140,10 @@ class PortfolioBacktester:
         console = Console()
         
         with console.status(f"[bold blue]Calibrating {symbol} Strategy Indicators...") as status:
-            target_tf_data.indicators = IndicatorEngine.precalculate_all(symbol, getattr(target_tf_data, "timeframe", "UNKNOWN"), target_tf_data)
-            m5_data.indicators = IndicatorEngine.precalculate_all(symbol, "M5", m5_data)
-            m15_data.indicators = IndicatorEngine.precalculate_all(symbol, "M15", m15_data)
-            h1_data.indicators = IndicatorEngine.precalculate_all(symbol, "H1", h1_data)
+            target_tf_data._indicators = IndicatorEngine.precalculate_all(symbol, getattr(target_tf_data, "timeframe", "UNKNOWN"), target_tf_data)
+            m5_data._indicators = IndicatorEngine.precalculate_all(symbol, "M5", m5_data)
+            m15_data._indicators = IndicatorEngine.precalculate_all(symbol, "M15", m15_data)
+            h1_data._indicators = IndicatorEngine.precalculate_all(symbol, "H1", h1_data)
             logger.info("Indicator Pre-calculation COMPLETED.")
 
         # Pre-flight data integrity check (Step 11)
@@ -183,14 +183,24 @@ class PortfolioBacktester:
                 conf_buffer = RegimeGater.get_confidence_buffer(regime_info.volatility)
 
                 # 2. MarketData Construction (Zero-Copy & Anti-Lookahead)
+                # Institutional Fidelity: Simulate Bid/Ask/Spread (Audit Bug #5 Fix)
+                current_bid = float(target_tf_data.open[i])
+                symbol_cfg = self.config.get("symbols", {}).get(symbol, {})
+                point = symbol_cfg.get("point", 0.0001)
+                spread_val = symbol_cfg.get("spread_pips", 2) * point
+                current_ask = current_bid + spread_val
+
                 market_data = MarketData(
                     symbol=symbol,
                     htf_candles=h1_data,
                     m15_candles=m15_data,
                     m5_candles=m5_data,
                     d1_candles=None,
-                    current_price=target_tf_data.open[i], 
-                    session=SessionDetector.get_session(dt),
+                    current_price=current_bid,
+                    bid=current_bid,
+                    ask=current_ask,
+                    spread=spread_val,
+                    session=SessionDetector.get_session(dt, self.config.get("backtest", {}).get("utc_offset", 0)),
                     timestamp=dt
                 )
                 
@@ -230,13 +240,25 @@ class PortfolioBacktester:
                         lot_size = lot_size * risk_mult
                         
                         if lot_size >= 0.01:
-                            fill = self.simulator.simulate_entry(
-                                signal=signal,
-                                current_price=market_data.current_price,
-                                base_spread_points=float(target_tf_data.spread[i]),
-                                point=point
+                            sig = signal
+                            sig.volume = lot_size
+                            
+                            # Construct price_data for unified execution
+                            price_data = {
+                                "bid": market_data.current_price,
+                                "ask": market_data.current_price + (target_tf_data.spread[i] * point),
+                                "point": point
+                            }
+                            
+                            fill = self.order_manager.execute_signal(
+                                signal=sig,
+                                symbol=symbol,
+                                price_data=price_data,
+                                is_news_blocked=False,
+                                magic=self.risk_guardian.get_magic_number(sid)
                             )
-                            if fill:
+                            
+                            if fill and not fill.get("is_error", False):
                                 entry_comm = lot_size * comm_per_lot
                                 fill.update({
                                     "sl": sl, 
@@ -249,14 +271,39 @@ class PortfolioBacktester:
                                 self.open_trades[sid] = fill
                                 logger.info(f"[{sid}] Trade Entered: {fill['direction']} @ {fill['fill_price']:.5f}")
                             elif self.config.get("backtest", {}).get("debug_signals"):
-                                logger.info(f"[{dt}] [{sid}] Execution REJECTED: Simulator denied entry (Spread/Slip)")
+                                 logger.info(f"[{dt}] [{sid}] Execution REJECTED: OrderManager denied entry (Spread/Slip/Gating)")
                         elif self.config.get("backtest", {}).get("debug_signals"):
                              logger.info(f"[{dt}] [{sid}] Risk REJECTED: Lot size {lot_size:.3f} < 0.01")
 
-                # 4. M1 Intra-Bar Execution
+                # 4. M1 Intra-Bar Execution (Safety Gate: Check for Gaps)
                 m1_slice = self._get_m1_for_m5(m1_data, t)
                 if len(m1_slice) > 0:
                     self._manage_active_trades(m1_slice, tick_value, point, comm_per_lot, active_strategies)
+                elif self.open_trades:
+                    # Institutional Robustness: Fallback to M5 High/Low if M1 is missing (Audit Pass #5 Fix)
+                    logger.warning(f"[{dt}] DATA ALERT: Missing M1 coverage for active trade at {t}. Falling back to M5-bar OHLC validation.")
+                    
+                    # Create a synthetic M1 slice for fallback validation
+                    from core.common.types import CandleArray
+                    # Mock a slice using the current indices high/low/close values
+                    # We create a simple object that behaves like the M1 slice for _manage_active_trades
+                    class SyntheticM1:
+                        def __init__(self, high, low, close, spread, time):
+                            self.high = np.array([high])
+                            self.low = np.array([low])
+                            self.close = np.array([close])
+                            self.spread = np.array([spread])
+                            self.time = np.array([time])
+                        def __len__(self): return 1
+                        
+                    m1_fallback = SyntheticM1(
+                        target_tf_data.h[i], 
+                        target_tf_data.l[i], 
+                        target_tf_data.c[i], 
+                        target_tf_data.s[i], 
+                        target_tf_data.time[i]
+                    )
+                    self._manage_active_trades(m1_fallback, tick_value, point, comm_per_lot, active_strategies)
                 
                 # 5. Equity Sampling & Drawdown Track
                 for sid in self.balances:
@@ -305,7 +352,10 @@ class PortfolioBacktester:
                     elif m1_low + spread <= trade["tp"]: exit_price, event = trade["tp"], "tp"
                 
                 if exit_price:
-                    final_exit, exit_slip = self.simulator.simulate_exit(trade, exit_price, point, event=event)
+                    exit_res = self.order_manager.simulate_exit(trade["ticket"], event, exit_price, point, direction)
+                    final_exit = exit_res["exit_price"]
+                    exit_slip = abs(final_exit - exit_price)
+                    
                     raw_diff = (final_exit - trade["fill_price"]) if direction == "BUY" else (trade["fill_price"] - final_exit)
                     gross_pnl = (raw_diff / point) * tick_value * trade["lots"]
                     exit_comm = trade["lots"] * comm_per_lot

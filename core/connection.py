@@ -590,11 +590,14 @@ class MT5Connection:
         with self.MT5_LOCK:
             result = mt5.order_send(request)
         
-        if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+        if result and result.retcode in [mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_DONE_PARTIAL]:
             logger.info("Position %s closed successfully.", ticket)
             return True
+        elif result and result.retcode == 10006: # TRADE_RETCODE_REJECTED (Position not found)
+            logger.warning("Close attempt: Position %s already closed or missing. Treating as Success.", ticket)
+            return True
         else:
-            logger.warning("Close failed for %s: %s", ticket, result.comment if result else "No Result")
+            logger.warning("Close failed for %s: %s (Retcode: %s)", ticket, result.comment if result else "No Result", result.retcode if result else "N/A")
             return False
 
     def modify_sl_tp(self, ticket: int, symbol: str, sl: float, tp: float):
@@ -701,9 +704,10 @@ class PositionManager:
             if not positions:
                 return []
             
-            # Filter by Magic Number to avoid "Rogue Positions" (manual trades)
-            magic = self.connection.config.get("magic_number", BOT_MAGIC_NUMBER)
-            return [p for p in positions if p.magic == magic]
+            # Institutional Restoration: Range-based Magic Filtering (Audit Bug #1 Fix)
+            # All bot strategies use unique magics in the [BOT_MAGIC_NUMBER, BOT_MAGIC_NUMBER + 999] range.
+            base_magic = self.connection.config.get("magic_number", BOT_MAGIC_NUMBER)
+            return [p for p in positions if base_magic <= p.magic < base_magic + 1000]
             
         except Exception as e:
             logger.error("Error fetching positions: %s", e)
@@ -728,60 +732,3 @@ class PositionManager:
 
     def count_open_positions(self, symbol: str = None) -> int:
         return len(self.get_open_positions(symbol))
-
-    def calculate_lot_size(self, symbol: str, signal, risk_percent: float, account_balance: float = None) -> float:
-        """
-        Calculates the appropriate lot size based on account balance and risk % per trade.
-        Delegates the core math to LotCalculator and applies additional 'tight SL' scaling.
-        
-        Args:
-            symbol (str): Symbol to calculate for.
-            signal (TradeSignal): Proposed trade signal for structural SL info.
-            risk_percent (float): Risk per trade (e.g., 1.0 for 1%).
-            account_balance (Optional[float]): Use specific balance or current account balance.
-            
-        Returns:
-            float: Rounded and clamped lot size.
-        """
-        if account_balance is None:
-            account_balance = self.connection.account_info.get('balance', 1000)
-
-        if risk_percent <= 0 or account_balance <= 0:
-            return 0.01  # fallback
-
-        risk_amount = account_balance * (risk_percent / 100.0)
-
-        with self.connection.MT5_LOCK:
-            symbol_info = mt5.symbol_info(symbol)
-        
-        if symbol_info is None:
-            logger.error("Cannot get symbol info for %s", symbol)
-            return 0.01
-
-        sl_distance = abs(signal.price - signal.stop_loss)
-        
-        # Guard against zero distance or null symbol info values
-        point = symbol_info.point if symbol_info.point > 0 else 0.00001
-        tick_val = symbol_info.trade_tick_value if symbol_info.trade_tick_value > 0 else 1.0
-
-        if sl_distance > 0:
-            # FIX #3: Use standardized tick_val/point ratio for institutional precision
-            lot = risk_amount / (sl_distance * (tick_val / point))
-            lot = max(symbol_info.volume_min, min(symbol_info.volume_max, round(lot / symbol_info.volume_step) * symbol_info.volume_step))
-        else:
-            logger.warning("Zero SL distance for %s. Sizing invalid.", symbol)
-            lot = 0.0 # Safety: Don't trade if distance is 0
-
-        # Scale down lot proportionally if SL is too tight (to avoid risk inflation)
-        point = symbol_info.point
-        risk_points = sl_distance / point
-        min_sl_points = self.connection.config.get("strategy_defaults", {}).get("min_sl_points", 150)
-        if risk_points < min_sl_points:
-            lot *= (risk_points / min_sl_points)
-            # Re-clamp and snap after scaling
-            lot = round(lot / symbol_info.volume_step) * symbol_info.volume_step
-            lot = max(symbol_info.volume_min, min(symbol_info.volume_max, lot))
-
-        # Precision handling
-        decimals = max(0, -int(math.floor(math.log10(symbol_info.volume_step))))
-        return round(float(lot), decimals)

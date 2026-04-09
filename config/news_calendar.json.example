@@ -1,0 +1,38 @@
+{
+  "_comment": "Manual news calendar for Trading Bot V4. Add high-impact events manually to avoid web scraping dependencies.",
+  "_format": "ISO 8601 timestamps in UTC. impact: 'High', 'Medium', 'Low'",
+  "_examples": [
+    {
+      "title": "FOMC Rate Decision",
+      "country": "USD",
+      "impact": "High",
+      "timestamp": "2026-04-30T18:00:00Z"
+    },
+    {
+      "title": "ECB Press Conference",
+      "country": "EUR",
+      "impact": "High", 
+      "timestamp": "2026-04-30T13:30:00Z"
+    }
+  ],
+  "events": [
+    {
+      "title": "NFP - Non-Farm Payrolls",
+      "country": "USD",
+      "impact": "High",
+      "timestamp": "2026-05-02T13:30:00Z"
+    },
+    {
+      "title": "CPI - Consumer Price Index",
+      "country": "USD",
+      "impact": "High",
+      "timestamp": "2026-05-13T13:30:00Z"
+    },
+    {
+      "title": "GDP - Gross Domestic Product",
+      "country": "GBP",
+      "impact": "High",
+      "timestamp": "2026-05-08T07:00:00Z"
+    }
+  ]
+}

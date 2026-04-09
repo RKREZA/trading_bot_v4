@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  trading-bot:
+    build: .
+    container_name: trading_bot_v4
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./config:/app/config:ro
+      - ./logs:/app/logs
+      - ./data_cache:/app/data_cache
+      - ./state:/app/state
+    depends_on:
+      - mt5-terminal
+    
+  mt5-terminal:
+    image: davidalber/headless-metatrader5:latest
+    container_name: mt5_terminal
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - DISPLAY=:99
+    volumes:
+      - mt5_data:/home/mt5
+
+volumes:
+  mt5_data:

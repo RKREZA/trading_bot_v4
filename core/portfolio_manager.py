@@ -32,42 +32,63 @@ class PortfolioManager:
         """
         Institutional Parallel Signal Audit (Step 9).
         Allows multiple non-conflicting strategies to execute in the same cycle.
+        Now enforces allocation filters and confidence prioritizing.
         """
+        # 1. Filter by Direction
         active_signals = {sid: sig for sid, sig in signals.items() if sig.direction != "NONE"}
         if not active_signals:
             return []
 
-        # Institutional Conflict Resolution (Rule: No Hegded positions on same symbol)
-        buy_signals = {sid: sig for sid, sig in active_signals.items() if sig.direction == "BUY"}
-        sell_signals = {sid: sig for sid, sig in active_signals.items() if sig.direction == "SELL"}
+        # 2. Institutional Allocation Audit (Audit Bug #4 Fix)
+        # Filter out strategies with 0% allocation
+        eligible_signals = {}
+        for sid, sig in active_signals.items():
+            # Calculate mock balance to check if strategy is enabled/allocated
+            allocation = self.get_strategy_allocation(sid)
+            if allocation > 0:
+                eligible_signals[sid] = sig
+            else:
+                logger.info("Signal from %s REJECTED: 0.0 core allocation.", sid)
+
+        if not eligible_signals:
+            return []
+
+        # 3. Institutional Conflict Resolution (Rule: No Hegded positions on same symbol)
+        buy_signals = {sid: sig for sid, sig in eligible_signals.items() if sig.direction == "BUY"}
+        sell_signals = {sid: sig for sid, sig in eligible_signals.items() if sig.direction == "SELL"}
 
         # If conflicting signals exist on the same symbol, cancel both to prevent hedging traps
         if buy_signals and sell_signals:
             logger.warning("Signal Conflict detected! Canceling opposing trades on same symbol to prevent hedging.")
             return []
 
+        # 4. Final Approval & Ranking
         approved = []
-        for sid, sig in active_signals.items():
+        for sid, sig in eligible_signals.items():
             approved.append((sid, sig))
             
         # Optional: Sort by confidence for sequential execution pulse
         approved.sort(key=lambda x: x[1].confidence, reverse=True)
         return approved
 
-    def get_strategy_balance(self, total_balance: float, strategy_id: str) -> float:
-        """Looks up allocation with key normalization (e.g., 'trendfollowing_v4' → 'TrendFollowing')."""
-        # Try direct lookup first
+    def get_strategy_allocation(self, strategy_id: str) -> float:
+        """Looks up raw allocation weight (0.0 to 1.0)."""
         allocation = self.allocations.get(strategy_id)
         if allocation is not None:
+            return allocation
+        
+        normalized = strategy_id.replace("_v4", "").replace("_", "").lower()
+        for key in self.allocations:
+            if key.lower().replace("_", "") == normalized:
+                return self.allocations[key]
+        return 0.0 # Default to 0 if not found in config
+
+    def get_strategy_balance(self, total_balance: float, strategy_id: str) -> float:
+        """Calculates allocated balance for a strategy."""
+        allocation = self.get_strategy_allocation(strategy_id)
+        if allocation > 0:
             return total_balance * allocation
         
-        # Normalize: strip _v4 suffix, convert to title case variants
-        normalized = strategy_id.replace("_v4", "").replace("_", "")
-        for key in self.allocations:
-            if key.lower().replace("_", "") == normalized.lower():
-                return total_balance * self.allocations[key]
-        
-        # Fallback: equal share
-        logger.warning(f"No allocation found for '{strategy_id}'. Using equal share.")
-        num_strategies = len(self.allocations) or 1
-        return total_balance / num_strategies
+        # Fallback: equal share if somehow matched but not in dict (Should not happen with get_strategy_allocation)
+        logger.warning(f"No allocation found for '{strategy_id}'. Using minimum share.")
+        return total_balance * (1.0 / (len(self.allocations) or 4))

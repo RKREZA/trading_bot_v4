@@ -22,6 +22,7 @@ from core.common.types import CandleArray
 from core.strategy_runtime import StrategyRuntime
 from core.risk.risk_guardian import RiskGuardian
 from core.execution.order_manager import OrderManager
+from core.health_server import HealthServer
 from strategies import create_strategy
 from dashboard import TradingDashboard, start_dashboard
 
@@ -56,7 +57,8 @@ class LiveOrchestrator:
         # 2. INSTANTIATE MICRO-SERVICES
         self.data_manager = DataFetcher()
         self.news_filter = InstitutionalNewsFilter(self.config)
-        self.order_manager = OrderManager(self.config)
+        # BUG FIX: Pass self.connection so OrderManager executes LIVE trades!
+        self.order_manager = OrderManager(self.config, self.connection)
         
         # 3. CONSTRUCT RUNTIMES
         self.runtimes = []
@@ -76,16 +78,20 @@ class LiveOrchestrator:
             except Exception as e:
                 logging.error(f"Failed to instantiate strategy {name}: {str(e)}")
 
-        # 4. INITIALIZE ORCHESTRATOR (Satisfy 6 dependencies)
+        # 4. INITIALIZE ORCHESTRATOR (Satisfy dependencies)
         self.orchestrator = StrategyOrchestrator(
             runtimes=self.runtimes,
             config=self.config,
-            connection=self.connection,
+            order_manager=self.order_manager,
             position_manager=self.pos_manager,
-            notification_manager=None, # TUI serves as notifier
-            broker_clock=self.connection, # Uses MT5 Server Time
+            notification_manager=None, 
+            broker_clock=self.connection, 
             news_filter=self.news_filter
         )
+        
+        # 5. INITIALIZE HEALTH SERVER (Production Observability)
+        health_port = int(os.getenv("HEALTH_PORT", 8080))
+        self.health_server = HealthServer(port=health_port, bot_ref=self)
         
     def _preprocess_indicators(self, candles: CandleArray):
         """Institutional Preprocessing Layer: Ensures all analysts have warm indicator caches."""
@@ -125,6 +131,10 @@ class LiveOrchestrator:
         if not self.connection.connect():
             print("CRITICAL: MT5 Connection Failed. Check credentials/server in .env.")
             return
+
+        # Start Health Server
+        self.health_server.start()
+        logger.info(f"Health server started on port {health_port}")
 
         dashboard = TradingDashboard()
         consecutive_errors = 0
@@ -186,7 +196,7 @@ class LiveOrchestrator:
                         for handler in logging.getLogger().handlers: handler.flush()
                         
                         self._update_ui(live, dashboard, status=f"SYNCING ({missing[0].split('(')[0]})...", tick=tick)
-                        time.sleep(0.5) # Responsive Sync Pulse (Upgraded for UX)
+                        time.sleep(2) # Reduced sync pulse frequency to save API overhead
                         continue
 
                     # 1.5 Data Integrity & Synchronization Guard (Sync Pillar)
@@ -212,6 +222,13 @@ class LiveOrchestrator:
                     for tf_data in [h1_data, m15_data, m5_data]:
                         self._preprocess_indicators(tf_data)
 
+                    # 1.7 Fetch Real-time Tick Data
+                    tick = mt5.symbol_info_tick(self.symbol)
+                    if tick is None:
+                        logger.error(f"Failed to get tick for {self.symbol}. Skipping cycle.")
+                        time.sleep(1)
+                        continue
+
                     # 2. Package Market State (Satisfy V4 MarketData contract)
                     md = MarketData(
                         symbol=self.symbol,
@@ -219,8 +236,11 @@ class LiveOrchestrator:
                         m15_candles=m15_data,
                         m5_candles=m5_data,
                         d1_candles=d1_data,
-                        current_price=float(m5_data.c[-1]) if len(m5_data) > 0 else 0.0,
-                        session=SessionDetector.get_session(dt_server),
+                        current_price=float(tick.bid),
+                        bid=float(tick.bid),
+                        ask=float(tick.ask),
+                        spread=float(tick.ask - tick.bid),
+                        session=SessionDetector.get_session(dt_server, self.config.get("backtest", {}).get("utc_offset", 0)),
                         timestamp=dt_server
                     )
 
@@ -255,6 +275,11 @@ class LiveOrchestrator:
                     # Record Executions
                     for exec_res in pulse_report.get("execution", []):
                         self.logs.append(f"[{pulse_report.get('timestamp')}] [TRADE] ENTERED {exec_res.get('direction')} @ {exec_res.get('fill_price')}")
+                        self.health_server.record_trade(exec_res.get('direction', 'UNKNOWN'))
+                    
+                    # Record Metrics
+                    self.health_server.record_cycle()
+                    self.health_server.record_signal()
 
                     if len(self.logs) > 50: self.logs = self.logs[-50:]
 
@@ -271,6 +296,7 @@ class LiveOrchestrator:
                     import traceback
                     consecutive_errors += 1
                     err_msg = str(e)
+                    self.health_server.record_error()  # Track errors in metrics
                     
                     # Log traceback DIRECTLY to the live log file for immediate awareness
                     logging.error(f"FATAL CYCLE ERROR: {err_msg}")
@@ -296,6 +322,7 @@ class LiveOrchestrator:
         
         # Graceful shutdown
         logging.info("Shutting down. Open positions remain managed by MT5.")
+        self.health_server.stop()  # Stop health server
         if os.path.exists("bot.lock"):
             try:
                 os.remove("bot.lock")
@@ -309,9 +336,17 @@ class LiveOrchestrator:
         if not tick:
             tick = mt5.symbol_info_tick(self.symbol)
         
-        si = mt5.symbol_info(self.symbol)
-        ai = mt5.account_info()
-        ti = mt5.terminal_info()
+        # Institutional Performance: Cache static metadata to reduce API overhead (Audit Bug #8)
+        if not hasattr(self, "_cached_si") or self._cached_si is None:
+            self._cached_si = mt5.symbol_info(self.symbol)
+        if not hasattr(self, "_cached_ai") or self._cached_ai is None:
+            self._cached_ai = mt5.account_info()
+        if not hasattr(self, "_cached_ti") or self._cached_ti is None:
+            self._cached_ti = mt5.terminal_info()
+        
+        si = self._cached_si
+        ai = self._cached_ai
+        ti = self._cached_ti
         
         price_now = tick.bid if tick else 0.0
         ask_now = tick.ask if tick else 0.0
@@ -371,7 +406,7 @@ class LiveOrchestrator:
             # Try to detect session using broker clock if available
             dt_server = self.connection.get_broker_time(self.symbol)
             if dt_server:
-                state["session"] = SessionDetector.get_session(dt_server)
+                state["session"] = SessionDetector.get_session(dt_server, self.config.get("backtest", {}).get("utc_offset", 0))
                 state["server_time"] = dt_server.strftime("%d-%b-%Y %I:%M:%S %p")
         
         if reg:
@@ -398,6 +433,9 @@ class LiveOrchestrator:
                 "news_stale": (time.time() - os.path.getmtime(self.news_filter.cache_file)) > 86400 if os.path.exists(self.news_filter.cache_file) else True
             })
 
+        # Add system metrics to state
+        state["metrics"] = self.health_server.get_metrics()
+        
         live.update(dashboard.update(state), refresh=True)
 
 if __name__ == "__main__":

@@ -28,7 +28,10 @@ class MarketData:
     m15_candles: CandleArray
     m5_candles: CandleArray
     d1_candles: Optional[CandleArray]
-    current_price: float
+    current_price: float # Deprecated: Use bid/ask for precision
+    bid: float
+    ask: float
+    spread: float
     session: str
     timestamp: datetime
     preprocessed: Optional[dict] = None   # Precomputed indicators per M5 bar
@@ -73,7 +76,7 @@ class BaseStrategy(ABC):
         self.last_rejection_reason = ""
         
         # Institutional Gating Attributes
-        self.min_confidence = float(config.get("min_confidence", 0.6))
+        self.min_confidence = float(config.get("min_confidence", 0.5))
         self.min_rr = float(config.get("min_rr", 2.0))
 
     @abstractmethod

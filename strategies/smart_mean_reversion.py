@@ -49,7 +49,6 @@ class SmartMeanReversionStrategy(BaseStrategy):
 
     def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
         # 1. Session Gating
-        # Priority: strategy_id -> "SmartMeanReversion"
         strat_config = self.config.get(self.strategy_id, self.config.get("SmartMeanReversion", {}))
         allowed_sessions = strat_config.get("allowed_sessions", [])
         if allowed_sessions and market_data.session not in allowed_sessions:
@@ -63,26 +62,19 @@ class SmartMeanReversionStrategy(BaseStrategy):
             self.last_rejection_reason = "MR: Warming up data buffer"
             return None
 
-        # 3. Safe Array Extraction (Extracting only what we need)
-        # Using .c for raw close prices array from CandleArray
-        closes = m5.c[-(required_len):]
-        if len(closes) < self.bb_period: return None
-
-        # 4. Manual Bollinger Bands
-        bb_closes = closes[-self.bb_period:]
-        current_sma = np.mean(bb_closes)
-        current_std = np.std(bb_closes)
+        # 3. Standardized Institutional Indicators (Audit Bug #2 Fix)
+        # Using unified CandleArray methods ensures parity with backtester.
+        upper_bands, lower_bands, sma_bands = m5.bollinger_bands(self.bb_period, self.bb_std)
+        upper_band = upper_bands[-1]
+        lower_band = lower_bands[-1]
         
-        if np.isnan(current_sma) or np.isnan(current_std) or current_std == 0:
+        rsi_series = m5.rsi(self.rsi_period)
+        current_rsi = rsi_series[-1]
+
+        if np.isnan(upper_band) or np.isnan(current_rsi):
             return None
-            
-        upper_band = current_sma + (current_std * self.bb_std)
-        lower_band = current_sma - (current_std * self.bb_std)
 
-        # 5. Manual RSI
-        current_rsi = self._calculate_rsi(closes, self.rsi_period)
-
-        # 6. Price Action Context
+        # 4. Price Action Context
         last_candle = m5[-1]
         candle_range = last_candle.high - last_candle.low
         if candle_range <= 0: return None
@@ -95,7 +87,7 @@ class SmartMeanReversionStrategy(BaseStrategy):
         
         # SELL: Over-extended High
         if current_price >= upper_band and current_rsi >= self.rsi_overbought:
-            if (top_wick / candle_range) > 0.25: # Slightly relaxed wick requirement
+            if (top_wick / candle_range) > 0.25:
                 return TradeSignal(direction="SELL", price=current_price, confidence=0.80)
             else:
                 self.last_rejection_reason = "MR: Weak Top Wick"

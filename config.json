@@ -18,18 +18,22 @@
   "TrendFollowing": {
     "enabled": true,
     "allowed_sessions": [
+      "TOKYO",
       "LONDON",
-      "TOKYO"
+      "NEW_YORK",
+      "LONDON/NY"
     ],
-    "adx_threshold": 25,
+    "adx_threshold": 20,
     "sl_atr": 1.5,
     "rr_target": 8.0
   },
   "LiquiditySweepBreakout": {
     "enabled": true,
     "allowed_sessions": [
+      "TOKYO",
       "LONDON",
-      "TOKYO"
+      "NEW_YORK",
+      "LONDON/NY"
     ],
     "body_thresh": 0.65,
     "h1_strength_thresh": 0.5,
@@ -39,11 +43,13 @@
   "SmartMeanReversion": {
     "enabled": true,
     "allowed_sessions": [
+      "TOKYO",
+      "LONDON",
       "NEW_YORK",
-      "LONDON"
+      "LONDON/NY"
     ],
     "bb_period": 20,
-    "bb_std": 2.5,
+    "bb_std": 2.2,
     "rsi_period": 14,
     "rsi_overbought": 70,
     "rsi_oversold": 30,
@@ -53,8 +59,10 @@
   "LiquiditySession": {
     "enabled": false,
     "allowed_sessions": [
+      "TOKYO",
       "LONDON",
-      "NEW_YORK"
+      "NEW_YORK",
+      "LONDON/NY"
     ],
     "range_maturity_limit": 4.0,
     "vol_trigger_mult": 0.5,

@@ -93,15 +93,20 @@ class WalkForwardValidator:
                 current_is_start += timedelta(weeks=test_weeks)
                 continue
 
+            # Institutional Optimization: Replace deepcopy with Factory Reset (Audit Pass #5 Fix)
+            # Fresh instantiation is faster and avoids memory bloat from indicator caches
+            is_strategies = [strat.__class__(strat.strategy_id, strat.config) for strat in strategies]
             is_backtester = PortfolioBacktester(self.config)
-            is_history, _ = is_backtester.run(symbol, strategies, is_data["M5"], is_data.get("H1"), is_data.get("M15"), is_data.get("M5"), is_data.get("M1"))
+            is_history, _ = is_backtester.run(symbol, is_strategies, is_data["M5"], is_data.get("H1"), is_data.get("M15"), is_data.get("M5"), is_data.get("M1"))
             is_profit = sum(t['pnl'] for t in is_history) if is_history else 1.0
 
             # 2. Run Out-Of-Sample (Validation)
+            # Fresh re-initialization for OOS to ensure zero leakage from IS window
+            oos_strategies = [strat.__class__(strat.strategy_id, strat.config) for strat in strategies]
             backtester = PortfolioBacktester(self.config)
             history, equity_history = backtester.run(
                 symbol, 
-                strategies, 
+                oos_strategies, 
                 oos_data["M5"], 
                 oos_data.get("H1"), 
                 oos_data.get("M15"), 

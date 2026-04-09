@@ -6,13 +6,14 @@ from core.common.types import TradeSignal
 
 class OrderManager:
     """
-    Institutional Order Execution Manager.
-    Simulates realistic market execution including latency, slippage, and spread validation.
-    Independently runnable and testable.
+    V4-ULTRA Unified Execution Engine.
+    Handles both LIVE MT5 execution and historical SIMULATION.
+    Centralizes: Latency, Slippage, Spread Validation, and Retry Logic.
     """
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], connection=None):
         self.config = config
+        self.connection = connection # MT5Connection if live
         exe_cfg = config.get("execution", {})
         
         self.latency_ms = int(exe_cfg.get("latency_ms", 150))
@@ -35,18 +36,33 @@ class OrderManager:
                        signal: TradeSignal, 
                        symbol: str, 
                        price_data: Dict[str, float],
-                       is_news_blocked: bool = False) -> Optional[Dict[str, Any]]:
+                       is_news_blocked: bool = False,
+                       magic: int = None,
+                       comment: str = "V4-ULTRA") -> Optional[Dict[str, Any]]:
         """
         Processes a TradeSignal with institutional realism (Spread, News, Latency).
+        Routes to Live MT5 if connection is present, otherwise Simulates.
         """
         if signal.direction == "NONE":
             return None
 
-        # 1. News Blockade (Step 6.3)
+        # 1. News Blockade
         if is_news_blocked:
             self.logger.warning(f"Execution REJECTED: News Event Active for {symbol}")
             return None
 
+        # 2. Institutional Live Path
+        if self.connection and not self.config.get("backtest", {}).get("enabled", False):
+            # Live execution via MT5Connection
+            return self.connection.place_order(
+                symbol=symbol,
+                signal=signal,
+                lot_size=getattr(signal, 'volume', 0.01),
+                magic=magic,
+                comment=comment
+            )
+
+        # 3. Simulation Path (Audit Bug #7 Fix)
         bid = price_data.get('bid')
         ask = price_data.get('ask')
         point = price_data.get('point', 0.00001)
@@ -55,7 +71,7 @@ class OrderManager:
             self.logger.warning(f"Execution failed: Missing price data for {symbol}")
             return None
 
-        # 2. Variable Spread Simulation (Step 6.1)
+        # Variable Spread Simulation
         base_spread_pts = (ask - bid) / point
         effective_spread = self._get_effective_spread(base_spread_pts)
         
@@ -63,23 +79,16 @@ class OrderManager:
             self.logger.warning(f"Execution Rejected: Spread too high ({effective_spread:.1f} > {self.max_spread_pts})")
             return None
 
-        # Update ask to reflect effective spread for fill calculation
-        spread_diff = (effective_spread - base_spread_pts) * point
-        ask_adj = ask + spread_diff
-        bid_adj = bid - spread_diff # Optional: split it.
-
-        # 3. Simulate Latency (Step 6.2)
+        # Simulate Latency
         if not self.deterministic:
             time.sleep(self._rng.uniform(0.5, 1.5) * (self.latency_ms / 1000.0))
 
-        # 4. Simulate Entry Slippage
+        # Simulate Entry Slippage
         slip_points = self._sample_slippage(point, tier="entry")
-        fill_price = ask_adj + slip_points if signal.direction == "BUY" else bid_adj - slip_points
+        fill_price = ask + slip_points if signal.direction == "BUY" else bid - slip_points
         
         actual_slippage_pips = slip_points / point if point > 0 else 0
         
-        self.logger.info(f"ORDER_EXECUTED: {signal.direction} {symbol} @ {fill_price:.5f} (Slip: {actual_slippage_pips:.2f} pips)")
-
         return {
             "ticket": self._rng.randint(1000000, 9999999),
             "symbol": symbol,
@@ -88,9 +97,8 @@ class OrderManager:
             "actual_slippage_pips": actual_slippage_pips,
             "sl": signal.stop_loss,
             "tp": signal.take_profit,
-            "lot": signal.volume if hasattr(signal, 'volume') else 0.0,
+            "lots": getattr(signal, 'volume', 0.0),
             "timestamp": time.time(),
-            "latency_ms": self.latency_ms,
             "is_error": False
         }
 

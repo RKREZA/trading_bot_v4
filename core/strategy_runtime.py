@@ -126,6 +126,9 @@ if __name__ == "__main__":
         m5_candles=None,
         d1_candles=None,
         current_price=1.1000,
+        bid=1.1000,
+        ask=1.1002,
+        spread=0.0002,
         session="NY",
         timestamp=datetime.now()
     )

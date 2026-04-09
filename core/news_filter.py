@@ -55,8 +55,21 @@ class InstitutionalNewsFilter:
             self.fetch_news()
 
     def fetch_news(self):
-        """Fetches news with advanced spoofing, DailyFX fallback, and manual overrides."""
-        # 1. Check for Manual Override
+        """Fetches news with local calendar priority, then web scraping fallback."""
+        # 1. Check for Local Calendar (Primary - No web dependency)
+        local_calendar = "config/news_calendar.json"
+        if os.path.exists(local_calendar):
+            try:
+                with open(local_calendar, 'r') as f:
+                    data = json.load(f)
+                    events = data.get("events", data if isinstance(data, list) else [])
+                    self.events = self._normalize_timestamps(events)
+                logger.info(f"News: Loaded {len(self.events)} events from local calendar (no web dependency).")
+                return
+            except Exception as e:
+                logger.warning(f"News: Failed to load local calendar: {e}. Falling back to web sources.")
+
+        # 2. Legacy Manual Override (for backward compatibility)
         manual_file = "config/news_manual.json"
         if os.path.exists(manual_file):
             try:
@@ -97,8 +110,15 @@ class InstitutionalNewsFilter:
                 for event in raw_data:
                     if event.get("impact") in self.impact_levels:
                         try:
-                            dt = datetime.fromisoformat(event["date"])
-                            utc_ts = dt.timestamp()
+                            # 1. Institutional Timezone Normalization (Audit Bug #1 Fixed)
+                            # ForexFactory dates are US/Eastern. We parse and convert to UTC.
+                            naive_dt = datetime.fromisoformat(event["date"])
+                            
+                            import pytz
+                            est_tz = pytz.timezone("US/Eastern")
+                            # FF dates are already in EST/EDT (Source local). We just localize.
+                            localized_dt = est_tz.localize(naive_dt)
+                            utc_ts = localized_dt.timestamp()
                             
                             filtered_events.append({
                                 "title": event.get("title"),
@@ -168,6 +188,32 @@ class InstitutionalNewsFilter:
                 json.dump(self.events, f, indent=2)
         except Exception as e:
             logger.error(f"News: Cache save failed: {e}")
+
+    def _normalize_timestamps(self, events: List[Dict]) -> List[Dict]:
+        """Normalizes timestamps from ISO strings to Unix floats."""
+        normalized = []
+        for event in events:
+            ts = event.get("timestamp")
+            if isinstance(ts, str):
+                try:
+                    dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                    ts = dt.timestamp()
+                except Exception:
+                    logger.debug(f"News: Skipping event with invalid timestamp: {ts}")
+                    continue
+            elif isinstance(ts, (int, float)):
+                if ts > 1e12:  # milliseconds
+                    ts = ts / 1000.0
+            else:
+                continue
+                
+            normalized.append({
+                "title": event.get("title", "Unknown"),
+                "country": event.get("country", "ALL"),
+                "impact": event.get("impact", "Medium"),
+                "timestamp": ts
+            })
+        return normalized
 
     def is_blocked(self, symbol: str, current_time: float) -> Optional[str]:
         """

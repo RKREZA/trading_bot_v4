@@ -15,18 +15,26 @@ class RiskGuardian:
         self.config = config
         self.broker_clock = broker_clock
         
-        # Extract configurations with safe defaults
-        risk_cfg = config.get("risk_governance", {})
+        # Institutional Integrity: Resilient Config (Audit PASS #5 Fix)
+        # We use safe defaults to prevent startup crashes while logging critical warnings.
+        logger = logging.getLogger("trading_bot.risk")
+        risk_governance = config.get("risk_governance", {})
+        if not risk_governance:
+             logger.critical("CRITICAL CONFIG WARNING: 'risk_governance' section missing! Using safe defaults.")
+
+        # Institutional Safe Defaults
+        self.risk_per_trade_pct = float(risk_governance.get("risk_per_trade_pct", 0.5))
+        self.max_daily_loss_pct = float(risk_governance.get("max_daily_loss_pct", 5.0))
+        self.max_drawdown_halt_pct = float(risk_governance.get("max_drawdown_halt_pct", 20.0))
         
-        self.initial_balance = float(config.get("backtest", {}).get("initial_balance", 1000.0))
-        self.risk_per_trade_pct = float(risk_cfg.get("risk_per_trade_pct", 0.5))
-        self.max_daily_loss_pct = float(risk_cfg.get("max_daily_loss_pct", 5.0))
-        self.max_drawdown_halt_pct = float(risk_cfg.get("max_drawdown_halt_pct", 20.0))
+        if "risk_per_trade_pct" not in risk_governance:
+            logger.warning(f"Risk parameter 'risk_per_trade_pct' missing. Defaulting to safe {self.risk_per_trade_pct}%.")
         
         # State Tracking
+        self.initial_balance = float(config.get("backtest", {}).get("initial_balance", config.get("initial_balance", 1000.0)))
         self.daily_loss = 0.0
         self.consecutive_losses = 0
-        self.equity_history = deque(maxlen=200)  # Bounded to prevent memory leaks
+        self.equity_history = deque(maxlen=200)
         self.error_count = 0
         self.max_equity = self.initial_balance
         self.kill_switch_active = False

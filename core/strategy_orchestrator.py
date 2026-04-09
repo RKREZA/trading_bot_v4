@@ -7,6 +7,7 @@ from core.strategy_runtime import StrategyRuntime
 from core.portfolio_manager import PortfolioManager
 from core.base_strategy import MarketData
 from core.common.types import TradeSignal
+from core.execution.order_manager import OrderManager
 
 logger = logging.getLogger("trading_bot.orchestrator")
 
@@ -21,14 +22,15 @@ class StrategyOrchestrator:
     def __init__(self, 
                  runtimes: List[StrategyRuntime], 
                  config: dict, 
-                 connection,
+                 order_manager: OrderManager,
                  position_manager, 
                  notification_manager,
                  broker_clock,
                  news_filter):
         self.runtimes = runtimes
         self.config = config
-        self.connection = connection
+        self.order_manager = order_manager
+        self.connection = order_manager.connection # Underlying connection
         self.position_manager = position_manager
         self.notification_manager = notification_manager
         self.broker_clock = broker_clock
@@ -37,7 +39,12 @@ class StrategyOrchestrator:
         self.portfolio_manager = PortfolioManager(self.config)
         self.last_cycle_time: Optional[datetime] = None
         self.last_analysis: Dict[str, Any] = {}
-        self._analysis_lock = threading.Lock() # Fix: Lock for thread-safe cross-thread state access
+        self._analysis_lock = threading.Lock() 
+
+        # Institutional State: Open Ticket Registry (Audit Bug #2 Fix)
+        # Provides a secondary source of truth for position awareness
+        self._open_tickets = set()
+        self._tickets_lock = threading.Lock()
 
         # Asynchronous Trailing Stop Management (Rule 3.1)
         self._stop_thread = threading.Thread(target=self._trailing_stop_loop, daemon=True)
@@ -75,7 +82,8 @@ class StrategyOrchestrator:
             "news_blocked": blocking_event,
             "upcoming_news": [e["title"] for e in upcoming_obj],
             "upcoming_news_obj": upcoming_obj,
-            "timestamp": market_data.timestamp.strftime("%H:%M:%S")
+            "timestamp": market_data.timestamp.strftime("%H:%M:%S"),
+            "open_tickets": list(self._open_tickets) # Dashboard visibility
         }
         
         # Update cache for async services (Rule 3.1) - Thread Safe
@@ -94,21 +102,33 @@ class StrategyOrchestrator:
         
         # 3. ACTIVATE RELEVANT STRATEGIES (Regime Gating)
         from core.regime_gater import RegimeGater
-        active_runtimes = [
-            r for r in self.runtimes 
-            if r.strategy.is_symbol_allowed(symbol) and RegimeGater.is_strategy_allowed(r.strategy.__class__.__name__, market_type)
-        ]
+        active_runtimes = []
+        for r in self.runtimes:
+            if not r.strategy.is_symbol_allowed(symbol):
+                continue
+            
+            # Diagnostic: Session Gating
+            allowed_sessions = r.strategy.config.get("allowed_sessions", [])
+            if allowed_sessions and market_data.session not in allowed_sessions:
+                if self.config.get("backtest", {}).get("debug_signals"):
+                    logger.debug(f"[{symbol}] [{r.strategy_id}] Skipped: Session {market_data.session} not in {allowed_sessions}")
+                continue
+
+            if RegimeGater.is_strategy_allowed(r.strategy.__class__.__name__, market_type):
+                active_runtimes.append(r)
         
-        # 4. GENERATE SIGNALS (Independent Generation)
+        # 4. GENERATE SIGNALS (Institutional Sandbox Execution - Audit Bug #3 Fix)
         raw_signals = {}
         for runtime in active_runtimes:
             sid = runtime.strategy_id
-            sig = runtime.strategy.generate_signal(market_data)
+            
+            # Execute through the Runtime Sandbox to enforce safety gates (Rule 8)
+            sig = runtime.execute_cycle(market_data)
             
             # Telemetry: Record Full Signal (including Comparative Metrics)
             pulse_report["strategies"][sid] = {
                 "signal": sig if sig else "NONE",
-                "metrics": runtime.strategy.get_metrics(market_data),
+                "metrics": runtime.strategy.get_metrics(market_data) if sig else {},
                 "thresholds": runtime.strategy.get_thresholds()
             }
             
@@ -190,18 +210,27 @@ class StrategyOrchestrator:
             sig.volume = runtime.risk_guardian.calculate_lot_size(strat_balance, sl_dist, symbol_info)
             
             if sig.volume > 0:
-                # 8. LIVE EXECUTION BRIDGE (with Strategy-Specific Magic)
+                # 8. UNIFIED EXECUTION BRIDGE (Audit Bug #7 Fix)
                 magic = runtime.risk_guardian.get_magic_number(sid)
-                execution_result = self.connection.place_order(
-                    symbol, 
-                    sig, 
-                    sig.volume,
-                    comment=f"V4 {sid.upper()} PARALLEL",
-                    magic=magic
+                
+                # Construct price_data for OrderManager simulation fallback
+                price_data = {
+                    "bid": market_data.current_price,
+                    "ask": market_data.current_price + (symbol_info.get("spread", 0) * symbol_info.get("point", 0.0001)),
+                    "point": symbol_info.get("point", 0.0001)
+                }
+                
+                execution_result = self.order_manager.execute_signal(
+                    signal=sig,
+                    symbol=symbol,
+                    price_data=price_data,
+                    is_news_blocked=False, # Already checked at start of cycle
+                    magic=magic,
+                    comment=f"V4 {sid.upper()} PARALLEL"
                 )
                 
                 # 9. PERFORMANCE TRACKER LOGS RESULT
-                if execution_result:
+                if execution_result and not execution_result.get("is_error", False):
                     # Strategy-specific feedback
                     runtime.risk_guardian.check_governance(
                         current_balance, current_equity, 
@@ -209,6 +238,13 @@ class StrategyOrchestrator:
                         is_error=execution_result.get("is_error", False)
                     )
                     pulse_report["execution"].append(execution_result)
+                    
+                    # Store Ticket for Awareness (Audit Bug #2 Fix)
+                    ticket = execution_result.get("ticket")
+                    if ticket:
+                        with self._tickets_lock:
+                            self._open_tickets.add(ticket)
+                            logger.info(f"[{sid}] Ticket {ticket} added to Orchestrator Registry.")
             
         return pulse_report
 
@@ -323,6 +359,16 @@ class StrategyOrchestrator:
         logger.info("Trailing Stop Service started.")
         while True:
             try:
+                # 1. Synchronize Registry with Live Positions
+                try:
+                    live_pos = self.position_manager.get_open_positions()
+                    live_tickets = {p.ticket for p in live_pos}
+                    with self._tickets_lock:
+                        # Prune tickets no longer in MT5
+                        self._open_tickets = self._open_tickets.intersection(live_tickets)
+                except Exception as e:
+                    logger.debug(f"Ticket Sync failed: {e}")
+
                 # Use a snapshot of the analysis dictionary to avoid ConcurrentModificationException
                 with self._analysis_lock:
                     analysis_snapshot = dict(self.last_analysis)

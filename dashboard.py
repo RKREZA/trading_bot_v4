@@ -221,6 +221,20 @@ class TradingDashboard:
                 lines.append(f"{pos.get('symbol', '???'):<10} | {pos.get('type_text', '???'):<5} | {pos.get('volume', 0):<6.2f} | [{pnl_color}]${pnl:<9.2f}[/]")
 
         lines.append(sep)
+        lines.append("System Metrics")
+        metrics = state.get("metrics", {}) or {}
+        if metrics:
+            uptime = metrics.get("uptime_seconds", 0)
+            uptime_str = f"{uptime // 3600}h {(uptime % 3600) // 60}m" if uptime > 0 else "N/A"
+            cycles = metrics.get("cycles_completed", 0)
+            signals = metrics.get("signals_generated", 0)
+            trades = metrics.get("trades_executed", 0)
+            errors = metrics.get("errors", 0)
+            lines.append(f"UPTIME : {uptime_str} | CYCLES : {cycles} | SIGNALS : {signals} | TRADES : {trades} | ERRORS : [red]{errors}[/]" if errors else f"UPTIME : {uptime_str} | CYCLES : {cycles} | SIGNALS : {signals} | TRADES : {trades} | ERRORS : {errors}")
+        else:
+            lines.append("[dim]METRICS UNAVAILABLE[/]")
+
+        lines.append(sep)
         
         content = "\n".join(lines)
         self.layout = Text.from_markup(content)

@@ -2,6 +2,7 @@ import logging
 import time
 import datetime
 import numpy as np
+import threading
 from typing import Dict, List, Optional, Any
 from core.common.types import CandleArray
 
@@ -13,7 +14,7 @@ except ImportError:
 class SourceHandler:
     """
     Institutional Data Source Handler.
-    Abstracts MT5 communication and provides high-performance candle caching.
+    Abstracts MT5 communication and provides high-performance candle caching with rate limiting.
     Independently runnable and testable.
     """
 
@@ -24,14 +25,33 @@ class SourceHandler:
         "H1": 60,
         "D1": 3600
     }
+    
+    # Rate limiting: Max API calls per second
+    MAX_CALLS_PER_SECOND = 10
+    MIN_CALL_INTERVAL = 1.0 / MAX_CALLS_PER_SECOND
 
     def __init__(self, connection_lock=None):
         self._cache: Dict[str, Any] = {}
         self.lock = connection_lock
         self.logger = logging.getLogger("trading_bot.data")
+        self._last_call_time: Dict[str, float] = {}
+        self._rate_limit_lock = threading.Lock()
         
         if mt5 is None:
             self.logger.warning("MetaTrader5 package not found. Running in simulation mode.")
+
+    def _rate_limit(self, cache_key: str) -> None:
+        """Enforces rate limiting to prevent MT5 API overload."""
+        with self._rate_limit_lock:
+            now = time.time()
+            last_time = self._last_call_time.get(cache_key, 0)
+            elapsed = now - last_time
+            
+            if elapsed < self.MIN_CALL_INTERVAL:
+                sleep_time = self.MIN_CALL_INTERVAL - elapsed
+                time.sleep(sleep_time)
+            
+            self._last_call_time[cache_key] = time.time()
 
     def fetch_candles(self, 
                       symbol: str, 

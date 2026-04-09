@@ -7,17 +7,17 @@ class SessionDetector:
     """
     
     @staticmethod
-    def get_session(dt: datetime.datetime) -> str:
+    def get_session(dt: datetime.datetime, broker_offset_hours: int = 0) -> str:
         """
-        Determines the current market session based on the hour of the day.
+        Determines the current market session.
         
-        Session Map (Broker Time):
-        - TOKYO: 00:00 - 08:00
-        - LONDON: 08:00 - 16:00
-        - NEW_YORK: 13:00 - 21:00
-        - LONDON/NY OVERLAP: 13:00 - 16:00 (Prioritized)
+        Institutional Standard: All internal logic uses UTC. 
+        If 'dt' is UTC, we apply the broker_offset to align with the Session Map.
+        Standard MT5 Broker Time (EET) is UTC+2 (Winter) / UTC+3 (Summer).
         """
-        hour = dt.hour
+        # Adjust UTC time to Broker Time for mapping
+        broker_time = dt + datetime.timedelta(hours=broker_offset_hours)
+        hour = broker_time.hour
         
         # Priority: Overlap
         if 13 <= hour < 16:
