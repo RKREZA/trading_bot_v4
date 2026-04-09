@@ -196,18 +196,55 @@ class BacktestCLI:
 
     def _build_strategies(self, strategy_filter: str = None, symbol: str = None):
         strategies = []
+        
+        # 1. Normalize Strategy Filter into a list
+        requested_ids = []
+        if strategy_filter:
+            requested_ids = [s.strip().lower() for s in strategy_filter.split(",")]
+
         for st_type, st_class in STRATEGY_REGISTRY.items():
-            sid = f"{st_type.lower()}_v4"
-            if strategy_filter and sid != strategy_filter and st_type != strategy_filter.upper():
+            # 2. Define potential ID matches for this class (PascalCase Priority)
+            pascal_name = {
+                "LIQUIDITYSWEEPBREAKOUT": "LiquiditySweepBreakout",
+                "SMARTMEANREVERSION": "SmartMeanReversion",
+                "TRENDFOLLOWING": "TrendFollowing",
+                "LIQUIDITYSESSION": "LiquiditySession"
+            }.get(st_type, st_type.title().replace("_", ""))
+
+            
+            potential_ids = [
+                pascal_name,
+                f"{pascal_name}_v4",
+                st_type.lower(),
+                f"{st_type.lower()}_v4"
+            ]
+            
+            # 3. Match Identification
+            matched_id = None
+            if not requested_ids:
+                # Default behavior: Load all using standardized PascalCase
+                matched_id = pascal_name
+            else:
+                # Check if any part of our filter matches this strategy
+                for rid in requested_ids:
+                    if rid.lower() == pascal_name.lower() or rid.lower() == st_type.lower() or rid.lower() == f"{st_type.lower()}_v4":
+                        matched_id = pascal_name # Force standardized PascalCase for reports
+                        break
+
+
+            
+            if not matched_id:
                 continue
+
             try:
-                strategy_obj = st_class(sid, config=self.config)
+                strategy_obj = st_class(matched_id, config=self.config)
                 if symbol and not strategy_obj.is_symbol_allowed(symbol):
                     continue
                 strategies.append(strategy_obj)
             except Exception as e:
-                rprint(f"[bold yellow]Warning:[/] Failed to load {sid}: {e}")
+                rprint(f"[bold yellow]Warning:[/] Failed to load strategy {st_type} (resolved as {matched_id}): {e}")
         return strategies
+
 
     def _run_monte_carlo(self, history, initial_balance=1000.0):
         rprint("\n[bold yellow]Institutional Robustness Audit: Running Monte Carlo Stress Suite (2500 paths)...[/]")

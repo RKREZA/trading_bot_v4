@@ -1,0 +1,117 @@
+{
+  "magic_number": 234000,
+  "risk_governance": {
+    "risk_per_trade_pct": 0.75,
+    "max_daily_loss_pct": 2.5,
+    "max_drawdown_halt_pct": 8.0,
+    "max_consecutive_losses": 4,
+    "max_simultaneous_symbols": 2,
+    "max_cost_ratio": 0.5
+  },
+  "portfolio_allocations": {
+    "TrendFollowing": 0.4,
+    "LiquiditySweepBreakout": 0.4,
+    "SmartMeanReversion": 0.2,
+    "LiquiditySession": 0.0,
+    "Ensemble": 0.0
+  },
+  "TrendFollowing": {
+    "enabled": true,
+    "allowed_sessions": [
+      "LONDON",
+      "TOKYO"
+    ],
+    "adx_threshold": 25,
+    "sl_atr": 1.5,
+    "rr_target": 8.0
+  },
+  "LiquiditySweepBreakout": {
+    "enabled": true,
+    "allowed_sessions": [
+      "LONDON",
+      "TOKYO"
+    ],
+    "body_thresh": 0.65,
+    "h1_strength_thresh": 0.5,
+    "sl_atr": 2.0,
+    "rr_target": 4.0
+  },
+  "SmartMeanReversion": {
+    "enabled": true,
+    "allowed_sessions": [
+      "NEW_YORK",
+      "LONDON"
+    ],
+    "bb_period": 20,
+    "bb_std": 2.5,
+    "rsi_period": 14,
+    "rsi_overbought": 70,
+    "rsi_oversold": 30,
+    "sl_atr": 1.5,
+    "rr_target": 2.0
+  },
+  "LiquiditySession": {
+    "enabled": false,
+    "allowed_sessions": [
+      "LONDON",
+      "NEW_YORK"
+    ],
+    "range_maturity_limit": 4.0,
+    "vol_trigger_mult": 0.5,
+    "sl_atr": 1.5,
+    "rr_target": 8.0
+  },
+  "symbols_config": {
+    "XAUUSDm": {
+      "point": 0.01,
+      "tick_size": 0.01,
+      "tick_value": 1.0,
+      "contract_size": 100,
+      "lot_step": 0.01,
+      "min_lot": 0.01,
+      "max_lot": 20.0,
+      "commission_per_lot": 7.0,
+      "spread_points": 600,
+      "max_cost_ratio": 0.5,
+      "backtest_timeframe": "M5"
+    }
+  },
+  "backtest": {
+    "initial_balance_per_strategy": 10000,
+    "utc_offset": 3,
+    "leverage": 100,
+    "deterministic": true,
+    "random_seed": 42,
+    "costs": {
+      "entry_commission_sides": 1.0,
+      "exit_commission_sides": 1.0,
+      "sl_gap_slippage_atr_pct": 0.15,
+      "tp_slippage_atr_pct": 0.05
+    }
+  },
+  "execution": {
+    "latency_ms": 100,
+    "max_spread_points": 800,
+    "entry_slippage_points": 1.5,
+    "tp_exit_slippage_points": 0.8,
+    "sl_exit_slippage_points": 2.5,
+    "forced_exit_slippage_points": 1.5
+  },
+  "trailing_stop": {
+    "enabled": true,
+    "phase1_rr_threshold": 1.5,
+    "phase2_be_offset_pct": 0.1,
+    "phase3_trail_mult": 1.5
+  },
+  "news_filter": {
+    "enabled": true,
+    "source_url": "https://nfs.forexfactory.com/ff_calendar_thisweek.json",
+    "impact_levels": [
+      "High"
+    ],
+    "buffer_before_min": 30,
+    "buffer_after_min": 15,
+    "auto_close_before_min": 5,
+    "cache_file": "config/news_cache.json"
+  }
+}

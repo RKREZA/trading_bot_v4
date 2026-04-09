@@ -49,15 +49,30 @@ class PortfolioBacktester:
         self.max_drawdowns = {}   
         self.peak_equity = {}
 
-    def reset(self, strategies_ids: List[str]):
-        """Full reset of the simulation state."""
+    def reset(self, active_strategies: list):
+        """Full reset of the simulation state with capital allocation (Step 9)."""
         self.current_index = 0
         self.history = []
         self.open_trades = {}
-        self.balances = {sid: self.initial_partition_balance for sid in strategies_ids}
-        self.equities = {sid: self.initial_partition_balance for sid in strategies_ids}
-        self.peak_equity = {sid: self.initial_partition_balance for sid in strategies_ids}
-        self.max_drawdowns = {sid: 0.0 for sid in strategies_ids}
+        
+        # Institutional Allocation: Use PortfolioManager to split total pool based on config
+        # Use initial_partition_balance as the 'unit' per strategy for the total pool
+        total_pool = len(active_strategies) * self.initial_partition_balance
+        
+        self.balances = {}
+        self.equities = {}
+        self.peak_equity = {}
+        self.max_drawdowns = {}
+        
+        for strat in active_strategies:
+            sid = strat.strategy_id
+            # Resolve balance from PortfolioManager (handles 0.0 allocations correctly)
+            bal = self.portfolio_manager.get_strategy_balance(total_pool, sid)
+            self.balances[sid] = bal
+            self.equities[sid] = bal
+            self.peak_equity[sid] = bal
+            self.max_drawdowns[sid] = 0.0
+            
         self.equity_history = []
         self.checkpoint_manager.clear_checkpoint()
 
@@ -90,18 +105,29 @@ class PortfolioBacktester:
         """
         logger.info(f"Starting V4-ULTRA Production Backtest on {symbol}...")
         
-        active_strategies = [s for s in strategies if getattr(s, "enabled", True) and s.is_symbol_allowed(symbol)]
+        # Institutional Gating Filter: Must be enabled AND have an allocation > 0
+        active_strategies = []
+        for s in strategies:
+            # 1. Check logical enabled flag
+            if not getattr(s, "enabled", True):
+                continue
+            
+            # 2. Check symbol allowance
+            if not s.is_symbol_allowed(symbol):
+                continue
+                
+            # 3. Check allocation > 0 (via PortfolioManager logic)
+            # Use a dummy total_pool to check if allocation is 0
+            if self.portfolio_manager.get_strategy_balance(100.0, s.strategy_id) <= 0:
+                continue
+                
+            active_strategies.append(s)
+            
         sid_list = [s.strategy_id for s in active_strategies]
         
         if not resume:
-            self.reset(sid_list)
-        else:
-            state = self.checkpoint_manager.load_checkpoint()
-            if state:
-                self.set_state(state)
-            else:
-                logger.warning("Resume requested but no checkpoint found. Starting from scratch.")
-                self.reset(sid_list)
+            self.reset(active_strategies)
+
 
         symbol_cfg = self.config.get("symbols_config", {}).get(symbol, {})
         point = float(symbol_cfg.get("point", 0.0001))

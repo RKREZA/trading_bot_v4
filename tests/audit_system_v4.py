@@ -5,7 +5,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-SYMBOLS = ["XAUUSDm", "GBPJPYm", "EURUSDm"]
+SYMBOLS = ["XAUUSDm"]
 START_DATE = "2025-10-01"
 END_DATE = "2026-04-01"
 

@@ -4,21 +4,28 @@ from typing import Optional, Dict, Any
 from core.base_strategy import BaseStrategy, MarketData
 from core.common.types import TradeSignal
 
-logger = logging.getLogger("trading_bot.strategy.breakout")
+logger = logging.getLogger("trading_bot.strategy.liquidity_sweep_breakout")
 
-class BreakoutStrategy(BaseStrategy):
+class LiquiditySweepBreakoutStrategy(BaseStrategy):
     """
-    V4 Institutional Breakout.
+    V4 Institutional Liquidity Sweep Breakout.
     Targeting High-Momentum Range Breaks with Candle Strength filters.
     Rule: Enter on Breakout High/Low + Body Size > 70% of total candle range.
     """
 
     def __init__(self, strategy_id: str, config: dict):
         super().__init__(strategy_id, config)
-        self.lookback = 20
-        self.body_thresh = 0.65 # Relaxed from 0.75
-        self.h1_strength_thresh = 0.50 # Relaxed from 0.60
-        self.min_confidence = 0.70 # Relaxed from 0.75
+        
+        # Load parameters from the centralized config
+        # Priority: strategy_id -> "LiquiditySweepBreakout" 
+        strat_config = self.config.get(strategy_id, self.config.get("LiquiditySweepBreakout", {}))
+        self.enabled = strat_config.get("enabled", True)
+        
+        self.lookback = strat_config.get("lookback", 20)
+        self.body_thresh = strat_config.get("body_thresh", 0.65)
+        self.h1_strength_thresh = strat_config.get("h1_strength_thresh", 0.50)
+        self.min_confidence = strat_config.get("min_confidence", 0.70)
+
 
     def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
         """
@@ -60,7 +67,7 @@ class BreakoutStrategy(BaseStrategy):
         if len(m5) < self.lookback + 1:
             self.last_rejection_reason = "Breakout: M5 Insufficient data"
             return None
-
+ 
         # 2. Local Range Calculation
         prev_range = m5[-self.lookback-1:-1]
         r_high = np.max(prev_range.high)

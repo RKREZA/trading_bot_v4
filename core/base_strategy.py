@@ -69,7 +69,7 @@ class BaseStrategy(ABC):
     def __init__(self, strategy_id: str, config: dict):
         self.strategy_id = strategy_id
         self.config = config
-        self.enabled = config.get("enabled", True)
+        self.enabled = True # Default state; subclasses should override from their config block
         self.last_rejection_reason = ""
         
         # Institutional Gating Attributes

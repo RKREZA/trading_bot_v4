@@ -16,9 +16,7 @@ build/
 .venv/
 venv/
 env/
-
-# Config with credentials
-config.json
+myenv/
 
 # Logs
 logs/
@@ -50,4 +48,3 @@ btr.log
 /data_cache
 /state
 state/backtest_state.json
-/myenv

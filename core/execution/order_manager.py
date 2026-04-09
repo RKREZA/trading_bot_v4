@@ -142,7 +142,7 @@ if __name__ == "__main__":
     prices = {"bid": 1.1000, "ask": 1.1001, "point": 0.0001}
     
     print("\n--- OrderManager Standalone Test ---")
-    order = manager.execute_signal(signal, "EURUSD", prices)
+    order = manager.execute_signal(signal, "XAUUSDm", prices)
     print(f"Executed Order: {order}")
     
     exit_res = manager.simulate_exit(order['ticket'], "sl", 1.0900, 0.0001)

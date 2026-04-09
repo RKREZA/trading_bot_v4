@@ -120,7 +120,7 @@ if __name__ == "__main__":
     
     print("\n--- StrategyRuntime Standalone Test ---")
     mock_data = MarketData(
-        symbol="EURUSD",
+        symbol="XAUUSDm",
         htf_candles=None,
         m15_candles=None,
         m5_candles=None,
