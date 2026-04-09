@@ -1,6 +1,13 @@
-# Trading Bot V3
+# V4-ULTRA Institutional Trading System
 
-**Hybrid Breakout Strategy** — Multi-timeframe analysis with session filtering.
+**High-Fidelity Multi-Strategy Portfolio Engine** — Featuring high-fidelity event-driven simulation, institutional risk governance, and multi-timeframe regime detection.
+
+## Key Features
+- **MT5 Production Connection**: Robust terminal interface with auto-recovery and thread-safe execution.
+- **Unified Risk Governance**: Shared `RiskGuardian` for both backtesting and live trading (Zero Parity Gap).
+- **Institutional Execution**: Latency simulation, variable spread modeling, and direction-aware slippage.
+- **Multi-Strategy Portfolio**: Trend Following, Mean Reversion, and Breakout strategies running in parallel.
+- **Advanced Validation**: Monte Carlo, Walk-Forward Optimization, and Stress Testing suites.
 
 ## Setup
 
@@ -19,41 +26,42 @@
 
 ## Usage
 
+### Backtesting & Audit
 ```bash
-# Test MT5 connection
-python test_connection.py
+# Run a production benchmark
+python backtest.py --symbol XAUUSDm --from 2024-01-01 --to 2026-04-09
 
-# Run backtest
-python main.py --backtest --symbol BTCUSDm
+# Run with full validation suite
+python backtest.py --symbol XAUUSDm --from 2024-01-01 --to 2026-04-09 --monte-carlo --walk-forward --stress-test
+```
 
-# Run live trading
-python main.py --symbol BTCUSDm
+### Live Trading
+```bash
+# Start the production orchestrator
+python main.py --symbol XAUUSDm
 ```
 
 ## Project Structure
 
 ```
 trading_bot_v3/
-├── main.py                  # Entry point & orchestrator
-├── dashboard.py             # Rich CLI dashboard
-├── config.json              # Strategy & symbol configuration
-├── .env                     # MT5 credentials (not in git)
+├── main.py                  # Live Trading Entry Point
+├── backtest.py              # Backtest & Audit CLI
+├── dashboard.py             # Institutional Telemetry TUI
+├── config.json              # Global Configuration & Governance
 ├── core/
-│   ├── strategy_engine.py   # Hybrid breakout/pullback strategy
-│   ├── connection.py        # MT5 connection + auto-reconnect
-│   ├── data_fetcher.py      # Candle fetching with caching
-│   ├── backtest.py          # Backtesting engine
-│   └── logger.py            # Rotating file logger
-├── tests/
-│   ├── test_strategy.py     # Strategy unit tests
-│   └── test_backtest.py     # Backtest unit tests
-└── logs/                    # Log files (auto-created)
+│   ├── risk/                # Unified Risk Governance (RiskGuardian)
+│   ├── execution/           # Order Management & Simulation (OrderManager)
+│   ├── common/              # Shared Types (TradeSignal, CandleArray)
+│   └── strategy_orchestrator.py # Multi-Strategy Coordinator
+├── strategies/              # Strategy Implementations (V4-ULTRA)
+├── backtesting/             # High-Fidelity Simulator & Validators
+├── tests/                   # Professional Verification Suite
+└── logs/                    # Institutional Audit Trail
 ```
 
 ## Troubleshooting
 
-If you see "CONNECTION FAILED":
-1. Open MT5 terminal and login manually
-2. Enable "Algo Trading" in MT5 settings
-3. Verify your `.env` credentials
-4. Run: `python test_connection.py`
+1. **MT5 Sync**: Ensure "Algo Trading" is enabled in MT5 and the terminal is logged in.
+2. **Data Gaps**: Ensure you have enough historical data downloaded in MT5 for all timeframes (M1 to H1).
+3. **Connectivity**: Use `python test_connection.py` (if available) or check `logs/trading_bot.log`.

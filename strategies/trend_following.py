@@ -31,7 +31,7 @@ class TrendFollowingStrategy(BaseStrategy):
         self.rr_target = strat_config.get("rr_target", 1.5) 
 
     def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
-        strat_config = self.config.get("trendfollowing_v4", {})
+        strat_config = self.config.get(self.strategy_id, self.config.get("TrendFollowing", {}))
         allowed_sessions = strat_config.get("allowed_sessions", [])
         
         if allowed_sessions and market_data.session not in allowed_sessions:

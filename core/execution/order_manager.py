@@ -16,13 +16,13 @@ class OrderManager:
         exe_cfg = config.get("execution", {})
         
         self.latency_ms = int(exe_cfg.get("latency_ms", 150))
-        self.max_spread_pips = float(exe_cfg.get("max_spread_pips", 5.0))
+        self.max_spread_pts = float(exe_cfg.get("max_spread_points", 500.0))
         
-        # Slippage Tiers
-        base_slip = float(exe_cfg.get("slippage_pips", 0.1))
-        self.entry_slip = float(exe_cfg.get("entry_slippage_pips", base_slip))
-        self.tp_slip = float(exe_cfg.get("tp_exit_slippage_pips", base_slip * 0.5))
-        self.sl_slip = float(exe_cfg.get("sl_exit_slippage_pips", base_slip * 1.5))
+        # Slippage Tiers (Points)
+        base_slip = float(exe_cfg.get("slippage_points", 1.0))
+        self.entry_slip = float(exe_cfg.get("entry_slippage_points", base_slip))
+        self.tp_slip = float(exe_cfg.get("tp_exit_slippage_points", base_slip * 0.5))
+        self.sl_slip = float(exe_cfg.get("sl_exit_slippage_points", base_slip * 1.5))
         
         # Deterministic RNG for reproducibility (Institutional requirement)
         self.deterministic = config.get("backtest", {}).get("deterministic", False)
@@ -56,15 +56,15 @@ class OrderManager:
             return None
 
         # 2. Variable Spread Simulation (Step 6.1)
-        base_spread_pips = (ask - bid) / point
-        effective_spread = self._get_effective_spread(base_spread_pips)
+        base_spread_pts = (ask - bid) / point
+        effective_spread = self._get_effective_spread(base_spread_pts)
         
-        if effective_spread > self.max_spread_pips:
-            self.logger.warning(f"Execution Rejected: Spread too high ({effective_spread:.1f} > {self.max_spread_pips})")
+        if effective_spread > self.max_spread_pts:
+            self.logger.warning(f"Execution Rejected: Spread too high ({effective_spread:.1f} > {self.max_spread_pts})")
             return None
 
         # Update ask to reflect effective spread for fill calculation
-        spread_diff = (effective_spread - base_spread_pips) * point
+        spread_diff = (effective_spread - base_spread_pts) * point
         ask_adj = ask + spread_diff
         bid_adj = bid - spread_diff # Optional: split it.
 
@@ -94,15 +94,17 @@ class OrderManager:
             "is_error": False
         }
 
-    def simulate_exit(self, ticket: int, exit_type: str, price: float, point: float) -> Dict[str, Any]:
+    def simulate_exit(self, ticket: int, exit_type: str, price: float, point: float, direction: str = "BUY") -> Dict[str, Any]:
         """Simulates an exit event (SL/TP) with appropriate slippage."""
         slip_points = self._sample_slippage(point, tier=exit_type)
         
         # TP usually gets better/neutral execution, SL usually gets worse (negative) slippage
         if exit_type == "tp":
-            exit_price = price - slip_points # Slight positive slippage simulated as price hit
+            # Better price: Higher for BUY exit (selling), Lower for SELL exit (buying)
+            exit_price = price + slip_points if direction == "BUY" else price - slip_points
         else:
-            exit_price = price - slip_points # Negative slippage for SL
+            # Worse price: Lower for BUY exit, Higher for SELL exit
+            exit_price = price - slip_points if direction == "BUY" else price + slip_points
             
         return {
             "ticket": ticket,
@@ -145,5 +147,5 @@ if __name__ == "__main__":
     order = manager.execute_signal(signal, "XAUUSDm", prices)
     print(f"Executed Order: {order}")
     
-    exit_res = manager.simulate_exit(order['ticket'], "sl", 1.0900, 0.0001)
+    exit_res = manager.simulate_exit(order['ticket'], "sl", 1.0900, 0.0001, direction="BUY")
     print(f"Simulated SL Exit: {exit_res}")

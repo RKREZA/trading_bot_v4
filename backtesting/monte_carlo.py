@@ -24,30 +24,37 @@ class MonteCarloSimulator:
                 "message": f"Institutional certification requires at least 10 trades (Found: {len(history)}). Small sample size precludes Stress Testing."
             }
 
-        pnls = np.array([t['pnl'] for t in history])
+        # 1. Calculation of Percentage Returns (Institutional Standard)
+        returns = []
+        for t in history:
+            bal = t.get('balance_at_start', t.get('final_balance', initial_balance) - t.get('pnl', 0))
+            if bal <= 0: bal = initial_balance # Absolute safety fallback
+            returns.append(t['pnl'] / bal)
+        
+        returns = np.array(returns)
         all_final_balances = []
         all_max_drawdowns = []
 
-        num_trades = len(pnls)
+        num_trades = len(returns)
         
         for i in range(self.iterations):
             # 1. Randomized Approach Select
-            # Alternating between Bootstrap (with replacement) and Permutation (without replacement/shuffle)
             if i % 2 == 0:
                 indices = np.random.randint(0, num_trades, size=num_trades)
             else:
                 indices = np.random.permutation(num_trades)
             
-            sim_pnls = pnls[indices].copy()
+            sim_returns = returns[indices].copy()
             
-            # 2. Jitter Cost Injection (Institutional Realism)
-            # Randomly subtract 0.1 to 1.5 pips of 'unseen friction' (Step 8)
-            jitter_penalty = np.random.uniform(0.1, 1.5, size=num_trades)
-            sim_pnls -= jitter_penalty
+            # 2. Execution Shock (Institutional Realism)
+            # Subtract 0.05% to 0.20% (5 - 20 bps) of frictional drag per trade
+            # This accounts for late fills, slippage, and spread widening under stress.
+            jitter_pct = np.random.uniform(0.0005, 0.0020, size=num_trades)
+            sim_returns -= jitter_pct
 
-            # 3. Path Stats
-            cum_pnl = np.cumsum(sim_pnls)
-            equity = initial_balance + cum_pnl
+            # 3. Compounding Path Stats
+            # Balance[t] = Balance[t-1] * (1 + return[t])
+            equity = initial_balance * np.cumprod(1 + sim_returns)
             
             # Risk of Ruin check
             if np.any(equity <= 0):

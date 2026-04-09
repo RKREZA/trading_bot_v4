@@ -66,17 +66,27 @@ class RiskGuardian:
             self.logger.error(f"[RISK] Signal validation failed due to error: {e}", exc_info=True)
             return False
 
+    def get_magic_number(self, strategy_id: str) -> int:
+        """
+        Dynamically derives a unique magic number for a strategy instance.
+        Base: magic_number from config (default 234000).
+        Offset: hash of strategy_id to ensure persistence.
+        """
+        base_magic = int(self.config.get("magic_number", 234000))
+        import hashlib
+        sid_hash = int(hashlib.md5(strategy_id.encode()).hexdigest(), 16) % 1000
+        return base_magic + sid_hash
+
     def calculate_lot_size(self, 
                            balance: float, 
                            stop_loss_dist: float, 
                            symbol_info: Dict[str, Any],
-                           last_pnl: float = 0.0,
                            current_price: float = 1.0) -> float:
         """
         Institutional Position Sizing: risk_amount / stop_loss_dist
-        HARD CONSTRAINTS (Step 13):
+        HARD CONSTRAINTS:
         - No Martingale (No size increase after loss)
-        - No Doubling after loss
+        - No Growth Boosting (Silent Martingale removed)
         """
         if stop_loss_dist <= 0 or self.kill_switch_active:
             return 0.0
@@ -85,24 +95,16 @@ class RiskGuardian:
         risk_pct = self.risk_per_trade_pct
         if self.consecutive_losses > 0:
             # If we are in a losing streak, we ONLY reduce or keep risk fixed.
-            # We strictly FORBID increasing risk_pct above its base.
             risk_pct = min(self.risk_per_trade_pct, risk_pct * 0.5 if self.consecutive_losses >= 3 else risk_pct)
-            
-            # Additional No-Doubling Guard: If last PnL was negative, current lot MUST be <= last lot
-            # (Note: This is handled naturally by the fixed/reduced risk_pct)
-        else:
-            # Growth Booster (Stable Growth logic)
-            if len(self.equity_history) > 20 and self.consecutive_losses == 0:
-                risk_pct = min(1.0, risk_pct * 1.1)
+        # Growth Booster Removed (Rule 8 Fix)
 
         risk_amount = balance * (risk_pct / 100.0)
         
         point = symbol_info.get('point', 0.00001)
-        tick_value = symbol_info.get('tick_value', 1.0)
+        tick_value = symbol_info.get('tick_value', symbol_info.get('trade_tick_value', 1.0))
         
         points_dist = stop_loss_dist / point if point > 0 else 0.0
         
-        # FIX: Ensure the entire denominator is evaluated against zero before division
         denominator = points_dist * tick_value
         if denominator > 0:
             raw_lot = risk_amount / denominator

@@ -7,7 +7,7 @@ from typing import List, Dict, Any, Optional
 
 from core.base_strategy import MarketData
 from core.regime_detector import RegimeDetector
-from core.risk_engine import RiskEngine
+from core.risk.risk_guardian import RiskGuardian
 from core.session_detector import SessionDetector
 from core.portfolio_manager import PortfolioManager
 from core.regime_gater import RegimeGater
@@ -31,7 +31,7 @@ class PortfolioBacktester:
     def __init__(self, config: dict):
         self.config = config
         self.regime_detector = RegimeDetector()
-        self.risk_engine = RiskEngine(config)
+        self.risk_guardian = RiskGuardian(config)
         self.simulator = ExecutionSimulator(config)
         self.portfolio_manager = PortfolioManager(config)
         self.checkpoint_manager = CheckpointManager()
@@ -166,7 +166,7 @@ class PortfolioBacktester:
                     for strat in active_strategies:
                         strat.reset_daily_stats()
                     for sid in self.balances:
-                        self.risk_engine.reset_daily(self.balances[sid])
+                        self.risk_guardian.reset_daily(self.balances[sid])
                 last_date = current_date
                 
                 # [ Institutional Fidelity ]: Zero-Copy Index Shifting
@@ -221,13 +221,11 @@ class PortfolioBacktester:
                     sl_dist = abs(market_data.current_price - sl)
                     
                     if sl_dist > 0:
-                        lot_size = self.risk_engine.calculate_lot_size(
+                        lot_size = self.risk_guardian.calculate_lot_size(
                             balance=self.balances[sid],
-                            stop_loss_distance=sl_dist,
-                            point=point,
-                            tick_value=tick_value,
-                            symbol=symbol,
-                            price=market_data.current_price
+                            stop_loss_dist=sl_dist,
+                            symbol_info=symbol_cfg,
+                            current_price=market_data.current_price
                         )
                         lot_size = lot_size * risk_mult
                         
@@ -314,6 +312,7 @@ class PortfolioBacktester:
                     entry_comm = trade.get("entry_comm", 0.0)
                     
                     net_pnl = gross_pnl - entry_comm - exit_comm
+                    start_balance = self.balances[sid]
                     self.balances[sid] += net_pnl
                     self.equities[sid] = self.balances[sid]
                     
@@ -324,10 +323,11 @@ class PortfolioBacktester:
                         "pnl": net_pnl,
                         "exit_slippage": exit_slip / point,
                         "result": event.upper(),
-                        "final_balance": self.balances[sid]
+                        "final_balance": self.balances[sid],
+                        "balance_at_start": start_balance
                     }
                     self.history.append(trade_record)
-                    self.risk_engine.update_history(net_pnl, self.equities[sid])
+                    self.risk_guardian.record_trade_result(net_pnl, self.equities[sid])
                     
                     for s in strategies:
                         if s.strategy_id == sid:

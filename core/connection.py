@@ -408,7 +408,7 @@ class MT5Connection:
         # FIX #2: Work with LOCAL copies of SL/TP — never mutate the input signal
         local_sl = float(signal.stop_loss)
         local_tp = float(signal.take_profit)
-        local_entry = float(signal.entry_price)
+        local_entry = float(signal.price)
         
         for attempt in range(max_retries):
             # Recalculate stops if needed to respect stops_level
@@ -489,12 +489,12 @@ class MT5Connection:
                         if signal.direction == "BUY":
                             local_sl = price - safe_risk_distance
                             if local_tp != 0:
-                                tp_dist = abs(signal.entry_price - signal.take_profit)
+                                tp_dist = abs(signal.price - signal.take_profit)
                                 local_tp = price + max(tp_dist, min_stop_distance)
                         else:
                             local_sl = price + safe_risk_distance
                             if local_tp != 0:
-                                tp_dist = abs(signal.entry_price - signal.take_profit)
+                                tp_dist = abs(signal.price - signal.take_profit)
                                 local_tp = price - max(tp_dist, min_stop_distance)
                         
                         local_entry = price
@@ -758,7 +758,7 @@ class PositionManager:
             logger.error("Cannot get symbol info for %s", symbol)
             return 0.01
 
-        sl_distance = abs(signal.entry_price - signal.stop_loss)
+        sl_distance = abs(signal.price - signal.stop_loss)
         
         # Guard against zero distance or null symbol info values
         point = symbol_info.point if symbol_info.point > 0 else 0.00001

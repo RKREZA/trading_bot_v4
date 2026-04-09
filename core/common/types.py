@@ -182,7 +182,7 @@ class CandleArray:
     def _calc_ema(self, data: np.ndarray, period: int) -> np.ndarray:
         if len(data) < period: return np.full_like(data, np.nan)
         alpha = 2 / (period + 1)
-        ema = np.zeros_like(data)
+        ema = np.full_like(data, np.nan)
         ema[period-1] = np.mean(data[:period])
         for i in range(period, len(data)):
             ema[i] = (data[i] - ema[i-1]) * alpha + ema[i-1]
@@ -266,11 +266,24 @@ class CandleArray:
             nan_arr = np.full(len(data), np.nan)
             return nan_arr, nan_arr, nan_arr
             
-        # Use Simple Moving Average
-        sma = np.array([np.mean(data[i-period+1:i+1]) if i >= period-1 else np.nan for i in range(len(data))])
-        
-        # Vectorized Standard Deviation (Rolling)
-        rolling_std = np.array([np.std(data[i-period+1:i+1]) if i >= period-1 else np.nan for i in range(len(data))])
+        # Institutional Vectorization (Step 10 Optimization)
+        # Using a rolling window via stride_tricks or pandas if available (fallback to cumsum)
+        try:
+            import pandas as pd
+            series = pd.Series(data)
+            sma = series.rolling(window=period).mean().values
+            rolling_std = series.rolling(window=period).std(ddof=0).values
+        except ImportError:
+            # Native NumPy vectorized approach
+            sma = np.convolve(data, np.ones(period), 'valid') / period
+            sma = np.concatenate([np.full(period-1, np.nan), sma])
+            
+            # Variance = E[X^2] - (E[X])^2
+            data_sq = data**2
+            sma_sq = np.convolve(data_sq, np.ones(period), 'valid') / period
+            sma_sq = np.concatenate([np.full(period-1, np.nan), sma_sq])
+            
+            rolling_std = np.sqrt(np.maximum(0, sma_sq - sma**2))
         
         upper = sma + (rolling_std * std_dev)
         lower = sma - (rolling_std * std_dev)

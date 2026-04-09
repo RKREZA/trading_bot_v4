@@ -140,9 +140,14 @@ class StrategyOrchestrator:
             
             # 5.2 Individual signal vetting & HARD CONSTRAINTS (Step 13)
             for sid, sig in raw_signals.items():
+                runtime = next((r for r in self.runtimes if r.strategy_id == sid), None)
+                if not runtime: continue
+                
+                strat_risk_guardian = runtime.risk_guardian
+                
                 # S-ID MAGIC Logic (Rule 2.2 Hardening)
                 # Derived from sid to ensure persistence across sessions
-                magic = self.runtimes[0].risk_guardian.get_magic_number(sid) if self.runtimes else 234000
+                magic = strat_risk_guardian.get_magic_number(sid)
                 
                 if hasattr(self.position_manager, 'get_positions_by_magic'):
                     open_pos = self.position_manager.get_positions_by_magic(magic, symbol)
@@ -156,7 +161,7 @@ class StrategyOrchestrator:
                     continue
                 
                 # Sizing & Margin Validation
-                if risk_guardian.validate_signal(sig, current_balance, market_data, symbol_info):
+                if strat_risk_guardian.validate_signal(sig, current_balance, market_data, symbol_info):
                     validated_signals[sid] = sig
                 else:
                     logger.debug(f"[{sid}] Signal REJECTED at Risk Validation")
@@ -182,7 +187,7 @@ class StrategyOrchestrator:
             # Final Lot Calculation (Partitioned Strategy Balance)
             strat_balance = self.portfolio_manager.get_strategy_balance(current_balance, sid)
             sl_dist = abs(market_data.current_price - sig.stop_loss)
-            sig.volume = risk_guardian.calculate_lot_size(strat_balance, sl_dist, symbol_info)
+            sig.volume = runtime.risk_guardian.calculate_lot_size(strat_balance, sl_dist, symbol_info)
             
             if sig.volume > 0:
                 # 8. LIVE EXECUTION BRIDGE (with Strategy-Specific Magic)
