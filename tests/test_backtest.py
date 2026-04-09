@@ -31,6 +31,9 @@ class TrendAlwaysPulseStrategy(BaseStrategy):
     def get_take_profit(self, signal, market_data):
         return market_data.current_price + 10.0 # Fixed 1000 point TP
 
+    def get_metrics(self, market_data):
+        return {}
+
 class TestPortfolioBacktester:
     """Verifies the PortfolioBacktester logic and fidelity."""
 

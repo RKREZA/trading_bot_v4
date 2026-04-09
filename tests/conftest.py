@@ -64,13 +64,18 @@ def market_data_factory(candle_factory):
         h1 = candle_factory(n=80, trend=trend)
         m15 = candle_factory(n=120, trend=trend)
         
+        current_price = float(m5.close[-1])
+        
         return MarketData(
             symbol="XAUUSDm",
             htf_candles=h1,
             m15_candles=m15,
             m5_candles=m5,
             d1_candles=None,
-            current_price=float(m5.close[-1]),
+            current_price=current_price,
+            bid=current_price,
+            ask=current_price + 1.0,
+            spread=1.0,
             session=session,
             timestamp=datetime.now(timezone.utc),
             preprocessed={

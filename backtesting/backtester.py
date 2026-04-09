@@ -185,7 +185,7 @@ class PortfolioBacktester:
                 # 2. MarketData Construction (Zero-Copy & Anti-Lookahead)
                 # Institutional Fidelity: Simulate Bid/Ask/Spread (Audit Bug #5 Fix)
                 current_bid = float(target_tf_data.open[i])
-                symbol_cfg = self.config.get("symbols", {}).get(symbol, {})
+                symbol_cfg = self.config.get("symbols_config", {}).get(symbol, {})
                 point = symbol_cfg.get("point", 0.0001)
                 spread_val = symbol_cfg.get("spread_pips", 2) * point
                 current_ask = current_bid + spread_val
@@ -243,7 +243,6 @@ class PortfolioBacktester:
                             sig = signal
                             sig.volume = lot_size
                             
-                            # Construct price_data for unified execution
                             price_data = {
                                 "bid": market_data.current_price,
                                 "ask": market_data.current_price + (target_tf_data.spread[i] * point),
@@ -271,9 +270,9 @@ class PortfolioBacktester:
                                 self.open_trades[sid] = fill
                                 logger.info(f"[{sid}] Trade Entered: {fill['direction']} @ {fill['fill_price']:.5f}")
                             elif self.config.get("backtest", {}).get("debug_signals"):
-                                 logger.info(f"[{dt}] [{sid}] Execution REJECTED: OrderManager denied entry (Spread/Slip/Gating)")
+                                logger.info(f"[{dt}] [{sid}] Execution REJECTED: OrderManager denied entry (Spread/Slip/Gating)")
                         elif self.config.get("backtest", {}).get("debug_signals"):
-                             logger.info(f"[{dt}] [{sid}] Risk REJECTED: Lot size {lot_size:.3f} < 0.01")
+                            logger.info(f"[{dt}] [{sid}] Risk REJECTED: Lot size {lot_size:.3f} < 0.01")
 
                 # 4. M1 Intra-Bar Execution (Safety Gate: Check for Gaps)
                 m1_slice = self._get_m1_for_m5(m1_data, t)
