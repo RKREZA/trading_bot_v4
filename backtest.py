@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import logging
+import numpy as np
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any
 
@@ -50,7 +51,8 @@ class BacktestCLI:
         seed: Optional[int] = None,
         deterministic: Optional[bool] = None,
         resume: bool = False,
-        debug_signals: bool = False
+        debug_signals: bool = False,
+        no_adaptive: bool = False
     ):
         setup_logging()
         if not self.connection.connect():
@@ -85,18 +87,47 @@ class BacktestCLI:
             rprint("[bold red]Error:[/] Insufficient data for benchmark.")
             return
 
-        # [ Range Capping ]: Slice all timeframes by dt_to
+        # [ Range Capping ]: Slice M5/M15 by dt_to, but preserve M1 for trade management
+        # M1 data is critical for trade execution and should extend to cover all M5 bars
         to_ts = dt_to.timestamp()
-        m1 = m1[m1.time < to_ts] if len(m1) > 0 else m1
         m5 = m5[m5.time < to_ts]
         m15 = m15[m15.time < to_ts]
+        
+        # [ Institutional Warmup ]: Extend H1 to include historical warmup bars for strategy lookback
+        # LiquiditySweepBreakout needs 22+ H1 bars, and the set_limit logic reduces available bars
+        # Extend H1 by 500 bars before test start to ensure strategies have sufficient historical data
+        m5_start_ts = m5.time[0]
+        h1_start_ts = h1.time[0]
+        h1_warmup_idx = 0
+        
+        # Find how many H1 bars exist before m5_start_ts
+        h1_idx_for_m5_start = np.searchsorted(h1.time, m5_start_ts, side='left')
+        
+        # We need at least 500 H1 bars for warmup
+        warmup_needed = 500
+        if h1_idx_for_m5_start < warmup_needed:
+            # Need to extend H1 backward by getting more historical data
+            h1_warmup_idx = max(0, warmup_needed - h1_idx_for_m5_start)
+            if h1_warmup_idx > 0 and h1_warmup_idx < len(h1):
+                h1 = h1[h1_warmup_idx:]
+                rprint(f"[cyan]H1 warmup extended: Added {h1_warmup_idx} historical bars for strategy lookback.[/]")
+        
+        # Now cap H1 to to_ts after warmup is applied
         h1 = h1[h1.time < to_ts]
         
-        # [ M1 Generation ]: If M1 data is empty, generate synthetic M1 from M5 for trade management
-        if len(m1) == 0 and len(m5) > 0:
-            rprint("[yellow]M1 data unavailable. Generating synthetic M1 from M5 for trade management...[/]")
+        # [ M1 Generation ]: Generate synthetic M1 from M5 for periods where real M1 data is unavailable
+        # This ensures trade management works for the ENTIRE backtest period
+        m1_needs_synthetic = len(m1) == 0 or (len(m5) > 0 and m5.time[0] < m1.time[0])
+        
+        if m1_needs_synthetic and len(m5) > 0:
+            if len(m1) == 0:
+                rprint("[yellow]M1 data unavailable. Generating synthetic M1 from M5 for trade management...[/]")
+            else:
+                rprint(f"[yellow]M1 data only available from {datetime.fromtimestamp(m1.time[0], tz=timezone.utc).date()}. Generating synthetic M1 for earlier periods...[/]")
+            
             from core.common.types import CandleArray
-            import numpy as np
+            
+            # Generate synthetic M1 for the ENTIRE M5 period
             m1_times = []
             m1_opens = []
             m1_highs = []
@@ -178,6 +209,9 @@ class BacktestCLI:
             runtime_backtest["random_seed"] = int(seed)
         if deterministic is not None:
             runtime_backtest["deterministic"] = bool(deterministic)
+        if no_adaptive:
+            runtime_backtest["adaptive_strategy"] = False
+            rprint("[bold cyan]ADAPTIVE STRATEGY DISABLED: All strategies will run simultaneously.[/]")
         runtime_config["backtest"] = runtime_backtest
         if debug_signals:
             runtime_config["backtest"]["debug_signals"] = True
@@ -361,6 +395,7 @@ if __name__ == "__main__":
     parser.add_argument("--deterministic", choices=["on", "off"], default=None)
     parser.add_argument("--resume", action="store_true", help="Resume from last crash checkpoint")
     parser.add_argument("--debug-signals", action="store_true", help="Log reason for every signal rejection")
+    parser.add_argument("--no-adaptive", action="store_true", help="Disable adaptive strategy selection (run ALL strategies)")
 
     args = parser.parse_args()
     cli = BacktestCLI()
@@ -368,4 +403,4 @@ if __name__ == "__main__":
         cli.config.setdefault("backtest", {})["run_stress_test"] = True
 
     cli.run(args.symbol, args.start_date, args.end_date, args.strategy, args.monte_carlo, args.walk_forward, args.stress_test, args.seed, 
-            None if args.deterministic is None else (args.deterministic == "on"), resume=args.resume, debug_signals=args.debug_signals)
+            None if args.deterministic is None else (args.deterministic == "on"), resume=args.resume, debug_signals=args.debug_signals, no_adaptive=args.no_adaptive)

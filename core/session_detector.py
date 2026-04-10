@@ -15,6 +15,11 @@ class SessionDetector:
         If 'dt' is UTC, we apply the broker_offset to align with the Session Map.
         Standard MT5 Broker Time (EET) is UTC+2 (Winter) / UTC+3 (Summer).
         """
+        # Auto-detect offset based on month (DST-aware)
+        if broker_offset_hours == 0:
+            month = dt.month
+            broker_offset_hours = 2 if (month < 3 or month > 10) else 3
+        
         broker_time = dt + datetime.timedelta(hours=broker_offset_hours)
         hour = broker_time.hour
         
@@ -49,6 +54,8 @@ class SessionDetector:
             
         if current == "LONDON/NY":
             if "LONDON" in allowed_sessions or "NEW_YORK" in allowed_sessions:
+                return True
+            if "GLOBAL" in allowed_sessions:
                 return True
                 
         return False

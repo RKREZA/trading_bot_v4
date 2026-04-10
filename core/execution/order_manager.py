@@ -38,7 +38,8 @@ class OrderManager:
                        price_data: Dict[str, float],
                        is_news_blocked: bool = False,
                        magic: int = None,
-                       comment: str = "V4-ULTRA") -> Optional[Dict[str, Any]]:
+                       comment: str = "V4-ULTRA",
+                       timestamp: float = None) -> Optional[Dict[str, Any]]:
         """
         Processes a TradeSignal with institutional realism (Spread, News, Latency).
         Routes to Live MT5 if connection is present, otherwise Simulates.
@@ -98,11 +99,11 @@ class OrderManager:
             "sl": signal.stop_loss,
             "tp": signal.take_profit,
             "lots": getattr(signal, 'volume', 0.0),
-            "timestamp": time.time(),
+            "timestamp": timestamp if timestamp is not None else time.time(),
             "is_error": False
         }
 
-    def simulate_exit(self, ticket: int, exit_type: str, price: float, point: float, direction: str = "BUY") -> Dict[str, Any]:
+    def simulate_exit(self, ticket: int, exit_type: str, price: float, point: float, direction: str = "BUY", exit_time: float = None) -> Dict[str, Any]:
         """Simulates an exit event (SL/TP) with appropriate slippage."""
         slip_points = self._sample_slippage(point, tier=exit_type)
         
@@ -118,7 +119,7 @@ class OrderManager:
             "ticket": ticket,
             "exit_price": exit_price,
             "exit_type": exit_type,
-            "exit_time": time.time()
+            "exit_time": exit_time if exit_time is not None else time.time()
         }
 
     def _get_effective_spread(self, base_spread: float) -> float:

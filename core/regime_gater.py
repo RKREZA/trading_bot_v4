@@ -21,12 +21,12 @@ class RegimeGater:
         st_type = strategy_type.upper().replace("_", "")
         
         if market_type == MarketRegime.TREND:
-            return "TREND" in st_type or "BREAKOUT" in st_type
+            return "TREND" in st_type or "BREAKOUT" in st_type or "SMART" in st_type
         
         if market_type == MarketRegime.RANGE:
-            return "MEANREVERSION" in st_type or "LIQUIDITY" in st_type or "SNIPER" in st_type
-            
-        return True # Default to enabled if UNCERTAIN or other
+            return "MEANREVERSION" in st_type or "LIQUIDITY" in st_type or "SNIPER" in st_type or "RANGE" in st_type or "BOUNCE" in st_type
+        
+        return True
 
     @staticmethod
     def get_risk_multiplier(volatility: VolatilityStatus) -> float:

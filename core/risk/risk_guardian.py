@@ -102,9 +102,7 @@ class RiskGuardian:
         # Anti-Martingale / Anti-Doubling (Hard Guard)
         risk_pct = self.risk_per_trade_pct
         if self.consecutive_losses > 0:
-            # If we are in a losing streak, we ONLY reduce or keep risk fixed.
             risk_pct = min(self.risk_per_trade_pct, risk_pct * 0.5 if self.consecutive_losses >= 3 else risk_pct)
-        # Growth Booster Removed (Rule 8 Fix)
 
         risk_amount = balance * (risk_pct / 100.0)
         

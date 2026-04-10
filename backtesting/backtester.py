@@ -13,6 +13,7 @@ from core.portfolio_manager import PortfolioManager
 from core.regime_gater import RegimeGater
 from core.recovery.checkpoint_manager import CheckpointManager
 from core.execution.order_manager import OrderManager
+from core.volatility_detector import VolatilityDetector, VolatilityLevel
 from strategies.adaptive_manager import AdaptiveStrategyManager, RegimeAwareStrategy
 
 logger = logging.getLogger("trading_bot.backtester")
@@ -32,6 +33,7 @@ class PortfolioBacktester:
     def __init__(self, config: dict):
         self.config = config
         self.regime_detector = RegimeDetector()
+        self.volatility_detector = VolatilityDetector(atr_period=14, lookback=100)
         self.risk_guardian = RiskGuardian(config)
         self.order_manager = OrderManager(config)
         self.portfolio_manager = PortfolioManager(config)
@@ -39,6 +41,10 @@ class PortfolioBacktester:
 
         bt_cfg = config.get("backtest", {})
         self.initial_partition_balance = float(bt_cfg.get("initial_balance_per_strategy", 1000.0))
+        
+        vol_cfg = config.get("volatility_adaptive", {})
+        self.volatility_adaptive_enabled = vol_cfg.get("enabled", True)
+        self.min_volatility_for_trades = vol_cfg.get("min_volatility_for_trades", "VERY_LOW")
         
         # Internal State
         self.current_index = 0
@@ -49,6 +55,7 @@ class PortfolioBacktester:
         self.equity_history = []
         self.max_drawdowns = {}   
         self.peak_equity = {}
+        self.volatility_history = []
 
     def reset(self, active_strategies: list):
         """Full reset of the simulation state with capital allocation (Step 9)."""
@@ -180,22 +187,56 @@ class PortfolioBacktester:
                 # [ Institutional Fidelity ]: Zero-Copy Index Shifting
                 target_tf_data.set_limit(i) 
                 
-                if m5_data is not target_tf_data: m5_data.set_limit(self._get_tf_idx(m5_data, t, side="left"))
-                if m15_data is not target_tf_data: m15_data.set_limit(self._get_tf_idx(m15_data, t, side="left"))
-                if h1_data is not target_tf_data: h1_data.set_limit(self._get_tf_idx(h1_data, t, side="left"))
+                # Ensure minimum bars for strategy requirements
+                # LiquiditySweepBreakout needs 22 H1 bars, RangeBounce needs 200 M5 bars
+                min_m5_bars = 250  # Allow 250 bars for RangeBounce lookback
+                min_h1_bars = 30   # Allow 30 bars for LiquiditySweepBreakout
+                min_m15_bars = 100 # Allow 100 bars for M15 lookback
+                
+                m5_idx = max(min_m5_bars, self._get_tf_idx(m5_data, t, side="right"))
+                if m5_data is not target_tf_data: m5_data.set_limit(m5_idx)
+                
+                h1_idx = max(min_h1_bars, self._get_tf_idx(h1_data, t, side="right"))
+                if h1_data is not target_tf_data: h1_data.set_limit(h1_idx)
+                
+                m15_idx = max(min_m15_bars, self._get_tf_idx(m15_data, t, side="right"))
+                if m15_data is not target_tf_data: m15_data.set_limit(m15_idx)
                 
                 # 1. Regime Detection & Gating
                 regime_info = self.regime_detector.detect(target_tf_data)
                 regime = regime_info.market_type
                 risk_mult = RegimeGater.get_risk_multiplier(regime_info.volatility)
                 conf_buffer = RegimeGater.get_confidence_buffer(regime_info.volatility)
+                
+                # 1.5 Volatility Analysis (V4.3 New Feature)
+                vol_analysis = None
+                if self.volatility_adaptive_enabled:
+                    vol_analysis = self.volatility_detector.analyze(m5_data, h1_data)
+                    self.volatility_history.append(vol_analysis)
+                    
+                    # Update risk multiplier based on volatility level
+                    vol_risk_mult = vol_analysis.risk_multiplier
+                    risk_mult = risk_mult * vol_risk_mult
+                    
+                    # Skip trades in extreme low volatility
+                    if vol_analysis.level == VolatilityLevel.EXTREME_LOW:
+                        continue
 
                 # 2. MarketData Construction (Zero-Copy & Anti-Lookahead)
-                # Institutional Fidelity: Simulate Bid/Ask/Spread (Audit Bug #5 Fix)
-                current_bid = float(target_tf_data.open[i])
+                # Institutional Fidelity: Simulate Bid/Ask/Spread (Anti-Lookahead Fix)
+                current_bid = float(target_tf_data.close[i-1]) if i > 0 else float(target_tf_data.open[i])
                 symbol_cfg = self.config.get("symbols_config", {}).get(symbol, {})
                 point = symbol_cfg.get("point", 0.0001)
-                spread_val = symbol_cfg.get("spread_pips", 2) * point
+                
+                # Use actual spread from M5 data if available, else fallback to config
+                # M5 spread is stored in MT5 points (159 pts = 15.9 pips for XAUUSD)
+                # 1 pip = 10 points for XAUUSD
+                if i > 0 and hasattr(m5_data, 'spread') and len(m5_data.spread) > i-1:
+                    spread_points = float(m5_data.spread[i-1])
+                    spread_pips = spread_points / 10.0  # Convert points to pips
+                    spread_val = spread_pips * point
+                else:
+                    spread_val = symbol_cfg.get("spread_pips", 2) * point
                 current_ask = current_bid + spread_val
 
                 market_data = MarketData(
@@ -228,16 +269,28 @@ class PortfolioBacktester:
                     if not RegimeGater.is_strategy_allowed(strat.__class__.__name__, regime): continue
                     if sid in self.open_trades: continue
                     
-                    signal = strat.generate_signal(market_data)
+                    # Apply volatility-adjusted parameters if available
+                    original_params = {}
+                    if self.volatility_adaptive_enabled and vol_analysis:
+                        original_params = self._apply_volatility_params(strat, vol_analysis)
+                    
+                    try:
+                        signal = strat.generate_signal(market_data)
+                    finally:
+                        if original_params:
+                            self._restore_original_params(strat, original_params)
                     
                     if not signal or signal.direction == "NONE":
                         if self.config.get("backtest", {}).get("debug_signals"):
                             reason = getattr(strat, "last_rejection_reason", "No specific reason")
                             logger.info(f"[{dt}] [{sid}] Signal REJECTED: {reason}")
                         continue
-                        
+                            
                     min_conf = getattr(strat, "min_confidence", 0.6)
-                    if signal.confidence < (min_conf + conf_buffer):
+                    if self.config.get("backtest", {}).get("debug_signals"):
+                        logger.info(f"[{dt}] [{sid}] Signal generated: {signal.direction} @ {signal.price:.2f} conf={signal.confidence:.2f}")
+                    
+                    if signal.confidence < (min_conf + conf_buffer - 0.001):
                         if self.config.get("backtest", {}).get("debug_signals"):
                             logger.info(f"[{dt}] [{sid}] Confidence REJECTED: {signal.confidence:.2f} < {min_conf + conf_buffer:.2f}")
                         continue
@@ -245,6 +298,9 @@ class PortfolioBacktester:
                     sl = strat.get_stop_loss(signal, market_data)
                     tp = strat.get_take_profit(signal, market_data)
                     sl_dist = abs(market_data.current_price - sl)
+                    
+                    if self.config.get("backtest", {}).get("debug_signals"):
+                        logger.info(f"[{dt}] [{sid}] SL={sl:.2f}, TP={tp:.2f}, dist={sl_dist:.2f}")
                     
                     if sl_dist > 0:
                         lot_size = self.risk_guardian.calculate_lot_size(
@@ -254,6 +310,9 @@ class PortfolioBacktester:
                             current_price=market_data.current_price
                         )
                         lot_size = lot_size * risk_mult
+                        
+                        if self.config.get("backtest", {}).get("debug_signals"):
+                            logger.info(f"[{dt}] [{sid}] Lot size: {lot_size:.4f}")
                         
                         if lot_size >= 0.01:
                             sig = signal
@@ -270,7 +329,8 @@ class PortfolioBacktester:
                                 symbol=symbol,
                                 price_data=price_data,
                                 is_news_blocked=False,
-                                magic=self.risk_guardian.get_magic_number(sid)
+                                magic=self.risk_guardian.get_magic_number(sid),
+                                timestamp=t
                             )
                             
                             if fill and not fill.get("is_error", False):
@@ -346,6 +406,7 @@ class PortfolioBacktester:
         pbar.close()
         self._force_close_at_end(target_tf_data, point, tick_value, comm_per_lot, active_strategies)
         self.checkpoint_manager.clear_checkpoint()
+        
         return self.history, self.equity_history
 
     def _manage_active_trades(self, m1_candles, tick_value, point, comm_per_lot, strategies):
@@ -371,7 +432,8 @@ class PortfolioBacktester:
                     elif m1_low + spread <= trade["tp"]: exit_price, event = trade["tp"], "tp"
                 
                 if exit_price:
-                    exit_res = self.order_manager.simulate_exit(trade["ticket"], event, exit_price, point, direction)
+                    exit_time = m1_candles.time[m]
+                    exit_res = self.order_manager.simulate_exit(trade["ticket"], event, exit_price, point, direction, exit_time=exit_time)
                     final_exit = exit_res["exit_price"]
                     exit_slip = abs(final_exit - exit_price)
                     
@@ -447,3 +509,58 @@ class PortfolioBacktester:
             net_pnl = ((last_price - trade["fill_price"] if trade["direction"] == "BUY" else trade["fill_price"] - last_price) / point) * tick_value * trade["lots"]
             self.history.append({**trade, "exit_price": last_price, "pnl": net_pnl, "result": "FORCED_CLOSE"})
             del self.open_trades[sid]
+
+    def _apply_volatility_params(self, strategy, vol_analysis) -> Dict[str, Any]:
+        """Apply volatility-adjusted parameters to a strategy."""
+        from core.volatility_detector import VolatilityAdaptiveParameters
+        
+        strategy_id = strategy.strategy_id
+        strategy_type = self._get_strategy_type(strategy_id)
+        
+        vol_params = VolatilityAdaptiveParameters.get_parameters_for_volatility(
+            vol_analysis.level, 
+            strategy_type
+        )
+        
+        original = {}
+        for param, value in vol_params.items():
+            if hasattr(strategy, param):
+                original[param] = getattr(strategy, param)
+                setattr(strategy, param, value)
+        
+        return original
+    
+    def _restore_original_params(self, strategy, original_params: Dict[str, Any]) -> None:
+        """Restore original strategy parameters."""
+        for param, value in original_params.items():
+            setattr(strategy, param, value)
+    
+    def _get_strategy_type(self, strategy_id: str) -> str:
+        """Determine strategy type for volatility parameter selection."""
+        if "Breakout" in strategy_id or "Liquidity" in strategy_id:
+            return "breakout"
+        elif "MeanReversion" in strategy_id or "RangeBounce" in strategy_id:
+            return "mean_reversion"
+        elif "Trend" in strategy_id:
+            return "trend"
+        return "breakout"
+    
+    def get_volatility_summary(self) -> Dict[str, Any]:
+        """Get summary of volatility conditions encountered during backtest."""
+        if not self.volatility_history:
+            return {"status": "No volatility data"}
+        
+        level_counts = {}
+        for vol in self.volatility_history:
+            level_key = vol.level.value
+            level_counts[level_key] = level_counts.get(level_key, 0) + 1
+        
+        ratios = [v.ratio for v in self.volatility_history]
+        
+        return {
+            "total_bars": len(self.volatility_history),
+            "level_distribution": {k: f"{(v/len(self.volatility_history)*100):.1f}%" for k, v in level_counts.items()},
+            "avg_ratio": float(np.mean(ratios)),
+            "min_ratio": float(np.min(ratios)),
+            "max_ratio": float(np.max(ratios)),
+        }
