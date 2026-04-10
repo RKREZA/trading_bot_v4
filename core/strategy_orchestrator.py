@@ -180,6 +180,12 @@ class StrategyOrchestrator:
                     logger.warning(f"[RISK] Rejecting {symbol}: Strategy {sid} already has active exposure (Magic: {magic})")
                     continue
                 
+                # 5.3 Circuit Breaker Check (Step 24)
+                strat_allowed, strat_reason = strat_risk_guardian.check_strategy_governance(sid)
+                if not strat_allowed:
+                    logger.warning(f"[CIRCUIT BREAKER] Strategy {sid} rejected: {strat_reason}")
+                    continue
+
                 # Sizing & Margin Validation
                 if strat_risk_guardian.validate_signal(sig, current_balance, market_data, symbol_info):
                     validated_signals[sid] = sig
@@ -253,6 +259,11 @@ class StrategyOrchestrator:
         sid = trade_record.get("strategy_id")
         for runtime in self.runtimes:
             if runtime.strategy_id == sid:
+                # Record strategy-specific performance for Circuit Breakers
+                pnl = trade_record.get("net_pnl", 0.0)
+                strat_bal = self.portfolio_manager.get_strategy_balance(self.connection.get_balance(), sid)
+                runtime.risk_guardian.record_strategy_result(sid, pnl, strat_bal)
+                
                 runtime.on_trade_closed(trade_record)
                 break
 

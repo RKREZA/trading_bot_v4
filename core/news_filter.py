@@ -19,7 +19,7 @@ class InstitutionalNewsFilter:
         self.news_cfg = config.get("news_filter", {})
         self.enabled = self.news_cfg.get("enabled", True)
         self.cache_file = self.news_cfg.get("cache_file", "config/news_cache.json")
-        self.source_url = self.news_cfg.get("source_url", "https://nfs.forexfactory.com/ff_calendar_thisweek.json")
+        self.source_url = self.news_cfg.get("source_url", "https://nfs.faireconomy.media/ff_calendar_thisweek.json")
         self.impact_levels = self.news_cfg.get("impact_levels", ["High"])
         self.buffer_before = self.news_cfg.get("buffer_before_min", 30)
         self.buffer_after = self.news_cfg.get("buffer_after_min", 15)
@@ -92,8 +92,7 @@ class InstitutionalNewsFilter:
 
         # 3. ForexFactory Mirror Strategy (Advanced Spoofing)
         urls = [
-            "https://www.forexfactory.com/ff_calendar_thisweek.json",
-            "https://nfs.forexfactory.com/ff_calendar_thisweek.json",
+            self.source_url, # Prioritize the configured source (faireconomy.media)
             "https://cdn-ffc.forexfactory.com/ff_calendar_thisweek.json"
         ]
         
@@ -226,7 +225,15 @@ class InstitutionalNewsFilter:
         Checks if trading is blocked for a specific symbol.
         Returns the event name if blocked, else None.
         """
-        if not self.enabled or not self.events:
+        if not self.enabled:
+            return None
+
+        # Institutional Safe-Gate: Check for Stale Data (Step 23)
+        if self._is_data_stale():
+            logger.critical("NEWS ALERT: Data is STALE (Refreshed >24h ago). Global Trading LOCKOUT active.")
+            return "STALE_DATA_LOCKOUT"
+
+        if not self.events:
             return None
             
         # Extract currencies from symbol (e.g., XAUUSD -> XAU, USD)
@@ -275,3 +282,10 @@ class InstitutionalNewsFilter:
                 targets.append(event["country"])
                 
         return list(set(targets))
+    def _is_data_stale(self) -> bool:
+        """Checks if the cached news data is older than 24 hours."""
+        if not os.path.exists(self.cache_file):
+            return True
+        
+        mtime = os.path.getmtime(self.cache_file)
+        return (time.time() - mtime) > 86400  # 24 hours

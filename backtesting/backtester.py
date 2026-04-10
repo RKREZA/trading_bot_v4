@@ -352,8 +352,11 @@ class PortfolioBacktester:
 
                 # 4. M1 Intra-Bar Execution (Safety Gate: Check for Gaps)
                 m1_slice = self._get_m1_for_m5(m1_data, t)
+                atr_vals = target_tf_data.get_indicator("atr_14")
+                atr_val = atr_vals[i] if i < len(atr_vals) else 0.0
+
                 if len(m1_slice) > 0:
-                    self._manage_active_trades(m1_slice, tick_value, point, comm_per_lot, active_strategies)
+                    self._manage_active_trades(m1_slice, tick_value, point, comm_per_lot, active_strategies, atr_val=atr_val)
                 elif self.open_trades:
                     # Institutional Robustness: Fallback to M5 High/Low if M1 is missing (Audit Pass #5 Fix)
                     logger.warning(f"[{dt}] DATA ALERT: Missing M1 coverage for active trade at {t}. Falling back to M5-bar OHLC validation.")
@@ -379,7 +382,7 @@ class PortfolioBacktester:
                             target_tf_data.s[i], 
                             target_tf_data.time[i]
                         )
-                        self._manage_active_trades(m1_fallback, tick_value, point, comm_per_lot, active_strategies)
+                        self._manage_active_trades(m1_fallback, tick_value, point, comm_per_lot, active_strategies, atr_val=atr_val)
                     else:
                         logger.warning(f"[{dt}] DATA ALERT: Index {i} exceeds target_tf_data bounds ({len(target_tf_data)}). Forcing trade close.")
                         self._force_close_at_end(target_tf_data, point, tick_value, comm_per_lot, active_strategies)
@@ -409,7 +412,7 @@ class PortfolioBacktester:
         
         return self.history, self.equity_history
 
-    def _manage_active_trades(self, m1_candles, tick_value, point, comm_per_lot, strategies):
+    def _manage_active_trades(self, m1_candles, tick_value, point, comm_per_lot, strategies, atr_val=0.0):
         """M1-Event Replay Engine for Trade Management."""
         for sid, trade in list(self.open_trades.items()):
             is_closed = False
@@ -420,7 +423,40 @@ class PortfolioBacktester:
                 m1_low = m1_candles.low[m]
                 spread = m1_candles.spread[m] * point
                 direction = trade["direction"]
-                
+
+                # --- V4-ULTRA Trailing Stop Logic (Rule 3.1 Alignment) ---
+                if self.config.get("trailing_stop", {}).get("enabled", False):
+                    conf = self.config["trailing_stop"]
+                    entry = trade["fill_price"]
+                    curr_sl = trade["sl"]
+                    
+                    # Calculate current R:R using M1 close
+                    current_price = m1_candles.close[m]
+                    initial_risk_price = abs(entry - trade["sl"])
+                    if initial_risk_price > 0:
+                        profit_price = (current_price - entry) if direction == "BUY" else (entry - current_price)
+                        current_rr = profit_price / initial_risk_price
+                        
+                        new_sl = None
+                        # Phase 1: Break-Even (at 1.5R)
+                        rr_threshold = conf.get("phase1_rr_threshold", 1.5)
+                        if current_rr >= rr_threshold and abs(curr_sl - entry) > (initial_risk_price * 0.1):
+                            be_offset = initial_risk_price * conf.get("phase2_be_offset_pct", 0.1)
+                            new_sl = entry + be_offset if direction == "BUY" else entry - be_offset
+                        
+                        # Phase 2: ATR-based Trailing (at 3R+)
+                        if current_rr >= 3.0 and atr_val > 0:
+                            trail_mult = conf.get("phase3_trail_mult", 1.5)
+                            trail_sl = current_price - (atr_val * trail_mult) if direction == "BUY" else current_price + (atr_val * trail_mult)
+                            # Only move if improves protection
+                            if direction == "BUY" and trail_sl > (new_sl or curr_sl):
+                                new_sl = trail_sl
+                            elif direction == "SELL" and (curr_sl == 0 or trail_sl < (new_sl or curr_sl)):
+                                new_sl = trail_sl
+                        
+                        if new_sl:
+                            trade["sl"] = new_sl
+
                 exit_price = None
                 event = None
                 

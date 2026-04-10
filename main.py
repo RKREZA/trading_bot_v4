@@ -134,7 +134,7 @@ class LiveOrchestrator:
 
         # Start Health Server
         self.health_server.start()
-        logger.info(f"Health server started on port {health_port}")
+        logger.info(f"Health server started on port {self.health_server.port}")
 
         dashboard = TradingDashboard()
         consecutive_errors = 0
@@ -441,7 +441,7 @@ class LiveOrchestrator:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="V4-ULTRA Live Trading Host")
     parser.add_argument("--symbol", type=str, default="XAUUSDm")
-    parser.add_argument("--strategies", type=str, default="TrendFollowing,Breakout")
+    parser.add_argument("--strategies", type=str, default="LiquiditySweepBreakout,RangeBounce")
     
     args = parser.parse_args()
     setup_live_logging()

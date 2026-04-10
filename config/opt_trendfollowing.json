@@ -1,0 +1,10 @@
+{
+  "sl_atr": 2.2,
+  "tp_atr": 7.2,
+  "min_confidence": 0.7,
+  "adx_threshold": 26,
+  "adx_strong": 24,
+  "min_bars_between_signals": 11,
+  "max_vol_ratio": 3.0,
+  "min_trend_maturity": 4
+}

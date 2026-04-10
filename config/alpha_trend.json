@@ -1,0 +1,9 @@
+{
+  "adx_threshold": 35,
+  "tp_atr": 3.5,
+  "sl_atr": 2.9000000000000004,
+  "min_trend_maturity": 6,
+  "min_confidence": 0.8,
+  "phase1_rr_threshold": 1.5,
+  "phase3_trail_mult": 1.6
+}

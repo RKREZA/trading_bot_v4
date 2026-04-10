@@ -21,24 +21,28 @@
     "atr_lookback": 100
   },
   "portfolio_allocations": {
-    "TrendFollowing": 0.00,
-    "LiquiditySweepBreakout": 0.50,
+    "TrendFollowing": 0.30,
+    "LiquiditySweepBreakout": 0.40,
     "SmartMeanReversion": 0.00,
     "LiquiditySession": 0.00,
-    "RangeBounce": 0.50
+    "RangeBounce": 0.30
   },
   "TrendFollowing": {
-    "enabled": false,
+    "enabled": true,
     "allowed_sessions": [
-      "LONDON"
+      "NEW_YORK",
+      "LONDON/NY",
+      "GLOBAL"
     ],
-    "adx_threshold": 20,
-    "adx_strong": 25,
+    "adx_threshold": 35,
+    "adx_strong": 24,
     "rsi_period": 14,
-    "sl_atr": 2.0,
-    "tp_atr": 4.0,
-    "min_confidence": 0.55,
-    "min_bars_between_signals": 20
+    "sl_atr": 2.9,
+    "tp_atr": 3.5,
+    "min_confidence": 0.80,
+    "min_bars_between_signals": 11,
+    "max_vol_ratio": 3.0,
+    "min_trend_maturity": 6
   },
   "LiquiditySweepBreakout": {
     "enabled": true,
@@ -178,7 +182,7 @@
     "enabled": true,
     "phase1_rr_threshold": 1.5,
     "phase2_be_offset_pct": 0.1,
-    "phase3_trail_mult": 1.5
+    "phase3_trail_mult": 1.6
   },
   "news_filter": {
     "enabled": true,

@@ -1,4 +1,7 @@
 import logging
+import json
+import os
+import time
 import numpy as np
 from collections import deque
 from datetime import datetime, date
@@ -40,6 +43,12 @@ class RiskGuardian:
         self.kill_switch_active = False
         self.silent = False
         
+        # Strategy-Level Circuit Breakers (Step 24)
+        self.strategy_performance = {} # format: {sid: deque([ (timestamp, pnl_pct), ... ])}
+        self.strategy_status = {} # format: {sid: "OK" | "HALTED"}
+        self.health_file = "config/strategy_health.json"
+        self._load_health_state()
+
         self.logger = logging.getLogger("trading_bot.risk")
 
     def validate_signal(self, 
@@ -162,6 +171,71 @@ class RiskGuardian:
             return False, f"MAX_DRAWDOWN_REACHED ({total_dd:.1f}%)"
 
         return True, "OK"
+
+    def check_strategy_governance(self, strategy_id: str) -> Tuple[bool, str]:
+        """
+        Institutional Strategy-Specific Circuit Breaker.
+        Checks if a strategy has exceeded its 48-hour trailing loss limit.
+        """
+        if self.strategy_status.get(strategy_id) == "HALTED":
+            return False, "STRATEGY_HALTED (Manual Reset Required)"
+
+        # Calculate Rolling 48h Loss
+        perf_history = self.strategy_performance.get(strategy_id, [])
+        if not perf_history:
+            return True, "OK"
+
+        now = time.time()
+        cutoff = now - (48 * 3600)
+        
+        # Clean old history
+        recent_perf = [p for p in perf_history if p[0] > cutoff]
+        self.strategy_performance[strategy_id] = recent_perf
+        
+        total_pnl_pct = sum(p[1] for p in recent_perf)
+        
+        limit = self.config.get("risk_governance", {}).get("strategy_loss_halt_pct", 3.0)
+        if total_pnl_pct <= -limit:
+            self.strategy_status[strategy_id] = "HALTED"
+            self._save_health_state()
+            self.logger.critical(f"CIRCUIT BREAKER: Strategy {strategy_id} HALTED! Trailing 48h PnL: {total_pnl_pct:.2f}%")
+            return False, f"CIRCUIT_BREAKER_TRIGGERED ({total_pnl_pct:.2f}%)"
+
+        return True, "OK"
+
+    def record_strategy_result(self, strategy_id: str, pnl_abs: float, alloc_balance: float):
+        """Records strategy-specific result and calculates relative PnL%."""
+        if alloc_balance <= 0: return
+        
+        pnl_pct = (pnl_abs / alloc_balance) * 100
+        if strategy_id not in self.strategy_performance:
+            self.strategy_performance[strategy_id] = []
+            
+        self.strategy_performance[strategy_id].append((time.time(), pnl_pct))
+        self._save_health_state()
+
+    def _save_health_state(self):
+        try:
+            os.makedirs(os.path.dirname(self.health_file), exist_ok=True)
+            state = {
+                "performance": {sid: list(p) for sid, p in self.strategy_performance.items()},
+                "status": self.strategy_status
+            }
+            with open(self.health_file, 'w') as f:
+                json.dump(state, f, indent=2)
+        except Exception as e:
+            self.logger.error(f"Failed to save health state: {e}")
+
+    def _load_health_state(self):
+        if os.path.exists(self.health_file):
+            try:
+                with open(self.health_file, 'r') as f:
+                    state = json.load(f)
+                    self.strategy_performance = {sid: list(p) for sid, p in state.get("performance", {}).items()}
+                    self.strategy_status = state.get("status", {})
+                self.logger.info("Loaded strategy health state from persistence.")
+            except Exception as e:
+                self.logger.error(f"Failed to load health state: {e}")
 
     def record_trade_result(self, pnl: float, current_equity: float = None):
         """Updates internal risk state after trade closure."""

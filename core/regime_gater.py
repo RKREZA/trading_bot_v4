@@ -14,20 +14,16 @@ class RegimeGater:
     @staticmethod
     def is_strategy_allowed(strategy_type: str, market_type: MarketRegime) -> bool:
         """
-        Implements the activation logic based on Directional Type:
-        - TREND: Enables Trend Following + Breakout
-        - RANGE: Enables Mean Reversion + Liquidity/Session
+        Institutional Regime Routing.
+        
+        V4-ULTRA Policy: Strategies are self-gating via their own ADX, RSI, and
+        volatility filters. The regime gater provides advisory routing only —
+        it no longer hard-blocks strategies to avoid redundant double-gating.
+        
+        Each strategy's generate_signal() is the final authority.
         """
-        st_type = strategy_type.upper().replace("_", "")
-        
-        if market_type == MarketRegime.TREND:
-            # strictly Trending strategies
-            return "TREND" in st_type or "BREAKOUT" in st_type
-        
-        if market_type == MarketRegime.RANGE:
-            # Mean reversion and range-bound strategies
-            return "MEANREVERSION" in st_type or "LIQUIDITYSESSION" in st_type or "RANGE" in st_type or "BOUNCE" in st_type
-        
+        # All strategies are allowed to evaluate — they self-reject if conditions
+        # don't match their internal institutional filters.
         return True
 
     @staticmethod
