@@ -1,0 +1,11 @@
+{
+  "sl_atr": 2.0,
+  "tp_atr": 8.0,
+  "min_confidence": 0.8500000000000001,
+  "bb_std": 2.5,
+  "rsi_oversold": 38,
+  "rsi_overbought": 68,
+  "adx_threshold": 23,
+  "max_vol_ratio": 1.6,
+  "max_adx_slope": 4.0
+}

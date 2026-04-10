@@ -297,7 +297,11 @@ class BacktestCLI:
             else:
                 # Check if any part of our filter matches this strategy
                 for rid in requested_ids:
-                    if rid.lower() == pascal_name.lower() or rid.lower() == st_type.lower() or rid.lower() == f"{st_type.lower()}_v4":
+                    # Partial matching: allow 'Breakout' to match 'LiquiditySweepBreakout'
+                    if (rid.lower() == pascal_name.lower() or 
+                        rid.lower() == st_type.lower() or 
+                        rid.lower() in pascal_name.lower() or 
+                        rid.lower() in st_type.lower()):
                         matched_id = pascal_name # Force standardized PascalCase for reports
                         break
 

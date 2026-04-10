@@ -104,67 +104,89 @@ class RangeBounceStrategy(BaseStrategy):
             return None
         
         m5 = market_data.m5_candles
-        if len(m5) < max(self.bb_period, self.rsi_period, self.trend_ema_slow) + 2:
+        if len(m5) < max(self.bb_period, self.rsi_period, self.trend_ema_slow, 100) + 2:
             self.last_rejection_reason = "RangeBounce: Insufficient data"
             return None
         
+        # 1. HARDENING: Relative Volatility Gate (Audit Pass #10)
+        # Prevents entries during runaway volatility or news breakouts
+        atr_14 = m5.get_indicator("atr_14")
+        if len(atr_14) > 100:
+            current_atr = atr_14[-1]
+            avg_atr_100 = np.mean(atr_14[-100:])
+            vol_ratio = current_atr / avg_atr_100 if avg_atr_100 > 0 else 1.0
+            max_vol = strat_config.get("max_vol_ratio", 1.5)
+            if vol_ratio > max_vol:
+                self.last_rejection_reason = f"Volatility Gated: Ratio {vol_ratio:.2f} > {max_vol}"
+                return None
+
+        # 2. HARDENING: ADX Momentum Filter
+        # Reject if ADX is rising rapidly, indicating a trend is forming
+        adx_14 = m5.get_indicator("adx_14")
+        if len(adx_14) > 3:
+            adx_slope = adx_14[-1] - adx_14[-3]
+            # Boosted tolerance to 7.0 (Allows for faster momentum coiling)
+            max_adx_slope = strat_config.get("max_adx_slope", 7.0)
+            if adx_slope > max_adx_slope:
+                self.last_rejection_reason = f"ADX Slope Gated: Slope {adx_slope:.1f} > {max_adx_slope}"
+                return None
+
         bars_since_last = len(m5) - self._last_signal_bar
         if bars_since_last < self.min_bars_between_signals:
             self.last_rejection_reason = "Signal cooldown active"
             return None
 
         closes = m5.close
-        highs = m5.high
-        lows = m5.low
         price = market_data.current_price
         
         bb_upper, bb_mid, bb_lower = self._calculate_bollinger_bands(closes, self.bb_period, self.bb_std)
-        
         if bb_upper == 0:
             self.last_rejection_reason = "RangeBounce: BB not ready"
             return None
         
-        rsi_vals = self._calculate_rsi(closes, self.rsi_period)
+        rsi_vals = m5.get_indicator("rsi_14")
         rsi = rsi_vals[-1] if len(rsi_vals) > 0 else 50
+        prev_rsi = rsi_vals[-2] if len(rsi_vals) > 1 else rsi
         
         trend = self._get_trend_direction(m5)
-        ema_vals = m5.ema(self.trend_ema_fast)
-        
-        if len(ema_vals) < 2:
-            self.last_rejection_reason = "RangeBounce: EMA not ready"
-            return None
         
         bb_range = bb_upper - bb_lower
-        bb_position = (price - bb_lower) / bb_range if bb_range > 0 else 0.5
+        # Protect against division by zero
+        bb_position = (price - bb_lower) / bb_range if bb_range > 0.00001 else 0.5
         
         oversold = rsi <= self.rsi_oversold
         overbought = rsi >= self.rsi_overbought
         extreme_oversold = rsi <= self.rsi_extreme_oversold
         extreme_overbought = rsi >= self.rsi_extreme_overbought
         
+        # 3. HARDENING: RSI "Return to Range" (Precision Entry)
+        # Only required for standard signals, extreme signals can enter instantly
+        is_rsi_rev_up = rsi >= (prev_rsi - 0.5)
+        is_rsi_rev_down = rsi <= (prev_rsi + 0.5)
+
         buy_signal = False
         sell_signal = False
         confidence = 0.0
         
-        if extreme_oversold and bb_position < 0.15:
+        if extreme_oversold and bb_position < 0.20:
             buy_signal = True
-            confidence = 0.80 + min(0.15, (self.rsi_extreme_oversold - rsi) / 20)
-        elif oversold and bb_position < 0.25:
+            confidence = 0.85
+        elif oversold and bb_position < 0.35 and is_rsi_rev_up:
             if trend == 1:
                 buy_signal = True
-                confidence = 0.70
-            elif trend == 0 and rsi <= 30:
+                confidence = 0.75
+            elif trend == 0 and rsi <= 35:
                 buy_signal = True
                 confidence = 0.65
         
-        if extreme_overbought and bb_position > 0.85:
+        if extreme_overbought and bb_position > 0.80:
             sell_signal = True
-            confidence = 0.80 + min(0.15, (rsi - self.rsi_extreme_overbought) / 20)
-        elif overbought and bb_position > 0.75:
+            confidence = 0.85
+        elif overbought and bb_position > 0.65 and is_rsi_rev_down:
             if trend == -1:
                 sell_signal = True
-                confidence = 0.70
-            elif trend == 0 and rsi >= 70:
+                confidence = 0.75
+            elif trend == 0 and rsi >= 65:
                 sell_signal = True
                 confidence = 0.65
         
