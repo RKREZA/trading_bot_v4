@@ -112,5 +112,12 @@ def run_stress_test(csv_path: str):
     print(f"\nReport generated: STRESS_TEST_REPORT.md")
 
 if __name__ == "__main__":
-    latest_session = "backtest_results/session_20260411_035541/trades.csv"
+    # Institutional Fidelity: Automatically detect the latest backtest session
+    import glob
+    csv_files = glob.glob("backtest_results/*/trades.csv")
+    if not csv_files:
+        print("Error: No trades.csv found in any backtest_results subdirectory.")
+        sys.exit(1)
+        
+    latest_session = max(csv_files, key=os.path.getmtime)
     run_stress_test(latest_session)

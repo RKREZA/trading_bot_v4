@@ -50,6 +50,7 @@ class MT5Connection:
         self.account_info: dict = {}
         self._last_health_check = 0.0
         self.config = {}  # Will be set from main
+        self.server_utc_offset: int = 0 # Offset in hours to reach Broker Time from UTC
 
     def _get_credentials(self) -> dict:
         """Load MT5 credentials from environment variables."""
@@ -129,6 +130,11 @@ class MT5Connection:
 
                 self.connected = True
                 self._update_account_info(info)
+                
+                # Auto-Detect UTC Offset (Step 25)
+                self.server_utc_offset = self._calculate_utc_offset()
+                logger.info("Universal Time Sync: Broker Offset = %+d hours", self.server_utc_offset)
+
                 self._last_health_check = time.time()
                 logger.info("Connected! Balance: $%s", f"{info.balance:,.2f}")
                 return True
@@ -226,6 +232,25 @@ class MT5Connection:
             "connected": True,
             "server_time": server_time,
         }
+
+    def _calculate_utc_offset(self) -> int:
+        """Calculates the integer hour offset between Broker Time and UTC."""
+        try:
+            with self.MT5_LOCK:
+                # Use tick time as the primary source for current server time
+                tick = mt5.symbol_info_tick("XAUUSDm")
+                if tick and tick.time > 0:
+                    broker_ts = tick.time
+                else:
+                    info = mt5.account_info()
+                    broker_ts = getattr(info, 'server_time', time.time())
+            
+            utc_ts = datetime.now(timezone.utc).timestamp()
+            offset_hours = round((broker_ts - utc_ts) / 3600.0)
+            return offset_hours
+        except Exception as e:
+            logger.error("Failed to calculate UTC offset: %s. Defaulting to 0.", e)
+            return 0
 
     def get_symbol_snapshot(self, symbol: str) -> dict:
         """Fetch current Bid, Ask, Spread, and Point for a specific symbol."""

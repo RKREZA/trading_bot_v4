@@ -31,31 +31,29 @@
     "enabled": true,
     "allowed_sessions": [
       "NEW_YORK",
-      "LONDON/NY",
-      "GLOBAL"
+      "LONDON/NY"
     ],
-    "adx_threshold": 35,
+    "adx_threshold": 26,
     "adx_strong": 24,
     "rsi_period": 14,
-    "sl_atr": 2.9,
-    "tp_atr": 3.5,
-    "min_confidence": 0.80,
+    "sl_atr": 2.2,
+    "tp_atr": 7.2,
+    "min_confidence": 0.70,
     "min_bars_between_signals": 11,
     "max_vol_ratio": 3.0,
-    "min_trend_maturity": 6
+    "min_trend_maturity": 4
   },
   "LiquiditySweepBreakout": {
     "enabled": true,
     "allowed_sessions": [
-      "LONDON",
-      "GLOBAL"
+      "LONDON"
     ],
-    "lookback": 20,
-    "body_thresh": 0.65,
+    "lookback": 17,
+    "body_thresh": 0.5,
     "h1_strength_thresh": 0.55,
-    "sl_atr": 3.0,
-    "tp_atr": 4.5,
-    "min_confidence": 0.70,
+    "sl_atr": 1.9,
+    "tp_atr": 3.4,
+    "min_confidence": 0.60,
     "min_bars_between_signals": 25
   },
   "SmartMeanReversion": {
@@ -77,22 +75,22 @@
     "enabled": true,
     "allowed_sessions": [
       "LONDON",
-      "GLOBAL"
+      "TOKYO"
     ],
     "bb_period": 20,
     "bb_std": 2.5,
     "rsi_period": 14,
-    "rsi_oversold": 35,
-    "rsi_overbought": 65,
+    "rsi_oversold": 38,
+    "rsi_overbought": 68,
     "rsi_extreme_oversold": 20,
     "rsi_extreme_overbought": 80,
-    "sl_atr": 3.4,
-    "tp_atr": 4.1,
-    "min_confidence": 0.70,
+    "sl_atr": 2.0,
+    "tp_atr": 8.0,
+    "min_confidence": 0.85,
     "min_bars_between_signals": 25,
-    "adx_threshold": 24,
-    "max_vol_ratio": 2.0,
-    "max_adx_slope": 5.0,
+    "adx_threshold": 23,
+    "max_vol_ratio": 1.6,
+    "max_adx_slope": 4.0,
     "trend_ema_fast": 50,
     "trend_ema_slow": 200
   },
@@ -129,8 +127,7 @@
       "TOKYO",
       "LONDON",
       "NEW_YORK",
-      "LONDON/NY",
-      "GLOBAL"
+      "LONDON/NY"
     ],
     "range_maturity_limit": 3.0,
     "vol_trigger_mult": 0.4,
@@ -158,7 +155,7 @@
   },
   "backtest": {
     "initial_balance_per_strategy": 5000,
-    "utc_offset": 3,
+    "utc_offset": 0,
     "leverage": 100,
     "deterministic": true,
     "random_seed": 42,

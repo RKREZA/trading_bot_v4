@@ -12,17 +12,21 @@ class SessionDetector:
         Determines the current market session.
         
         Institutional Standard: All internal logic uses UTC. 
-        If 'dt' is UTC, we apply the broker_offset to align with the Session Map.
-        Standard MT5 Broker Time (EET) is UTC+2 (Winter) / UTC+3 (Summer).
+        Sessions are defined in UTC hours:
+          - TOKYO: 00:00 - 08:00 UTC
+          - LONDON: 08:00 - 16:00 UTC
+          - NEW YORK: 13:00 - 21:00 UTC
         """
-        # Auto-detect offset based on month (DST-aware)
-        if broker_offset_hours == 0:
-            month = dt.month
-            broker_offset_hours = 2 if (month < 3 or month > 10) else 3
+        # Ensure we are working with the UTC hour
+        # If dt is naive, we assume it's UTC. If aware, we convert to UTC.
+        if dt.tzinfo is not None:
+            utc_dt = dt.astimezone(datetime.timezone.utc)
+        else:
+            utc_dt = dt
+            
+        hour = utc_dt.hour
         
-        broker_time = dt + datetime.timedelta(hours=broker_offset_hours)
-        hour = broker_time.hour
-        
+        # Mapping (UTC Hours)
         if 13 <= hour < 16:
             return "LONDON/NY"
         
@@ -34,6 +38,10 @@ class SessionDetector:
             
         if 0 <= hour < 8:
             return "TOKYO"
+            
+        # Institutional Dead Zone: Broker Rollover Period
+        if 21 <= hour < 24:
+            return "ROLLOVER"
             
         return "GLOBAL"
     

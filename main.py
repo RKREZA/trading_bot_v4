@@ -240,7 +240,7 @@ class LiveOrchestrator:
                         bid=float(tick.bid),
                         ask=float(tick.ask),
                         spread=float(tick.ask - tick.bid),
-                        session=SessionDetector.get_session(dt_server, self.config.get("backtest", {}).get("utc_offset", 0)),
+                        session=SessionDetector.get_session(dt_server, self.connection.server_utc_offset),
                         timestamp=dt_server
                     )
 
@@ -406,7 +406,7 @@ class LiveOrchestrator:
             # Try to detect session using broker clock if available
             dt_server = self.connection.get_broker_time(self.symbol)
             if dt_server:
-                state["session"] = SessionDetector.get_session(dt_server, self.config.get("backtest", {}).get("utc_offset", 0))
+                state["session"] = SessionDetector.get_session(dt_server, self.connection.server_utc_offset)
                 state["server_time"] = dt_server.strftime("%d-%b-%Y %I:%M:%S %p")
         
         if reg:

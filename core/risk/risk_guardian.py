@@ -47,9 +47,8 @@ class RiskGuardian:
         self.strategy_performance = {} # format: {sid: deque([ (timestamp, pnl_pct), ... ])}
         self.strategy_status = {} # format: {sid: "OK" | "HALTED"}
         self.health_file = "config/strategy_health.json"
-        self._load_health_state()
-
         self.logger = logging.getLogger("trading_bot.risk")
+        self._load_health_state()
 
     def validate_signal(self, 
                         signal: Any, 
