@@ -49,3 +49,4 @@ btr.log
 /state
 state/backtest_state.json
 bot.lock
+config/news_cache.json
