@@ -182,6 +182,38 @@ class BaseStrategy(ABC):
             return False
         return True
 
+    def is_volatility_safe(self, market_data: MarketData) -> bool:
+        """
+        Institutional Volatility Guard.
+        Rejects entries if the ATR is too small relative to the spread (low profit potential per unit of cost).
+        """
+        # Check if enabled in config
+        vol_config = self.config.get("volatility_adaptive", {})
+        if not vol_config:
+            # Try global config if strategy block doesn't have it
+            # In V4, global config is often passed into strategy __init__
+            pass 
+            
+        min_ratio = self.config.get("min_atr_spread_ratio", 3.5)
+        
+        # Use M15 ATR for entry gating
+        m15_atr = market_data.m15_candles.get_indicator("atr_14")
+        if len(m15_atr) == 0:
+            return True # Default to pass if no data
+            
+        current_atr = m15_atr[-1]
+        
+        if market_data.spread <= 0:
+            return True
+            
+        ratio = current_atr / market_data.spread
+        
+        if ratio < min_ratio:
+            self.last_rejection_reason = f"Volatility Gated: ATR/Spread ratio {ratio:.2f} < {min_ratio}"
+            return False
+            
+        return True
+
     def get_session_confidence_floor(self, market_data: MarketData) -> float:
         """
         Institutional Time-Aware Gating.

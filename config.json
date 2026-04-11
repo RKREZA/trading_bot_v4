@@ -23,7 +23,7 @@
       "spread_pips": 6,
       "tick_value": 10.0,
       "commission_per_lot": 7.0,
-      "backtest_timeframe": "M5"
+      "backtest_timeframe": "M15"
     }
   },
   "volatility_adaptive": {
@@ -57,7 +57,7 @@
     "sl_atr": 2.2,
     "tp_atr": 7.2,
     "min_confidence": 0.80,
-    "max_spread_points": 65,
+    "max_spread_points": 35,
     "min_bars_between_signals": 11,
     "max_vol_ratio": 3.0,
     "min_trend_maturity": 4
@@ -75,10 +75,10 @@
     "lookback": 17,
     "body_thresh": 0.5,
     "h1_strength_thresh": 0.55,
-    "sl_atr": 2.5,
-    "tp_atr": 5.0,
+    "sl_atr": 3.2,
+    "tp_atr": 6.8,
     "min_confidence": 0.85,
-    "max_spread_points": 65,
+    "max_spread_points": 35,
     "min_bars_between_signals": 25
   },
   "RangeBounce": {
@@ -96,10 +96,10 @@
     "rsi_period": 14,
     "rsi_oversold": 30,
     "rsi_overbought": 70,
-    "sl_atr": 2.5,
-    "tp_atr": 5.0,
+    "sl_atr": 3.2,
+    "tp_atr": 6.8,
     "min_confidence": 0.80,
-    "max_spread_points": 40,
+    "max_spread_points": 35,
     "min_bars_between_signals": 15,
     "max_vol_ratio": 1.5,
     "max_adx_slope": 6.5
@@ -119,8 +119,8 @@
     "rsi_period": 14,
     "rsi_overbought": 75,
     "rsi_oversold": 25,
-    "sl_atr": 1.5,
-    "tp_atr": 4.5,
+    "sl_atr": 2.2,
+    "tp_atr": 5.8,
     "min_confidence": 0.80,
     "min_bars_between_signals": 15
   },
@@ -136,8 +136,8 @@
     ],
     "range_maturity_limit": 3.0,
     "vol_trigger_mult": 0.4,
-    "sl_atr": 1.5,
-    "tp_atr": 4.0,
+    "sl_atr": 2.2,
+    "tp_atr": 5.2,
     "lookback_bars": 60,
     "min_range_bars": 20,
     "min_confidence": 0.70
