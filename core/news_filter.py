@@ -23,6 +23,7 @@ class InstitutionalNewsFilter:
         self.impact_levels = self.news_cfg.get("impact_levels", ["High"])
         self.buffer_before = self.news_cfg.get("buffer_before_min", 30)
         self.buffer_after = self.news_cfg.get("buffer_after_min", 15)
+        self.resilience_mode = "HEALTHY" # HEALTHY | DEGRADED | STALE
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
@@ -153,6 +154,7 @@ class InstitutionalNewsFilter:
                     logger.warning(f"News: Source {url} failed: {last_error}")
         
         logger.error(f"News: All automated sources failed. System using 'Persistence Mode' (Stale cache).")
+        self.resilience_mode = "DEGRADED"
 
     def fetch_from_dailyfx(self) -> bool:
         """Fetches high-impact news from the DailyFX API (Stable Institutional Source)."""
@@ -230,8 +232,13 @@ class InstitutionalNewsFilter:
 
         # Institutional Safe-Gate: Check for Stale Data (Step 23)
         if self._is_data_stale():
+            self.resilience_mode = "STALE"
             logger.critical("NEWS ALERT: Data is STALE (Refreshed >24h ago). Global Trading LOCKOUT active.")
             return "STALE_DATA_LOCKOUT"
+        
+        # If we are degraded (no fresh fetch but cache exists), we stay in DEGRADED
+        if not self.events and self.resilience_mode == "HEALTHY":
+             self.resilience_mode = "DEGRADED"
 
         if not self.events:
             return None
@@ -289,3 +296,12 @@ class InstitutionalNewsFilter:
         
         mtime = os.path.getmtime(self.cache_file)
         return (time.time() - mtime) > 86400  # 24 hours
+
+    def get_resilience_multiplier(self) -> float:
+        """Returns a lot size multiplier based on feed health."""
+        if self.resilience_mode == "HEALTHY":
+            return 1.0
+        elif self.resilience_mode == "DEGRADED":
+            return 0.5 # Halve exposure if feeding is blind
+        else:
+            return 0.0 # Lockout

@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from core.connection import MT5Connection, PositionManager
-from core.data_handler import DataFetcher
+from core.data_engine import DataEngine
 from core.strategy_orchestrator import StrategyOrchestrator
 from core.portfolio_manager import PortfolioManager
 from core.news_filter import InstitutionalNewsFilter
@@ -55,7 +55,7 @@ class LiveOrchestrator:
             self.config = {}
 
         # 2. INSTANTIATE MICRO-SERVICES
-        self.data_manager = DataFetcher()
+        self.data_engine = DataEngine(self.connection, self.config)
         self.news_filter = InstitutionalNewsFilter(self.config)
         # BUG FIX: Pass self.connection so OrderManager executes LIVE trades!
         self.order_manager = OrderManager(self.config, self.connection)
@@ -132,9 +132,11 @@ class LiveOrchestrator:
             print("CRITICAL: MT5 Connection Failed. Check credentials/server in .env.")
             return
 
-        # Start Health Server
+        # Start Micro-Services
         self.health_server.start()
+        self.data_engine.start()
         logger.info(f"Health server started on port {self.health_server.port}")
+        logger.info("DataEngine async service started.")
 
         dashboard = TradingDashboard()
         consecutive_errors = 0
@@ -175,59 +177,23 @@ class LiveOrchestrator:
                         time.sleep(2)
                         continue
                     
-                    # 1. FETCH MULTI-TIMEFRAME DATA (HTF, M15, M5, D1)
-                    m5_data = self.data_manager.fetch_candles(self.symbol, "M5", 500)
-                    m15_data = self.data_manager.fetch_candles(self.symbol, "M15", 300)
-                    h1_data = self.data_manager.fetch_candles(self.symbol, "H1", 300)
-                    d1_data = self.data_manager.fetch_candles(self.symbol, "D1", 100)
-
-                    # Diagnostic Gating
-                    missing = []
-                    if m5_data is None or len(m5_data) < 20: missing.append(f"M5({len(m5_data) if m5_data else 0}/20)")
-                    if m15_data is None or len(m15_data) < 10: missing.append(f"M15({len(m15_data) if m15_data else 0}/10)")
-                    if h1_data is None or len(h1_data) < 10: missing.append(f"H1({len(h1_data) if h1_data else 0}/10)")
-                    if d1_data is None or len(d1_data) < 1: missing.append(f"D1({len(d1_data) if d1_data else 0}/1)")
-
-                    if missing:
-                        msg = f"Waiting for {', '.join(missing)} synchronization..."
-                        self.logs.append(f"[{dt_server.strftime('%H:%M:%S')}] {msg}")
-                        logger.info(f"Handshake: {msg}")
-                        # Ensure logs are flushed to disk for immediate diagnostic visibility
-                        for handler in logging.getLogger().handlers: handler.flush()
-                        
-                        self._update_ui(live, dashboard, status=f"SYNCING ({missing[0].split('(')[0]})...", tick=tick)
-                        time.sleep(2) # Reduced sync pulse frequency to save API overhead
-                        continue
-
-                    # 1.5 Data Integrity & Synchronization Guard (Sync Pillar)
-                    # Detect "Ghost Candles" (intra-day gaps) before generating signals
-                    m5_report = self.data_manager.validate_data_integrity(m5_data, "M5")
-                    if m5_report["status"] == "CRITICAL":
-                        msg = "DATA CRITICAL: Ghost candles found in M5 history. Halting for backfill..."
-                        self.logs.append(f"[{dt_server.strftime('%H:%M:%S')}] {msg}")
-                        logger.error(f"Handshake: {msg}")
-                        time.sleep(5)
-                        continue
+                    # 1. RETRIEVE PROCESSED MARKET STATE (Non-blocking Apex)
+                    state = self.data_engine.get_state(self.symbol)
                     
-                    # Ensure HTF data is not older than M5 freshness (Temporal Drift protection)
-                    # If H1 data in cache is > 5 minutes old relative to current M5 tip, force refresh.
-                    if len(m5_data) > 0 and len(h1_data) > 0:
-                        m5_tip = m5_data.time[-1]
-                        h1_tip = h1_data.time[-1]
-                        if (m5_tip - h1_tip) > 3600 + 300: # 1 hour + 5 min tolerance
-                            self.logs.append(f"[{dt_server.strftime('%H:%M:%S')}] SYNC GUARD: HTF data skew detected. Refreshing H1...")
-                            h1_data = self.data_manager.fetch_candles(self.symbol, "H1", 300, force_refresh=True)
-
-                    # 1.6 Preprocess Indicators (Fix ADX NaN)
-                    for tf_data in [h1_data, m15_data, m5_data]:
-                        self._preprocess_indicators(tf_data)
-
-                    # 1.7 Fetch Real-time Tick Data
-                    tick = mt5.symbol_info_tick(self.symbol)
-                    if tick is None:
-                        logger.error(f"Failed to get tick for {self.symbol}. Skipping cycle.")
+                    if state is None or state.m5 is None:
+                        msg = "Awaiting initial DataEngine calculation..."
+                        self.logs.append(f"[{dt_server.strftime('%H:%M:%S')}] {msg}")
+                        self._update_ui(live, dashboard, status="CALCULATING...", tick=tick)
                         time.sleep(1)
                         continue
+
+                    # 1.5 FETCH ACCOUNT SNAPSHOT (Institutional Pillar 4: Shared Local Ledger)
+                    account_snapshot = self.connection.get_account_snapshot()
+                    
+                    m5_data = state.m5
+                    m15_data = state.m15
+                    h1_data = state.h1
+                    d1_data = state.d1
 
                     # 2. Package Market State (Satisfy V4 MarketData contract)
                     md = MarketData(
@@ -244,12 +210,17 @@ class LiveOrchestrator:
                         timestamp=dt_server
                     )
 
-                    # 3. Proactive Risk Reduction (Step 19)
+                    # 3. Proactive Risk Reduction
                     self.orchestrator.close_before_news(dt_server.timestamp())
 
-                    # 4. Parallel Execution Logic
+                    # 4. Parallel Execution Logic (Zero Latency Vetting)
                     is_news_blocked = self.news_filter.is_blocked(self.symbol, dt_server.timestamp())
-                    pulse_report = self.orchestrator.execute_cycle(self.symbol, md, is_news_blocked=bool(is_news_blocked))
+                    pulse_report = self.orchestrator.execute_cycle(
+                        self.symbol, 
+                        md, 
+                        account_snapshot=account_snapshot, 
+                        is_news_blocked=bool(is_news_blocked)
+                    )
                     
                     # 4. UI SYNCHRONIZATION
                     raw_positions = self.pos_manager.get_open_positions()
@@ -322,6 +293,7 @@ class LiveOrchestrator:
         
         # Graceful shutdown
         logging.info("Shutting down. Open positions remain managed by MT5.")
+        self.data_engine.stop()
         self.health_server.stop()  # Stop health server
         if os.path.exists("bot.lock"):
             try:

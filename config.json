@@ -95,31 +95,185 @@
     "trend_ema_slow": 200
   },
   "LiquiditySweepBreakout_VOLATILE_PARAMS": {
-    "EXTREME_LOW": {"body_thresh": 0.80, "h1_strength_thresh": 0.70, "sl_atr": 3.0, "tp_atr": 3.0, "min_confidence": 0.85, "min_bars_between_signals": 40},
-    "VERY_LOW": {"body_thresh": 0.75, "h1_strength_thresh": 0.65, "sl_atr": 3.0, "tp_atr": 3.5, "min_confidence": 0.80, "min_bars_between_signals": 30},
-    "LOW": {"body_thresh": 0.70, "h1_strength_thresh": 0.60, "sl_atr": 3.0, "tp_atr": 4.0, "min_confidence": 0.75, "min_bars_between_signals": 25},
-    "NORMAL": {"body_thresh": 0.65, "h1_strength_thresh": 0.55, "sl_atr": 3.0, "tp_atr": 4.5, "min_confidence": 0.70, "min_bars_between_signals": 25},
-    "HIGH": {"body_thresh": 0.60, "h1_strength_thresh": 0.50, "sl_atr": 4.0, "tp_atr": 5.0, "min_confidence": 0.65, "min_bars_between_signals": 20},
-    "VERY_HIGH": {"body_thresh": 0.55, "h1_strength_thresh": 0.45, "sl_atr": 5.0, "tp_atr": 6.0, "min_confidence": 0.60, "min_bars_between_signals": 15},
-    "EXTREME": {"body_thresh": 0.50, "h1_strength_thresh": 0.40, "sl_atr": 6.0, "tp_atr": 8.0, "min_confidence": 0.55, "min_bars_between_signals": 10}
+    "EXTREME_LOW": {
+      "body_thresh": 0.80,
+      "h1_strength_thresh": 0.70,
+      "sl_atr": 3.0,
+      "tp_atr": 3.0,
+      "min_confidence": 0.85,
+      "min_bars_between_signals": 40
+    },
+    "VERY_LOW": {
+      "body_thresh": 0.75,
+      "h1_strength_thresh": 0.65,
+      "sl_atr": 3.0,
+      "tp_atr": 3.5,
+      "min_confidence": 0.80,
+      "min_bars_between_signals": 30
+    },
+    "LOW": {
+      "body_thresh": 0.70,
+      "h1_strength_thresh": 0.60,
+      "sl_atr": 3.0,
+      "tp_atr": 4.0,
+      "min_confidence": 0.75,
+      "min_bars_between_signals": 25
+    },
+    "NORMAL": {
+      "body_thresh": 0.65,
+      "h1_strength_thresh": 0.55,
+      "sl_atr": 3.0,
+      "tp_atr": 4.5,
+      "min_confidence": 0.70,
+      "min_bars_between_signals": 25
+    },
+    "HIGH": {
+      "body_thresh": 0.60,
+      "h1_strength_thresh": 0.50,
+      "sl_atr": 4.0,
+      "tp_atr": 5.0,
+      "min_confidence": 0.65,
+      "min_bars_between_signals": 20
+    },
+    "VERY_HIGH": {
+      "body_thresh": 0.55,
+      "h1_strength_thresh": 0.45,
+      "sl_atr": 5.0,
+      "tp_atr": 6.0,
+      "min_confidence": 0.60,
+      "min_bars_between_signals": 15
+    },
+    "EXTREME": {
+      "body_thresh": 0.50,
+      "h1_strength_thresh": 0.40,
+      "sl_atr": 6.0,
+      "tp_atr": 8.0,
+      "min_confidence": 0.55,
+      "min_bars_between_signals": 10
+    }
   },
   "RangeBounce_VOLATILE_PARAMS": {
-    "EXTREME_LOW": {"rsi_oversold": 30, "rsi_overbought": 70, "bb_std": 1.5, "sl_atr": 3.0, "tp_atr": 3.0, "min_confidence": 0.80, "min_bars_between_signals": 30},
-    "VERY_LOW": {"rsi_oversold": 28, "rsi_overbought": 72, "bb_std": 1.8, "sl_atr": 3.0, "tp_atr": 3.5, "min_confidence": 0.75, "min_bars_between_signals": 25},
-    "LOW": {"rsi_oversold": 25, "rsi_overbought": 75, "bb_std": 2.0, "sl_atr": 3.0, "tp_atr": 4.0, "min_confidence": 0.70, "min_bars_between_signals": 20},
-    "NORMAL": {"rsi_oversold": 25, "rsi_overbought": 75, "bb_std": 2.0, "sl_atr": 3.0, "tp_atr": 4.0, "min_confidence": 0.70, "min_bars_between_signals": 20},
-    "HIGH": {"rsi_oversold": 20, "rsi_overbought": 80, "bb_std": 2.5, "sl_atr": 4.0, "tp_atr": 5.0, "min_confidence": 0.65, "min_bars_between_signals": 15},
-    "VERY_HIGH": {"rsi_oversold": 15, "rsi_overbought": 85, "bb_std": 3.0, "sl_atr": 5.0, "tp_atr": 6.0, "min_confidence": 0.60, "min_bars_between_signals": 10},
-    "EXTREME": {"rsi_oversold": 10, "rsi_overbought": 90, "bb_std": 3.0, "sl_atr": 6.0, "tp_atr": 8.0, "min_confidence": 0.55, "min_bars_between_signals": 5}
+    "EXTREME_LOW": {
+      "rsi_oversold": 30,
+      "rsi_overbought": 70,
+      "bb_std": 1.5,
+      "sl_atr": 3.0,
+      "tp_atr": 3.0,
+      "min_confidence": 0.80,
+      "min_bars_between_signals": 30
+    },
+    "VERY_LOW": {
+      "rsi_oversold": 28,
+      "rsi_overbought": 72,
+      "bb_std": 1.8,
+      "sl_atr": 3.0,
+      "tp_atr": 3.5,
+      "min_confidence": 0.75,
+      "min_bars_between_signals": 25
+    },
+    "LOW": {
+      "rsi_oversold": 25,
+      "rsi_overbought": 75,
+      "bb_std": 2.0,
+      "sl_atr": 3.0,
+      "tp_atr": 4.0,
+      "min_confidence": 0.70,
+      "min_bars_between_signals": 20
+    },
+    "NORMAL": {
+      "rsi_oversold": 25,
+      "rsi_overbought": 75,
+      "bb_std": 2.0,
+      "sl_atr": 3.0,
+      "tp_atr": 4.0,
+      "min_confidence": 0.70,
+      "min_bars_between_signals": 20
+    },
+    "HIGH": {
+      "rsi_oversold": 20,
+      "rsi_overbought": 80,
+      "bb_std": 2.5,
+      "sl_atr": 4.0,
+      "tp_atr": 5.0,
+      "min_confidence": 0.65,
+      "min_bars_between_signals": 15
+    },
+    "VERY_HIGH": {
+      "rsi_oversold": 15,
+      "rsi_overbought": 85,
+      "bb_std": 3.0,
+      "sl_atr": 5.0,
+      "tp_atr": 6.0,
+      "min_confidence": 0.60,
+      "min_bars_between_signals": 10
+    },
+    "EXTREME": {
+      "rsi_oversold": 10,
+      "rsi_overbought": 90,
+      "bb_std": 3.0,
+      "sl_atr": 6.0,
+      "tp_atr": 8.0,
+      "min_confidence": 0.55,
+      "min_bars_between_signals": 5
+    }
   },
   "TrendFollowing_VOLATILE_PARAMS": {
-    "EXTREME_LOW": {"adx_threshold": 35, "rsi_period": 14, "sl_atr": 1.5, "tp_atr": 5.0, "min_confidence": 0.80, "min_bars_between_signals": 30},
-    "VERY_LOW": {"adx_threshold": 32, "rsi_period": 14, "sl_atr": 1.8, "tp_atr": 5.5, "min_confidence": 0.75, "min_bars_between_signals": 25},
-    "LOW": {"adx_threshold": 30, "rsi_period": 14, "sl_atr": 2.0, "tp_atr": 6.0, "min_confidence": 0.70, "min_bars_between_signals": 20},
-    "NORMAL": {"adx_threshold": 25, "rsi_period": 14, "sl_atr": 2.0, "tp_atr": 4.0, "min_confidence": 0.70, "min_bars_between_signals": 25},
-    "HIGH": {"adx_threshold": 25, "rsi_period": 14, "sl_atr": 2.5, "tp_atr": 5.0, "min_confidence": 0.65, "min_bars_between_signals": 20},
-    "VERY_HIGH": {"adx_threshold": 20, "rsi_period": 10, "sl_atr": 3.0, "tp_atr": 6.0, "min_confidence": 0.60, "min_bars_between_signals": 15},
-    "EXTREME": {"adx_threshold": 15, "rsi_period": 7, "sl_atr": 4.0, "tp_atr": 8.0, "min_confidence": 0.55, "min_bars_between_signals": 10}
+    "EXTREME_LOW": {
+      "adx_threshold": 35,
+      "rsi_period": 14,
+      "sl_atr": 1.5,
+      "tp_atr": 5.0,
+      "min_confidence": 0.80,
+      "min_bars_between_signals": 30
+    },
+    "VERY_LOW": {
+      "adx_threshold": 32,
+      "rsi_period": 14,
+      "sl_atr": 1.8,
+      "tp_atr": 5.5,
+      "min_confidence": 0.75,
+      "min_bars_between_signals": 25
+    },
+    "LOW": {
+      "adx_threshold": 30,
+      "rsi_period": 14,
+      "sl_atr": 2.0,
+      "tp_atr": 6.0,
+      "min_confidence": 0.70,
+      "min_bars_between_signals": 20
+    },
+    "NORMAL": {
+      "adx_threshold": 25,
+      "rsi_period": 14,
+      "sl_atr": 2.0,
+      "tp_atr": 4.0,
+      "min_confidence": 0.70,
+      "min_bars_between_signals": 25
+    },
+    "HIGH": {
+      "adx_threshold": 25,
+      "rsi_period": 14,
+      "sl_atr": 2.5,
+      "tp_atr": 5.0,
+      "min_confidence": 0.65,
+      "min_bars_between_signals": 20
+    },
+    "VERY_HIGH": {
+      "adx_threshold": 20,
+      "rsi_period": 10,
+      "sl_atr": 3.0,
+      "tp_atr": 6.0,
+      "min_confidence": 0.60,
+      "min_bars_between_signals": 15
+    },
+    "EXTREME": {
+      "adx_threshold": 15,
+      "rsi_period": 7,
+      "sl_atr": 4.0,
+      "tp_atr": 8.0,
+      "min_confidence": 0.55,
+      "min_bars_between_signals": 10
+    }
   },
   "LiquiditySession": {
     "enabled": false,
@@ -154,7 +308,7 @@
     }
   },
   "backtest": {
-    "initial_balance_per_strategy": 5000,
+    "initial_balance_per_strategy": 10000,
     "utc_offset": 0,
     "leverage": 100,
     "deterministic": true,
@@ -174,6 +328,12 @@
     "tp_exit_slippage_points": 0.8,
     "sl_exit_slippage_points": 2.5,
     "forced_exit_slippage_points": 1.5
+  },
+  "partial_profit": {
+    "enabled": true,
+    "phase1_rr_target": 1.5,
+    "phase1_close_pct": 50,
+    "move_to_be_at_partial": true
   },
   "trailing_stop": {
     "enabled": true,

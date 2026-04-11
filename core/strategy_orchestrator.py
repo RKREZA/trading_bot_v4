@@ -41,16 +41,15 @@ class StrategyOrchestrator:
         self.last_analysis: Dict[str, Any] = {}
         self._analysis_lock = threading.Lock() 
 
-        # Institutional State: Open Ticket Registry (Audit Bug #2 Fix)
-        # Provides a secondary source of truth for position awareness
         self._open_tickets = set()
+        self._scaled_tickets = set() # Track tickets that have already taken partial profits
         self._tickets_lock = threading.Lock()
 
         # Asynchronous Trailing Stop Management (Rule 3.1)
         self._stop_thread = threading.Thread(target=self._trailing_stop_loop, daemon=True)
         self._stop_thread.start()
 
-    def execute_cycle(self, symbol: str, market_data: MarketData, is_news_blocked: bool = False) -> Dict[str, Any]:
+    def execute_cycle(self, symbol: str, market_data: MarketData, account_snapshot: dict, is_news_blocked: bool = False) -> Dict[str, Any]:
         """
         STRICT 8-STEP INSTITUTIONAL EXECUTION FLOW (Step 12).
         ====================================================
@@ -140,9 +139,9 @@ class StrategyOrchestrator:
         if not raw_signals:
             return pulse_report
 
-        # 5. RISK ENGINE VALIDATES TRADE
-        current_balance = self.connection.get_balance() if hasattr(self.connection, 'get_balance') else 1000.0
-        current_equity = self.connection.get_equity() if hasattr(self.connection, 'get_equity') else current_balance
+        # 5. RISK ENGINE VALIDATES TRADE (Institutional Pillar 4: Zero Latency Ledger)
+        current_balance = account_snapshot.get('balance', 1000.0)
+        current_equity = account_snapshot.get('equity', current_balance)
         
         risk_guardian = self.runtimes[0].risk_guardian if self.runtimes else None
         validated_signals = {}
@@ -213,7 +212,11 @@ class StrategyOrchestrator:
             # Final Lot Calculation (Partitioned Strategy Balance)
             strat_balance = self.portfolio_manager.get_strategy_balance(current_balance, sid)
             sl_dist = abs(market_data.current_price - sig.stop_loss)
-            sig.volume = runtime.risk_guardian.calculate_lot_size(strat_balance, sl_dist, symbol_info)
+            base_volume = runtime.risk_guardian.calculate_lot_size(strat_balance, sl_dist, symbol_info)
+            
+            # Apply News Resilience Multiplier (Institutional Hardening Pillar 2)
+            news_mult = self.news_filter.get_resilience_multiplier()
+            sig.volume = base_volume * news_mult
             
             if sig.volume > 0:
                 # 8. UNIFIED EXECUTION BRIDGE (Audit Bug #7 Fix)
@@ -317,9 +320,60 @@ class StrategyOrchestrator:
                 self.connection.modify_sl_tp(pos.ticket, symbol, new_sl, pos.tp)
 
     def manage_partials(self, symbol: str, bid: float, ask: float):
-        """Handles partial profit taking targets."""
-        # Simple implementation: Close 50% at 2:1 RR if configured
-        pass
+        """
+        Handles partial profit taking scaling (Institutional Grade).
+        Closes a percentage of volume when the initial R:R target is hit.
+        """
+        if not self.config.get("partial_profit", {}).get("enabled", False):
+            return
+
+        conf = self.config["partial_profit"]
+        rr_target = conf.get("phase1_rr_target", 1.5)
+        close_pct = conf.get("phase1_close_pct", 50)
+        
+        positions = self.position_manager.get_open_positions(symbol)
+        
+        for pos in positions:
+            # Skip if already scaled
+            with self._tickets_lock:
+                if pos.ticket in self._scaled_tickets:
+                    continue
+
+            # Calculate current R:R
+            entry = pos.price_open
+            current_sl = pos.sl
+            direction = "BUY" if pos.type == 0 else "SELL"
+            current_price = bid if direction == "BUY" else ask
+            
+            # Initial Risk (distance from entry to original SL)
+            # Note: We use pos.sl which might have been moved. 
+            # Ideally we want original_sl. For now, we estimate from entry.
+            initial_risk = abs(entry - current_sl)
+            if initial_risk == 0: continue
+            
+            # Current Profit in Points
+            profit_points = (current_price - entry) if direction == "BUY" else (entry - current_price)
+            current_rr = profit_points / initial_risk if initial_risk > 0 else 0
+            
+            if current_rr >= rr_target:
+                close_vol = pos.volume * (close_pct / 100.0)
+                # Institutional Floor: Ensure we don't scale below min lot
+                sym_info = self.connection.get_symbol_info(symbol)
+                min_lot = sym_info.get("min_lot", 0.01)
+                
+                if close_vol >= min_lot and (pos.volume - close_vol) >= min_lot:
+                    logger.info(f"[PARTIAL] Target hit for {pos.ticket} ({symbol}) at {current_rr:.2f}R. Scaling out {close_vol} lots.")
+                    success = self.connection.close_position_partial(pos.ticket, close_vol)
+                    
+                    if success:
+                        with self._tickets_lock:
+                            self._scaled_tickets.add(pos.ticket)
+                        
+                        # Move to Break-Even if configured
+                        if conf.get("move_to_be_at_partial", True):
+                            logger.info(f"[PARTIAL] Moving {pos.ticket} to Break-Even after scale-out.")
+                            be_sl = entry + (initial_risk * 0.1) if direction == "BUY" else entry - (initial_risk * 0.1)
+                            self.connection.modify_sl_tp(pos.ticket, symbol, be_sl, pos.tp)
 
     def reset_daily(self, new_balance: float):
         """Propagates daily reset and balance sync to all strategy runtimes."""
@@ -389,7 +443,7 @@ class StrategyOrchestrator:
                     continue
 
                 for symbol, data in analysis_snapshot.items():
-                    # We only manage symbols that have open positions
+                    # 1. Trailing Stop Management
                     self.manage_trailing_stops(
                         symbol, 
                         data['bid'], 
@@ -398,6 +452,10 @@ class StrategyOrchestrator:
                         None, 
                         "GLOBAL"
                     )
+                    
+                    # 2. Partials Management
+                    self.manage_partials(symbol, data['bid'], data['ask'])
+
                 time.sleep(0.2) # 5Hz update rate
             except Exception as e:
                 logger.error(f"Trailing Stop Thread Error: {e}")
