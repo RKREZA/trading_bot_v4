@@ -59,18 +59,16 @@
   "LiquiditySweepBreakout": {
     "enabled": true,
     "allowed_sessions": [
-      "GLOBAL",
       "TOKYO",
       "LONDON",
-      "LONDON/NY",
-      "NEW_YORK"
+      "LONDON/NY"
     ],
     "lookback": 17,
     "body_thresh": 0.5,
     "h1_strength_thresh": 0.55,
     "sl_atr": 1.9,
     "tp_atr": 3.4,
-    "min_confidence": 0.80,
+    "min_confidence": 0.85,
     "max_spread_points": 65,
     "min_bars_between_signals": 25
   },
