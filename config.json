@@ -1,16 +1,16 @@
 {
-  "_comment": "V4 ULTRA INSTITUTIONAL - FINAL PROFITABILITY CERTIFIED",
-  "_version": "4.5-CERTIFIED",
+  "_comment": "V4 ULTRA INSTITUTIONAL - FULL OPTIMIZATION SUITE (2024-2026)",
+  "_version": "4.6-OPTIMIZATION",
   "_audit_date": "2026-04-11",
   "magic_number": 234000,
   "server_utc_offset_override": null,
   "risk_governance": {
     "risk_per_trade_pct": 1.0,
-    "max_daily_loss_pct": 3.0,
-    "max_drawdown_halt_pct": 8.0,
-    "max_consecutive_losses": 3,
-    "max_simultaneous_strategies": 2,
-    "max_cost_ratio": 0.5,
+    "max_daily_loss_pct": 5.0,
+    "max_drawdown_halt_pct": 15.0,
+    "max_consecutive_losses": 5,
+    "max_simultaneous_strategies": 5,
+    "max_cost_ratio": 0.8,
     "min_notional_value": 100
   },
   "execution": {
@@ -35,16 +35,21 @@
     "atr_lookback": 100
   },
   "portfolio_allocations": {
-    "TrendFollowing": 0.30,
+    "TrendFollowing": 0.00,
     "LiquiditySweepBreakout": 0.40,
-    "SmartMeanReversion": 0.00,
-    "LiquiditySession": 0.00,
-    "RangeBounce": 0.30
+    "SmartMeanReversion": 0.20,
+    "LiquiditySession": 0.20,
+    "RangeBounce": 0.20
   },
   "TrendFollowing": {
-    "enabled": true,
+    "enabled": false,
     "allowed_sessions": [
-      "LONDON/NY"
+      "TOKYO",
+      "LONDON",
+      "NEW_YORK",
+      "LONDON/NY",
+      "ROLLOVER",
+      "GLOBAL"
     ],
     "adx_threshold": 26,
     "adx_strong": 24,
@@ -62,13 +67,16 @@
     "allowed_sessions": [
       "TOKYO",
       "LONDON",
-      "LONDON/NY"
+      "NEW_YORK",
+      "LONDON/NY",
+      "ROLLOVER",
+      "GLOBAL"
     ],
     "lookback": 17,
     "body_thresh": 0.5,
     "h1_strength_thresh": 0.55,
-    "sl_atr": 1.9,
-    "tp_atr": 3.4,
+    "sl_atr": 2.5,
+    "tp_atr": 5.0,
     "min_confidence": 0.85,
     "max_spread_points": 65,
     "min_bars_between_signals": 25
@@ -77,7 +85,11 @@
     "enabled": true,
     "allowed_sessions": [
       "TOKYO",
-      "LONDON/NY"
+      "LONDON",
+      "NEW_YORK",
+      "LONDON/NY",
+      "ROLLOVER",
+      "GLOBAL"
     ],
     "bb_period": 20,
     "bb_std": 2.5,
@@ -92,75 +104,47 @@
     "max_vol_ratio": 1.5,
     "max_adx_slope": 6.5
   },
-  "LiquiditySweepBreakout_VOLATILE_PARAMS": {
-    "VERY_HIGH": {
-      "body_thresh": 0.55,
-      "h1_strength_thresh": 0.45,
-      "sl_atr": 5.0,
-      "tp_atr": 6.0,
-      "min_confidence": 0.80,
-      "min_bars_between_signals": 15,
-      "lookback": 30
-    },
-    "EXTREME": {
-      "body_thresh": 0.50,
-      "h1_strength_thresh": 0.40,
-      "sl_atr": 6.5,
-      "tp_atr": 8.0,
-      "min_confidence": 0.85,
-      "min_bars_between_signals": 10,
-      "lookback": 40
-    }
+  "SmartMeanReversion": {
+    "enabled": true,
+    "allowed_sessions": [
+      "TOKYO",
+      "LONDON",
+      "NEW_YORK",
+      "LONDON/NY",
+      "ROLLOVER",
+      "GLOBAL"
+    ],
+    "bb_period": 20,
+    "bb_std": 2.2,
+    "rsi_period": 14,
+    "rsi_overbought": 75,
+    "rsi_oversold": 25,
+    "sl_atr": 1.5,
+    "tp_atr": 4.5,
+    "min_confidence": 0.80,
+    "min_bars_between_signals": 15
   },
-  "RangeBounce_VOLATILE_PARAMS": {
-    "VERY_HIGH": {
-      "rsi_oversold": 15,
-      "rsi_overbought": 85,
-      "bb_std": 3.0,
-      "sl_atr": 6.5,
-      "tp_atr": 6.0,
-      "min_confidence": 0.80,
-      "min_bars_between_signals": 10
-    },
-    "EXTREME": {
-      "rsi_oversold": 10,
-      "rsi_overbought": 90,
-      "bb_std": 3.5,
-      "sl_atr": 8.0,
-      "tp_atr": 9.0,
-      "min_confidence": 0.90,
-      "min_bars_between_signals": 5
-    }
-  },
-  "TrendFollowing_VOLATILE_PARAMS": {
-    "VERY_HIGH": {
-      "adx_threshold": 20,
-      "rsi_period": 10,
-      "sl_atr": 5.5,
-      "tp_atr": 6.0,
-      "min_confidence": 0.80,
-      "min_bars_between_signals": 15
-    },
-    "EXTREME": {
-      "adx_threshold": 18,
-      "rsi_period": 7,
-      "sl_atr": 7.0,
-      "tp_atr": 8.0,
-      "min_confidence": 0.85,
-      "min_bars_between_signals": 10
-    }
+  "LiquiditySession": {
+    "enabled": true,
+    "allowed_sessions": [
+      "TOKYO",
+      "LONDON",
+      "NEW_YORK",
+      "LONDON/NY",
+      "ROLLOVER",
+      "GLOBAL"
+    ],
+    "range_maturity_limit": 3.0,
+    "vol_trigger_mult": 0.4,
+    "sl_atr": 1.5,
+    "tp_atr": 4.0,
+    "lookback_bars": 60,
+    "min_range_bars": 20,
+    "min_confidence": 0.70
   },
   "backtest": {
     "initial_balance_per_strategy": 10000.0,
     "adaptive_strategy": false,
-    "debug_signals": true
-  },
-  "SmartMeanReversion": {
-    "enabled": false,
-    "min_confidence": 0.85
-  },
-  "LiquiditySession": {
-    "enabled": false,
-    "min_confidence": 0.85
+    "debug_signals": false
   }
 }

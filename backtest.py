@@ -281,7 +281,8 @@ class BacktestCLI:
                 "LIQUIDITYSWEEPBREAKOUT": "LiquiditySweepBreakout",
                 "SMARTMEANREVERSION": "SmartMeanReversion",
                 "TRENDFOLLOWING": "TrendFollowing",
-                "LIQUIDITYSESSION": "LiquiditySession"
+                "LIQUIDITYSESSION": "LiquiditySession",
+                "RANGEBOUNCE": "RangeBounce"
             }.get(st_type, st_type.title().replace("_", ""))
 
             
