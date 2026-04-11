@@ -350,13 +350,14 @@ class LiveOrchestrator:
             "digits": digits,
             "tick_lag": tick_lag,
             "logs": self.logs[-15:],
-            "server_time": datetime.now().strftime("%d-%b-%Y %I:%M:%S %p"), # Local Pulse for UX confirmation
+            "local_time": datetime.now().astimezone().strftime(f"%d-%b-%Y %I:%M:%S %p {TradingDashboard.format_local_tz(datetime.now().astimezone())}"),
+            "server_time": datetime.now().astimezone().strftime(f"%d-%b-%Y %I:%M:%S %p {TradingDashboard.format_local_tz(datetime.now().astimezone())}"),
             "price": price_now,
             "bid": bid_now,
             "ask": ask_now,
             "spread": spread_now,
             "pips": (ask_now - bid_now) / (0.10 if "XAU" in self.symbol else 0.01 if "JPY" in self.symbol else 0.0001),
-            "session": "SYNCING...",
+            "session": SessionDetector.get_session(datetime.now().astimezone(), 0),
             "regime_type": status or "SYNCING...",
             "volatility": status or "SYNCING..."
         }
@@ -364,9 +365,10 @@ class LiveOrchestrator:
         # Primary Data Acquisition
         if md:
             state.update({
-                "session": md.session,
+                "session": SessionDetector.get_session(datetime.now().astimezone(), 0),
                 "timestamp": md.timestamp,
-                "server_time": md.timestamp.strftime("%d-%b-%Y %I:%M:%S %p")
+                "local_time": datetime.now().astimezone().strftime(f"%d-%b-%Y %I:%M:%S %p {TradingDashboard.format_local_tz(datetime.now().astimezone())}"),
+                "server_time": datetime.now().astimezone().strftime(f"%d-%b-%Y %I:%M:%S %p {TradingDashboard.format_local_tz(datetime.now().astimezone())}")
             })
         else:
             # Fallback for early cycles (Waiting for candles)
@@ -378,8 +380,9 @@ class LiveOrchestrator:
             # Try to detect session using broker clock if available
             dt_server = self.connection.get_broker_time(self.symbol)
             if dt_server:
-                state["session"] = SessionDetector.get_session(dt_server, self.connection.server_utc_offset)
-                state["server_time"] = dt_server.strftime("%d-%b-%Y %I:%M:%S %p")
+                state["session"] = SessionDetector.get_session(datetime.now().astimezone(), 0)
+                state["local_time"] = datetime.now().astimezone().strftime(f"%d-%b-%Y %I:%M:%S %p {TradingDashboard.format_local_tz(datetime.now().astimezone())}")
+                state["server_time"] = datetime.now().astimezone().strftime(f"%d-%b-%Y %I:%M:%S %p {TradingDashboard.format_local_tz(datetime.now().astimezone())}")
         
         if reg:
             state.update({

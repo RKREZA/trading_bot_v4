@@ -8,7 +8,7 @@ import os
 import time
 import math
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 
 try:
@@ -210,13 +210,13 @@ class MT5Connection:
             else:
                 dt = datetime.now(timezone.utc)
                 
-            # Formatting: 6th April 2026 - 10:45PM (UTC)
-            day = dt.day
-            suffix = "th" if 11 <= day <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
-            server_time = dt.strftime(f"{day}{suffix} %B %Y - %I:%M%p (UTC)")
+            loc = self._get_broker_location()
+            server_time = dt.strftime(f"{day}{suffix} %B %Y - %I:%M%p ({tz.tzname(None)}) {loc}")
             
         except Exception:
-            server_time = datetime.now(timezone.utc).strftime("%d %B %Y - %I:%M%p (UTC)")
+            tz = self._get_broker_tz()
+            loc = self._get_broker_location()
+            server_time = datetime.now(tz).strftime(f"%d %B %Y - %I:%M%p ({tz.tzname(None)}) {loc}")
 
         self.account_info = {
             "login": info.login,
@@ -233,17 +233,65 @@ class MT5Connection:
             "server_time": server_time,
         }
 
+    def _get_broker_tz(self) -> timezone:
+        """Returns a timezone object based on the detected server offset."""
+        sign = "+" if self.server_utc_offset >= 0 else ""
+        return timezone(timedelta(hours=self.server_utc_offset), name=f"UTC {sign}{self.server_utc_offset}")
+
+    def _get_broker_location(self) -> str:
+        """Heuristic to guess broker location based on UTC offset."""
+        offset = self.server_utc_offset
+        # Common Broker Timezone Mappings
+        mapping = {
+            3: "Cyprus/EE (Market Standard)",
+            2: "Cyprus/EE (B)",
+            1: "London/WE",
+            0: "London/WE",
+            -4: "New York/EDT",
+            -5: "New York/Chicago (DST)",
+            -6: "Chicago/Central (S)",
+            -7: "Mountain",
+            -8: "Pacific",
+            9: "Tokyo",
+            8: "Singapore/HK"
+        }
+        return mapping.get(offset, "Unknown")
+
+    def format_broker_time(self, dt: datetime) -> str:
+        """Standardized broker time formatting with location mapping."""
+        if not dt: return "N/A"
+        tz = self._get_broker_tz()
+        loc = self._get_broker_location()
+        return dt.strftime(f"%d-%b-%Y %I:%M:%S %p ({tz.tzname(None)}) {loc}")
+
     def _calculate_utc_offset(self) -> int:
         """Calculates the integer hour offset between Broker Time and UTC."""
+        # 1. Check Config Override (Institutional Priority)
+        override = self.config.get("server_utc_offset_override")
+        if override is not None:
+            return int(override)
+            
         try:
             with self.MT5_LOCK:
                 # Use tick time as the primary source for current server time
                 tick = mt5.symbol_info_tick("XAUUSDm")
+                
                 if tick and tick.time > 0:
+                    # Weekend Guard: If tick is older than 2 minutes, market is likely closed.
+                    # Do NOT use stale Friday ticks to calculate Saturday offsets.
+                    gap_seconds = time.time() - tick.time
+                    if gap_seconds > 120:
+                        # Return current offset instead of hallucinating a new one
+                        if self.server_utc_offset == 0:
+                            # If we haven't detected it yet and market is closed, default to +2 (Common broker time)
+                            return 2
+                        return self.server_utc_offset
                     broker_ts = tick.time
                 else:
                     info = mt5.account_info()
-                    broker_ts = getattr(info, 'server_time', time.time())
+                    broker_ts = getattr(info, 'server_time', 0)
+                    if broker_ts == 0:
+                        return self.server_utc_offset if self.server_utc_offset != 0 else 2
             
             utc_ts = datetime.now(timezone.utc).timestamp()
             offset_hours = round((broker_ts - utc_ts) / 3600.0)
@@ -284,13 +332,13 @@ class MT5Connection:
             tick = mt5.symbol_info_tick(tick_symbol)
             
             if tick and tick.time > 0:
-                return datetime.fromtimestamp(tick.time, tz=timezone.utc)
+                return datetime.fromtimestamp(tick.time, tz=self._get_broker_tz())
             
             # Secondary Fallback: Account Snapshot (if your broker supports it)
             info = mt5.account_info()
             server_ts = getattr(info, 'server_time', None)
             if server_ts:
-                return datetime.fromtimestamp(server_ts, tz=timezone.utc)
+                return datetime.fromtimestamp(server_ts, tz=self._get_broker_tz())
                 
             # Institutional Guard: Do NOT fallback to local clock if broker sync fails.
             # This prevents "Premature Candle Evaluation" in MTF strategies.

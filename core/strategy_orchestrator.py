@@ -72,7 +72,8 @@ class StrategyOrchestrator:
         # Pulse Telemetry Initialization
         upcoming_obj = self.news_filter.get_upcoming_events(ts, 4)
         for ev in upcoming_obj:
-            ev['time'] = datetime.fromtimestamp(ev['timestamp'], tz=timezone.utc).strftime("%H:%M")
+            # Shift from UTC to Local System Time for Unified UI alignment
+            ev['time'] = datetime.fromtimestamp(ev['timestamp'], tz=timezone.utc).astimezone().strftime("%I:%M %p")
             
         pulse_report = {
             "regime": regime_info,

@@ -25,10 +25,27 @@ class TradingDashboard:
             return "th"
         return {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
 
+    @staticmethod
+    def format_local_tz(dt: datetime) -> str:
+        """Returns local timezone in format: (UTC +6) Dhaka"""
+        try:
+            offset = dt.strftime("%z") # e.g. +0600
+            if not offset: return ""
+            hours = int(offset[:3])
+            # Specific requested format for Dhaka
+            if hours == 6:
+                return f"(UTC +6) Dhaka"
+            # Generic fallback
+            sign = "+" if hours >= 0 else "-"
+            return f"(UTC {sign}{abs(hours)})"
+        except:
+            return ""
+
     def _get_formatted_time(self) -> str:
-        """Return date in format like: 09-Apr-2026 01:44:40"""
-        now = datetime.now()
-        return now.strftime("%d-%b-%Y %H:%M:%S")
+        """Return date in format like: 09-Apr-2026 01:44:40 (UTC +6) Dhaka"""
+        now = datetime.now().astimezone()
+        tz_str = self.format_local_tz(now)
+        return now.strftime(f"%d-%b-%Y %H:%M:%S {tz_str}")
 
     def update(self, state: dict) -> Text:
         """Pulse the entire dashboard with triple-aligned header."""
@@ -60,10 +77,8 @@ class TradingDashboard:
         status_text = "ONLINE" if conn.get("connected") else "OFFLINE"
         status_color = "bold green" if conn.get("connected") else "bold red"
         
-        # Priority: Broker Time > State Provided Time > Local fallback
-        current_time_str = state.get("server_time") or acc.get("server_time")
-        if not current_time_str:
-            current_time_str = self._get_formatted_time() + " (LOCAL)"
+        # UNIFIED LOCAL TIME (User Request: Sync everything with local time)
+        current_time_str = state.get("local_time") or self._get_formatted_time()
         
         # TRIPLE ALIGNMENT LOGIC
         bot_name = "T-BOT (V4-ULTRA)"
@@ -79,7 +94,6 @@ class TradingDashboard:
         pad_left = " " * (center_start - left_len)
         
         # End of center text is center_start + center_len
-        # Start of right text should be width - right_len
         # Start of right text should be width - right_len
         right_start = max(center_start + center_len + 1, width - right_len)
         pad_right = " " * (right_start - (center_start + center_len))

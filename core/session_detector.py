@@ -10,40 +10,36 @@ class SessionDetector:
     def get_session(dt: datetime.datetime, broker_offset_hours: int = 0) -> str:
         """
         Determines the current market session.
-        
-        Institutional Standard: All internal logic uses UTC. 
-        Sessions are defined in UTC hours:
-          - TOKYO: 00:00 - 08:00 UTC
-          - LONDON: 08:00 - 16:00 UTC
-          - NEW YORK: 13:00 - 21:00 UTC
+        Returns '(CLOSED)' suffix on weekends to avoid confusion.
         """
         # Ensure we are working with the UTC hour
-        # If dt is naive, we assume it's UTC. If aware, we convert to UTC.
         if dt.tzinfo is not None:
             utc_dt = dt.astimezone(datetime.timezone.utc)
         else:
-            utc_dt = dt
+            # Safety: If passed naive time (like some broker feeds), 
+            # we assume it's already aligned with the requested context.
+            utc_dt = dt.replace(tzinfo=datetime.timezone.utc)
             
         hour = utc_dt.hour
+        is_weekend = utc_dt.weekday() in [5, 6]
         
         # Mapping (UTC Hours)
+        session = "GLOBAL"
         if 13 <= hour < 16:
-            return "LONDON/NY"
-        
-        if 8 <= hour < 13:
-            return "LONDON"
+            session = "LONDON/NY"
+        elif 8 <= hour < 13:
+            session = "LONDON"
+        elif 16 <= hour < 21:
+            session = "NEW_YORK"
+        elif 0 <= hour < 8:
+            session = "TOKYO"
+        elif 21 <= hour < 24:
+            session = "ROLLOVER"
             
-        if 16 <= hour < 21:
-            return "NEW_YORK"
+        if is_weekend:
+            return f"{session} (CLOSED)"
             
-        if 0 <= hour < 8:
-            return "TOKYO"
-            
-        # Institutional Dead Zone: Broker Rollover Period
-        if 21 <= hour < 24:
-            return "ROLLOVER"
-            
-        return "GLOBAL"
+        return session
     
     @staticmethod
     def is_session_active(dt: datetime.datetime, broker_offset_hours: int = 0, 
