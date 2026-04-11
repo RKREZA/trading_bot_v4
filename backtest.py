@@ -236,6 +236,9 @@ class BacktestCLI:
         session_stats = PerformanceTracker.calculate_per_session(history, total_initial)
         
         full_results = {
+            "symbol": symbol,
+            "start_date": start,
+            "end_date": end,
             "portfolio": stats,
             "strategies": strat_stats,
             "sessions": session_stats
@@ -312,6 +315,11 @@ class BacktestCLI:
 
             try:
                 strategy_obj = st_class(matched_id, config=self.config)
+                
+                # [ Institutional Gate ]: Only load strategies explicitly enabled in config
+                if not strategy_obj.enabled:
+                    continue
+                    
                 if symbol and not strategy_obj.is_symbol_allowed(symbol):
                     continue
                 strategies.append(strategy_obj)

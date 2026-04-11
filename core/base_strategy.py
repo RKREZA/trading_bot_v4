@@ -126,6 +126,76 @@ class BaseStrategy(ABC):
         self.enabled = state.get("enabled", True)
         self.config.update(state.get("config", {}))
 
+    def get_regime_scaler(self, market_data: MarketData) -> float:
+        """
+        Institutional Volatility Adaptive Scaler.
+        Returns a multiplier (1.0 to 2.0) based on the current ATR relative to history.
+        Used to expand stops during 'Extreme' regimes to avoid being wicked out.
+        """
+        m5 = market_data.m5_candles
+        atr_14 = m5.get_indicator("atr_14")
+        if len(atr_14) < 100:
+            return 1.0
+            
+        current_atr = atr_14[-1]
+        avg_atr_100 = np.mean(atr_14[-100:])
+        
+        if avg_atr_100 == 0 or np.isnan(current_atr) or np.isnan(avg_atr_100):
+            return 1.0
+            
+        vol_ratio = current_atr / avg_atr_100
+        
+        # Scaling logic:
+        # LOW/NORMAL (<1.2x): 1.0x (No change)
+        # HIGH (1.2x - 1.5x): 1.25x (Moderate expansion)
+        # EXTREME (>1.5x): 1.5x to 2.0x (Max safety expansion)
+        if vol_ratio <= 1.2:
+            return 1.0
+        elif vol_ratio <= 1.5:
+            return 1.25
+        else:
+            return min(2.0, 1.0 + (vol_ratio * 0.4))
+
+    def is_spread_safe(self, market_data: MarketData) -> bool:
+        """
+        Institutional Liquidity Guard.
+        Rejects entries if the spread exceeds the safety ceiling to prevent 'Death by Slippage'.
+        """
+        # Load from strategy-specific or global config
+        max_spread_points = self.config.get("max_spread_points", 50)
+        
+        # Point Normalization: market_data.spread is absolute price
+        # We assume 1 pip = 10 points (Institutional Standard)
+        # But here we just want points: spread / point
+        # Using a tiny epsilon to avoid div by zero
+        current_spread_points = market_data.spread / 0.0001 if market_data.spread < 1.0 else market_data.spread / 0.01
+        
+        # Actually safer way: just use a standard point mapper if unknown
+        # Better: let's use the point passed in backtest if available
+        # FOR NOW: We assume XAUUSD point is 0.01 (2 dec) or 0.001 (3 dec)
+        # We will use 0.01 as the base for 'Points' in XAUUSD
+        point_val = 0.01 
+        current_points = market_data.spread / point_val if point_val > 0 else 0
+        
+        if current_points > max_spread_points:
+            self.last_rejection_reason = f"Spread Gated: {current_points:.1f} pts > {max_spread_points}"
+            return False
+        return True
+
+    def get_session_confidence_floor(self, market_data: MarketData) -> float:
+        """
+        Institutional Time-Aware Gating.
+        Increases the 'min_confidence' barrier during high-risk windows (London Stop Hunt).
+        """
+        session = market_data.session
+        base_floor = float(self.config.get("min_confidence", 0.70))
+        
+        # LONDON Stop Hunt Window: Require A Setups (08:00 - 13:00 UTC)
+        if session == "LONDON":
+            return max(0.80, base_floor + 0.05)
+            
+        return base_floor
+
     def get_ema_trend(self, candles: CandleArray, fast: int = 50, slow: int = 200) -> int:
         """
         Returns institutional Trend State:

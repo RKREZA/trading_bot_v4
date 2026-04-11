@@ -60,6 +60,12 @@ class TrendFollowingStrategy(BaseStrategy):
         session_mult = self.session_multipliers.get(market_data.session, {"adx_boost": 0, "conf_boost": 0})
         effective_adx_threshold = self.adx_threshold + session_mult["adx_boost"]
         
+        # --- HARDENING: Institutional Safety Gates (Pillar 6 & 7) ---
+        if not self.is_spread_safe(market_data):
+            return None
+            
+        conf_floor = self.get_session_confidence_floor(market_data)
+        
         # --- HARDENING FILTER 1: ADX Trend Strength ---
         adx_vals = m5.get_indicator("adx_14")
         if len(adx_vals) < 5:
@@ -134,15 +140,19 @@ class TrendFollowingStrategy(BaseStrategy):
             self.last_rejection_reason = "M5/M15 trend mismatch"
             return None
         
-        # --- RSI Overextension Filter (Tightened for TF) ---
+        # --- RSI Overextension Filter (Adaptive for Parabolic Trends) ---
         rsi_vals = m5.get_indicator("rsi_14")
         if len(rsi_vals) > 0:
             rsi = rsi_vals[-1]
-            if m5_dir == 1 and rsi > 65:
-                self.last_rejection_reason = f"RSI stretched ({rsi:.1f} > 65)"
+            # Institutional Parabolic Rule: If trend is extreme (ADX > 45), allow RSI up to 78
+            rsi_max = 65 if adx < 45 else 78
+            rsi_min = 35 if adx < 45 else 22
+            
+            if m5_dir == 1 and rsi > rsi_max:
+                self.last_rejection_reason = f"RSI Overextended ({rsi:.1f} > {rsi_max})"
                 return None
-            if m5_dir == -1 and rsi < 35:
-                self.last_rejection_reason = f"RSI stretched ({rsi:.1f} < 35)"
+            if m5_dir == -1 and rsi < rsi_min:
+                self.last_rejection_reason = f"RSI Overextended ({rsi:.1f} < {rsi_min})"
                 return None
         
         # --- Candle Strength Filter ---
@@ -173,6 +183,10 @@ class TrendFollowingStrategy(BaseStrategy):
         momentum_conf = 0.1 if adx >= self.adx_strong else 0.0
         confidence = base_conf + adx_conf + momentum_conf
         
+        if confidence < conf_floor:
+            self.last_rejection_reason = f"Session Confidence Under Floor ({confidence:.2f} < {conf_floor:.2f})"
+            return None
+            
         self._last_signal_bar = len(m5)
         
         signal = TradeSignal(direction=direction, confidence=min(0.98, confidence), price=current_price)
@@ -186,16 +200,19 @@ class TrendFollowingStrategy(BaseStrategy):
         atr_vals = market_data.m5_candles.atr(14)
         atr = atr_vals[-1] if len(atr_vals) > 0 and not np.isnan(atr_vals[-1]) else 1.0
         
+        scaler = self.get_regime_scaler(market_data)
+        
         if signal.direction == "BUY":
-            return market_data.current_price - (atr * self.sl_atr)
+            return market_data.current_price - (atr * self.sl_atr * scaler)
         else:
-            return market_data.current_price + (atr * self.sl_atr)
+            return market_data.current_price + (atr * self.sl_atr * scaler)
 
     def get_take_profit(self, signal: TradeSignal, market_data: MarketData) -> float:
         atr_vals = market_data.m5_candles.atr(14)
         atr = atr_vals[-1] if len(atr_vals) > 0 and not np.isnan(atr_vals[-1]) else 1.0
         
-        target_dist = atr * self.tp_atr
+        scaler = self.get_regime_scaler(market_data)
+        target_dist = atr * self.tp_atr * scaler
         
         if signal.direction == "BUY":
             return market_data.current_price + target_dist

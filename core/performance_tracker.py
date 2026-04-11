@@ -32,6 +32,12 @@ class PerformanceTracker:
         df['drawdown'] = (df['peak'] - df['equity']) / df['peak'] * 100
         max_drawdown = df['drawdown'].max()
         
+        # Monthly Performance Breakdown
+        # Ensure timestamp is datetime
+        df['dt'] = pd.to_datetime(df['timestamp'], unit='s')
+        df['month_year'] = df['dt'].dt.to_period('M').astype(str)
+        monthly_stats = df.groupby('month_year')['pnl'].agg(['sum', 'count']).to_dict('index')
+        
         # Equity-based (Intra-candle)
         max_equity_drawdown = max_drawdown
         if equity_curve:
@@ -65,6 +71,8 @@ class PerformanceTracker:
         rr_ratio = (avg_win / abs(avg_loss)) if avg_loss != 0 else 0
 
         return {
+            "initial_balance": round(float(initial_balance), 2),
+            "final_balance": round(float(initial_balance + net_profit), 2),
             "net_profit": round(float(net_profit), 2),
             "net_profit_pct": f"{total_pnl_percent:.2f}%",
             "win_rate": f"{win_rate:.2f}%",
@@ -76,7 +84,8 @@ class PerformanceTracker:
             "expectancy": round(float(expectancy), 2),
             "rr_ratio": round(float(rr_ratio), 2),
             "sqn": round(float(sqn), 2),
-            "total_trades": int(len(df))
+            "total_trades": int(len(df)),
+            "monthly_stats": monthly_stats
         }
 
     @staticmethod
@@ -88,23 +97,40 @@ class PerformanceTracker:
         lines = []
         lines.append("=" * 80)
         lines.append(" INSTITUTIONAL TRADING SYSTEM — BACKTEST DASHBOARD (V4-PRO) ")
+        lines.append(f" Symbol: {portfolio_results.get('symbol', 'N/A')} | Range: {portfolio_results.get('start_date', 'N/A')} to {portfolio_results.get('end_date', 'N/A')}")
         lines.append("=" * 80)
         
         # 1. Summary Block
         s = portfolio_results.get('portfolio', {})
         if not s or s.get("status") == "NO_TRADES":
-            lines.append(" [bold yellow]!!! AUDIT NOTICE: NO TRADES EXECUTED DURING THIS PERIOD !!![/]")
+            lines.append(" !!! AUDIT NOTICE: NO TRADES EXECUTED DURING THIS PERIOD !!!")
             lines.append(" Reason: Strategy criteria not met, or insufficient volatility in the requested range.")
             lines.append("-" * 80)
             return "\n".join(lines)
 
         lines.append(f" PORTFOLIO PERFORMANCE SUMMARY:")
-        lines.append(f" - Net Profit:     ${s.get('net_profit', 0):<15}   Profit Factor: {s.get('profit_factor', 0)}")
-        lines.append(f" - Win Rate:       {s.get('win_rate', '0%'):<15}   Total Trades:  {s.get('total_trades', 0)}")
-        lines.append(f" - Max Drawdown:   {s.get('max_drawdown', '0%'):<15}   Sharpe Ratio:  {s.get('sharpe_ratio', 0)}")
-        lines.append(f" - SQN (Quality):  {s.get('sqn', 0):<15}   Expectancy:    ${s.get('expectancy', 0)}")
+        lines.append(f" - Initial Balance: ${s.get('initial_balance', 0):<15}   Final Balance: ${s.get('final_balance', 0)}")
+        lines.append(f" - Net Profit:      ${s.get('net_profit', 0):<15}   Profit Factor: {s.get('profit_factor', 0)}")
+        lines.append(f" - Win Rate:        {s.get('win_rate', '0%'):<15}   Total Trades:  {s.get('total_trades', 0)}")
+        lines.append(f" - Max Drawdown:    {s.get('max_drawdown', '0%'):<15}   Sharpe Ratio:  {s.get('sharpe_ratio', 0)}")
+        lines.append(f" - SQN (Quality):   {s.get('sqn', 0):<15}   Expectancy:    ${s.get('expectancy', 0)}")
         lines.append("-" * 80)
         
+        # 1.5 Monthly Performance
+        monthly = s.get("monthly_stats", {})
+        if monthly:
+            lines.append(f" MONTHLY PERFORMANCE BREAKDOWN:")
+            lines.append(f" {'MONTH':<10} | {'PROFIT':<12} | {'TRADES':<8} | {'STATUS'}")
+            lines.append("-" * 50)
+            balance_at_month_start = s.get('initial_balance', 0)
+            for month in sorted(monthly.keys()):
+                m_data = monthly[month]
+                pnl = m_data['sum']
+                cnt = m_data['count']
+                status = "PROFIT" if pnl > 0 else "LOSS"
+                lines.append(f" {month:<10} | ${pnl:<11.2f} | {cnt:<8} | {status}")
+            lines.append("-" * 80)
+
         # 2. Strategy Leaderboard
         lines.append(f"{'STRATEGY ID':<20} | {'PROFIT':<10} | {'WIN %':<10} | {'MAX DD':<10} | {'SHARPE':<10} | {'SQN':<6}")
         lines.append("-" * 80)

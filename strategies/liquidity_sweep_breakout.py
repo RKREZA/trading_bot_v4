@@ -59,6 +59,12 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
         effective_body_thresh = self.body_thresh + session_mult["body_boost"]
         effective_h1_thresh = self.h1_strength_thresh + session_mult["h1_boost"]
 
+        # --- HARDENING: Institutional Safety Gates (Pillar 6 & 7) ---
+        if not self.is_spread_safe(market_data):
+            return None
+            
+        conf_floor = self.get_session_confidence_floor(market_data)
+
         h1_candles = market_data.htf_candles
         if len(h1_candles) < 22:
             self.last_rejection_reason = "Breakout: H1 Insufficient data"
@@ -79,7 +85,16 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
         dynamic_threshold = h1_vol_sma * completion_pct
         vol_confirmed = h1.tick_volume > dynamic_threshold
         
-        prev_range = m5[-self.lookback-1:-1]
+        # --- Adaptive Lookback Scaling (Institutional Pillar 10) ---
+        scaler = self.get_regime_scaler(market_data)
+        # In Extreme volatility, a 20-bar range is too noisy. Expand to 40.
+        dynamic_lookback = int(self.lookback * (2.0 if scaler > 1.25 else 1.0))
+        
+        if len(m5) < dynamic_lookback + 1:
+            self.last_rejection_reason = f"Breakout: Insufficient data for dynamic range ({dynamic_lookback})"
+            return None
+            
+        prev_range = m5[-dynamic_lookback-1:-1]
         r_high = np.max(prev_range.high)
         r_low = np.min(prev_range.low)
 
@@ -90,14 +105,24 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
 
         if price > r_high and m5_strength >= effective_body_thresh:
             if h1_dir == 1 and h1_strength >= effective_h1_thresh and m15_trend != -1 and vol_confirmed:
-                self._last_signal_bar = len(m5)
                 confidence = 0.80 + session_mult["conf_boost"] + min(0.15, h1_strength * 0.2)
+                
+                if confidence < conf_floor:
+                    self.last_rejection_reason = f"Session Confidence Under Floor ({confidence:.2f} < {conf_floor:.2f})"
+                    return None
+                    
+                self._last_signal_bar = len(m5)
                 return TradeSignal(direction="BUY", price=price, confidence=min(0.98, confidence))
         
         if price < r_low and m5_strength >= effective_body_thresh:
             if h1_dir == -1 and h1_strength >= effective_h1_thresh and m15_trend != 1 and vol_confirmed:
-                self._last_signal_bar = len(m5)
                 confidence = 0.80 + session_mult["conf_boost"] + min(0.15, h1_strength * 0.2)
+                
+                if confidence < conf_floor:
+                    self.last_rejection_reason = f"Session Confidence Under Floor ({confidence:.2f} < {conf_floor:.2f})"
+                    return None
+                    
+                self._last_signal_bar = len(m5)
                 return TradeSignal(direction="SELL", price=price, confidence=min(0.98, confidence))
         
         if price > r_high or price < r_low:
@@ -156,20 +181,21 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
             "Volume": "> 1.0x",
             "Range": "Breakout"
         }
-
     def get_stop_loss(self, signal: TradeSignal, market_data: MarketData) -> float:
         last = market_data.m5_candles[-1]
         atr_vals = market_data.m5_candles.atr(14)
         atr = atr_vals[-1] if len(atr_vals) > 0 and not np.isnan(atr_vals[-1]) else 1.0
+        scaler = self.get_regime_scaler(market_data)
         
         if signal.direction == "BUY":
-            return min(last.low, market_data.current_price - (atr * self.sl_atr))
-        return max(last.high, market_data.current_price + (atr * self.sl_atr))
+            return min(last.low, market_data.current_price - (atr * self.sl_atr * scaler))
+        return max(last.high, market_data.current_price + (atr * self.sl_atr * scaler))
 
     def get_take_profit(self, signal: TradeSignal, market_data: MarketData) -> float:
         atr_vals = market_data.m5_candles.atr(14)
         atr = atr_vals[-1] if len(atr_vals) > 0 and not np.isnan(atr_vals[-1]) else 1.0
-        target_dist = atr * self.tp_atr
+        scaler = self.get_regime_scaler(market_data)
+        target_dist = atr * self.tp_atr * scaler
         
         if signal.direction == "BUY":
             return market_data.current_price + target_dist

@@ -120,21 +120,21 @@ class RangeBounceStrategy(BaseStrategy):
                 self.last_rejection_reason = f"Volatility Gated: Ratio {vol_ratio:.2f} > {max_vol}"
                 return None
 
-        # 2. HARDENING: ADX Momentum Filter
-        # Reject if ADX is rising rapidly, indicating a trend is forming
+        # 2. HARDENING: ADX Momentum & Absolute Filter
+        # Reject if ADX is rising rapidly or if the trend is already too strong (Absolute Gate)
         adx_14 = m5.get_indicator("adx_14")
         if len(adx_14) > 3:
+            current_adx = adx_14[-1]
+            # Absolute Gate: Institutional mean-reversion is suicide if ADX > 35
+            if current_adx > 35:
+                self.last_rejection_reason = f"Trend Too Strong (ADX {current_adx:.1f} > 35)"
+                return None
+                
             adx_slope = adx_14[-1] - adx_14[-3]
-            # Boosted tolerance to 7.0 (Allows for faster momentum coiling)
             max_adx_slope = strat_config.get("max_adx_slope", 7.0)
             if adx_slope > max_adx_slope:
                 self.last_rejection_reason = f"ADX Slope Gated: Slope {adx_slope:.1f} > {max_adx_slope}"
                 return None
-
-        bars_since_last = len(m5) - self._last_signal_bar
-        if bars_since_last < self.min_bars_between_signals:
-            self.last_rejection_reason = "Signal cooldown active"
-            return None
 
         closes = m5.close
         price = market_data.current_price
@@ -143,7 +143,27 @@ class RangeBounceStrategy(BaseStrategy):
         if bb_upper == 0:
             self.last_rejection_reason = "RangeBounce: BB not ready"
             return None
-        
+
+        # 2.5 HARDENING: Bollinger "Walk" Detection
+        # If the last 3 closes were all within 2% of the outer band, it's a trend, not a bounce.
+        if len(closes) > 3:
+            # We check the relative position of previous closes
+            recent_closes = closes[-3:]
+            
+            # Detect Long Walk (Price hugging upper band)
+            is_hugging_upper = all(c > (bb_upper * 0.98) for c in recent_closes)
+            # Detect Short Walk (Price hugging lower band)
+            is_hugging_lower = all(c < (bb_lower * 1.02) for c in recent_closes)
+            
+            if is_hugging_upper or is_hugging_lower:
+                self.last_rejection_reason = "Bollinger Walk Detected (Momentum prevents bounce)"
+                return None
+
+        bars_since_last = len(m5) - self._last_signal_bar
+        if bars_since_last < self.min_bars_between_signals:
+            self.last_rejection_reason = "Signal cooldown active"
+            return None
+
         rsi_vals = m5.get_indicator("rsi_14")
         rsi = rsi_vals[-1] if len(rsi_vals) > 0 else 50
         prev_rsi = rsi_vals[-2] if len(rsi_vals) > 1 else rsi
@@ -216,20 +236,24 @@ class RangeBounceStrategy(BaseStrategy):
         atr_vals = m5.atr(14)
         atr = atr_vals[-1] if len(atr_vals) > 0 and not np.isnan(atr_vals[-1]) else 1.0
         
+        scaler = self.get_regime_scaler(market_data)
+        
         if signal.direction == "BUY":
-            return market_data.current_price - (atr * self.sl_atr)
+            return market_data.current_price - (atr * self.sl_atr * scaler)
         else:
-            return market_data.current_price + (atr * self.sl_atr)
+            return market_data.current_price + (atr * self.sl_atr * scaler)
 
     def get_take_profit(self, signal: TradeSignal, market_data: MarketData) -> float:
         m5 = market_data.m5_candles
         atr_vals = m5.atr(14)
         atr = atr_vals[-1] if len(atr_vals) > 0 and not np.isnan(atr_vals[-1]) else 1.0
         
+        scaler = self.get_regime_scaler(market_data)
+        
         if signal.direction == "BUY":
-            return market_data.current_price + (atr * self.tp_atr)
+            return market_data.current_price + (atr * self.tp_atr * scaler)
         else:
-            return market_data.current_price - (atr * self.tp_atr)
+            return market_data.current_price - (atr * self.tp_atr * scaler)
 
     def get_metrics(self, market_data: MarketData) -> Dict[str, Any]:
         if len(market_data.m5_candles) < self.bb_period + 2:
