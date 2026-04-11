@@ -9,20 +9,20 @@ logger = logging.getLogger("trading_bot.strategy.liquidity_sweep_breakout")
 
 class LiquiditySweepBreakoutStrategy(BaseStrategy):
     """
-    V4 Institutional Liquidity Sweep Breakout.
+    V5 Institutional Liquidity Sweep Breakout.
     Targeting High-Momentum Range Breaks with Candle Strength filters.
     """
 
     def __init__(self, strategy_id: str, config: dict):
         super().__init__(strategy_id, config)
         
-        strat_config = self.config.get(strategy_id, self.config.get("LiquiditySweepBreakout", {}))
-        self.enabled = strat_config.get("enabled", True)
+        # [ Institutional Config Resolution ]: Access the resolved strategy block
+        strat_config = self.get_strat_config()
         
         self.lookback = strat_config.get("lookback", 20)
         self.body_thresh = strat_config.get("body_thresh", 0.70)
         self.h1_strength_thresh = strat_config.get("h1_strength_thresh", 0.55)
-        self.min_confidence = strat_config.get("min_confidence", 0.75)
+        self.min_confidence = float(strat_config.get("min_confidence", self.min_confidence))
         
         self.sl_atr = strat_config.get("sl_atr", 2.0)
         self.tp_atr = strat_config.get("tp_atr", 6.0)
@@ -39,7 +39,7 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
         }
 
     def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
-        strat_config = self.config.get(self.strategy_id, self.config.get("LiquiditySweepBreakout", {}))
+        strat_config = self.get_strat_config()
         allowed_sessions = strat_config.get("allowed_sessions", [])
         if not SessionDetector.is_session_active(market_data.timestamp, allowed_sessions=allowed_sessions):
             self.last_rejection_reason = f"Out of Session ({market_data.session})"

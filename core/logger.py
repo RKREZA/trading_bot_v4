@@ -114,5 +114,5 @@ def setup_logging(log_dir: str = "logs", level: int = logging.INFO, console: boo
     
     root_logger.addHandler(file_handler)
     
-    root_logger.info("V4 Logging initialized — Global Clock Enabled.")
+    root_logger.info("V5 Logging initialized — Global Clock Enabled.")
     return root_logger

@@ -8,6 +8,7 @@ from core.portfolio_manager import PortfolioManager
 from core.base_strategy import MarketData
 from core.common.types import TradeSignal
 from core.execution.order_manager import OrderManager
+from core.ai.predictor import AIPredictor
 
 logger = logging.getLogger("trading_bot.orchestrator")
 
@@ -100,6 +101,9 @@ class StrategyOrchestrator:
             logger.info(f"Cycle Skip: {symbol} is blocked by news ({blocking_event})")
             return pulse_report
         
+        # 2.5 Fetch upcoming news for AI Vetting
+        news_events = self.news_filter.get_upcoming_events(market_data.timestamp.timestamp(), window_hours=24)
+        
         # 3. ACTIVATE RELEVANT STRATEGIES (Regime Gating)
         from core.regime_gater import RegimeGater
         active_runtimes = []
@@ -117,25 +121,54 @@ class StrategyOrchestrator:
             if RegimeGater.is_strategy_allowed(r.strategy.__class__.__name__, market_type):
                 active_runtimes.append(r)
         
-        # 4. GENERATE SIGNALS (Institutional Sandbox Execution - Audit Bug #3 Fix)
+        # 4. GENERATE SIGNALS (Institutional Parallel Execution)
         raw_signals = {}
-        for runtime in active_runtimes:
+        ai_layer = AIPredictor(self.config)
+        import concurrent.futures
+        
+        def _execute_runtime(runtime):
             sid = runtime.strategy_id
-            
-            # Execute through the Runtime Sandbox to enforce safety gates (Rule 8)
             sig = runtime.execute_cycle(market_data)
-            
-            # Telemetry: Record Full Signal (including Comparative Metrics)
-            pulse_report["strategies"][sid] = {
-                "signal": sig if sig else "NONE",
-                "metrics": runtime.strategy.get_metrics(market_data) if sig else {},
-                "thresholds": runtime.strategy.get_thresholds()
-            }
+            metrics = runtime.strategy.get_metrics(market_data) if sig else {}
+            thresholds = runtime.strategy.get_thresholds()
             
             if sig and sig.direction != "NONE":
-                # Attach SL for risk validation
-                sig.stop_loss = runtime.strategy.get_stop_loss(sig, market_data)
-                raw_signals[sid] = sig
+                sl = runtime.strategy.get_stop_loss(sig, market_data)
+                sig.stop_loss = sl
+                
+                # ML LAYER: Immutable DTO Priority 1 Evaluation (Statistical + Macro Reasoning)
+                filtered_sig = ai_layer.filter_signal(
+                    sig, 
+                    market_data, 
+                    abs(sig.fill_price - sl) if hasattr(sig, 'fill_price') else sl,
+                    news_events=news_events
+                )
+                
+                if filtered_sig.approved:
+                    return sid, filtered_sig.original, metrics, thresholds
+                else:
+                    # Return safe explicit dead object, NOT mutating original memory
+                    from core.common.types import TradeSignal
+                    veto_sig = TradeSignal(direction="NONE", confidence=filtered_sig.confidence, comment=filtered_sig.comment)
+                    return sid, veto_sig, metrics, thresholds
+                    
+            return sid, sig, metrics, thresholds
+
+        if active_runtimes:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(active_runtimes))) as executor:
+                futures = {executor.submit(_execute_runtime, r): r for r in active_runtimes}
+                for future in concurrent.futures.as_completed(futures):
+                    try:
+                        sid, sig, metrics, thresholds = future.result()
+                        pulse_report["strategies"][sid] = {
+                            "signal": sig if sig else "NONE",
+                            "metrics": metrics,
+                            "thresholds": thresholds
+                        }
+                        if sig and sig.direction != "NONE":
+                            raw_signals[sid] = sig
+                    except Exception as e:
+                        logger.error(f"Execution failed for strategy {futures[future].strategy_id}: {e}")
 
         if not raw_signals:
             return pulse_report
@@ -148,14 +181,25 @@ class StrategyOrchestrator:
         validated_signals = {}
         
         if risk_guardian:
-            # 5.1 Global circuit breaker
-            allowed, reason = risk_guardian.check_governance(current_balance, current_equity)
+            # 5.1 Global circuit breaker (Exposure Netting 2.0)
+            # Gather live positions for exposure counting in a list of dicts format
+            all_open_pos = self.position_manager.get_open_positions() if hasattr(self.position_manager, 'get_open_positions') else []
+            pos_dicts = []
+            for p in all_open_pos:
+                pos_dicts.append({
+                    "symbol": p.symbol,
+                    "volume": p.volume,
+                    "type": p.type,
+                    "profit": p.profit
+                })
+            
+            allowed, reason = risk_guardian.check_governance(
+                current_balance, 
+                current_equity, 
+                positions=pos_dicts
+            )
             if not allowed:
-                if reason == "EMERGENCY_FLATTEN_REQUIRED":
-                    logger.critical(f"CIRCUIT BREAKER: {reason}. Liquidating all positions!")
-                    self.flatten_all_positions() # Global flatten
-                else:
-                    logger.warning(f"Flow HALTED: {reason}")
+                logger.warning(f"Flow HALTED: {reason}")
                 return pulse_report
             
             # 5.2 Individual signal vetting & HARD CONSTRAINTS (Step 13)
@@ -196,7 +240,7 @@ class StrategyOrchestrator:
             return pulse_report
 
         # 6. PORTFOLIO MANAGER AUDITS SIGNALS
-        # In V4-ULTRA Parallel mode, we approve all non-conflicting edges.
+        # In V5-INSIGNIA Parallel mode, we approve all non-conflicting edges.
         approved_signals = self.portfolio_manager.resolve_signals(validated_signals)
         if not approved_signals:
             return pulse_report
@@ -215,9 +259,16 @@ class StrategyOrchestrator:
             sl_dist = abs(market_data.current_price - sig.stop_loss)
             base_volume = runtime.risk_guardian.calculate_lot_size(strat_balance, sl_dist, symbol_info)
             
-            # Apply News Resilience Multiplier (Institutional Hardening Pillar 2)
+            # Apply News & Drift Resilience Multipliers (Institutional Hardening Pillar 2)
             news_mult = self.news_filter.get_resilience_multiplier()
-            sig.volume = base_volume * news_mult
+            
+            # PHASE 6: Drift-Aware Adaptive Scaling
+            drift_mult = 1.0
+            if hasattr(ai_layer.drift_layer, 'is_drifted') and ai_layer.drift_layer.is_drifted:
+                drift_mult = self.config.get("ai_layer", {}).get("drift_multiplier", 0.5)
+                logger.warning(f"ADAPTIVE SCALING: Market structural drift detected. Reducing exposure by {drift_mult}x")
+            
+            sig.volume = base_volume * news_mult * drift_mult
             
             if sig.volume > 0:
                 # 8. UNIFIED EXECUTION BRIDGE (Audit Bug #7 Fix)
@@ -236,7 +287,7 @@ class StrategyOrchestrator:
                     price_data=price_data,
                     is_news_blocked=False, # Already checked at start of cycle
                     magic=magic,
-                    comment=f"V4 {sid.upper()} PARALLEL"
+                    comment=f"V5 {sid.upper()} PARALLEL"
                 )
                 
                 # 9. PERFORMANCE TRACKER LOGS RESULT

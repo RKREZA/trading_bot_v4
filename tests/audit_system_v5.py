@@ -75,7 +75,7 @@ def main():
     # Generate Audit Report
     report_path = Path("backtest_results/FULL_AUDIT_REPORT.md")
     with open(report_path, "w") as f:
-        f.write("# V4-ULTRA INSTITUTIONAL CERTIFICATION REPORT\n")
+        f.write("# V5-INSIGNIA INSTITUTIONAL CERTIFICATION REPORT\n")
         f.write(f"Generated at: {datetime.now()}\n")
         f.write(f"Audit Range: {START_DATE} to {END_DATE}\n\n")
         

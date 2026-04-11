@@ -1,4 +1,4 @@
-# V4-ULTRA Institutional Trading System
+# V5-INSIGNIA Institutional Trading System
 
 **High-Fidelity Multi-Strategy Portfolio Engine** — Featuring high-fidelity event-driven simulation, institutional risk governance, and multi-timeframe regime detection.
 
@@ -54,7 +54,7 @@ trading_bot_v3/
 │   ├── execution/           # Order Management & Simulation (OrderManager)
 │   ├── common/              # Shared Types (TradeSignal, CandleArray)
 │   └── strategy_orchestrator.py # Multi-Strategy Coordinator
-├── strategies/              # Strategy Implementations (V4-ULTRA)
+├── strategies/              # Strategy Implementations (V5-INSIGNIA)
 ├── backtesting/             # High-Fidelity Simulator & Validators
 ├── tests/                   # Professional Verification Suite
 └── logs/                    # Institutional Audit Trail

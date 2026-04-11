@@ -1,5 +1,5 @@
 """
-TRADING BOT V4 — Dynamic Strategy Discovery
+TRADING BOT V5 — Dynamic Strategy Discovery
 ===========================================
 Automatically discovers and registers all BASE_STRATEGY subclasses in the strategies/ directory.
 """

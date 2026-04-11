@@ -9,15 +9,15 @@ logger = logging.getLogger("trading_bot.strategy.smart_mean_reversion")
 
 class SmartMeanReversionStrategy(BaseStrategy):
     """
-    V4 Institutional Smart Mean Reversion (Numpy-Hardened).
+    V5 Institutional Smart Mean Reversion (Numpy-Hardened).
     Fades algorithmic chop using manual mathematical arrays for BB and RSI.
     """
 
     def __init__(self, strategy_id: str, config: dict):
         super().__init__(strategy_id, config)
         
-        strat_config = self.config.get(strategy_id, self.config.get("SmartMeanReversion", {}))
-        self.enabled = strat_config.get("enabled", True)
+        # [ Institutional Config Resolution ]: Access the resolved strategy block
+        strat_config = self.get_strat_config()
         
         self.bb_period = strat_config.get("bb_period", 20)
         self.bb_std = strat_config.get("bb_std", 2.0)
@@ -27,7 +27,7 @@ class SmartMeanReversionStrategy(BaseStrategy):
         
         self.sl_atr = strat_config.get("sl_atr", 1.5)
         self.tp_atr = strat_config.get("tp_atr", 4.5)
-        self.min_confidence = strat_config.get("min_confidence", 0.70)
+        self.min_confidence = float(strat_config.get("min_confidence", self.min_confidence))
         
         self.min_bars_between_signals = strat_config.get("min_bars_between_signals", 15)
         self._last_signal_bar = 0
@@ -50,7 +50,7 @@ class SmartMeanReversionStrategy(BaseStrategy):
         return 100.0 - (100.0 / (1.0 + rs))
 
     def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
-        strat_config = self.config.get(self.strategy_id, self.config.get("SmartMeanReversion", {}))
+        strat_config = self.get_strat_config()
         allowed_sessions = strat_config.get("allowed_sessions", [])
         if not SessionDetector.is_session_active(market_data.timestamp, allowed_sessions=allowed_sessions):
             self.last_rejection_reason = f"Out of Session ({market_data.session})"

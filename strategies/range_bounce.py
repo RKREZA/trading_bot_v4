@@ -10,7 +10,7 @@ logger = logging.getLogger("trading_bot.strategy.range_bounce")
 
 class RangeBounceStrategy(BaseStrategy):
     """
-    V4 OPTIMIZED Range Bounce Strategy for Mean Reversion.
+    V5 OPTIMIZED Range Bounce Strategy for Mean Reversion.
     Uses RSI extremes + MACD confirmation for bounces.
     Includes trend filter to avoid counter-trend trades.
     """
@@ -18,8 +18,8 @@ class RangeBounceStrategy(BaseStrategy):
     def __init__(self, strategy_id: str, config: dict):
         super().__init__(strategy_id, config)
         
-        strat_config = self.config.get(strategy_id, self.config.get("RangeBounce", {}))
-        self.enabled = strat_config.get("enabled", True)
+        # [ Institutional Config Resolution ]: Access the resolved strategy block
+        strat_config = self.get_strat_config()
         
         self.bb_period = strat_config.get("bb_period", 20)
         self.bb_std = strat_config.get("bb_std", 2.0)
@@ -31,7 +31,7 @@ class RangeBounceStrategy(BaseStrategy):
         
         self.sl_atr = strat_config.get("sl_atr", 2.0)
         self.tp_atr = strat_config.get("tp_atr", 4.0)
-        self.min_confidence = strat_config.get("min_confidence", 0.55)
+        self.min_confidence = float(strat_config.get("min_confidence", self.min_confidence))
         self.min_bars_between_signals = strat_config.get("min_bars_between_signals", 10)
         self._last_signal_bar = 0
         
@@ -97,7 +97,7 @@ class RangeBounceStrategy(BaseStrategy):
         return 0
 
     def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
-        strat_config = self.config.get(self.strategy_id, self.config.get("RangeBounce", {}))
+        strat_config = self.get_strat_config()
         allowed_sessions = strat_config.get("allowed_sessions", [])
         if not SessionDetector.is_session_active(market_data.timestamp, allowed_sessions=allowed_sessions):
             self.last_rejection_reason = f"Out of Session ({market_data.session})"

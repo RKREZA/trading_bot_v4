@@ -10,7 +10,7 @@ logger = logging.getLogger("trading_bot.news")
 
 class InstitutionalNewsFilter:
     """
-    V4-ULTRA Institutional News Protection System.
+    V5-INSIGNIA Institutional News Protection System.
     Dynamically fetches high-impact economic events and enforces trading blocks.
     """
     

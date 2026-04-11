@@ -41,7 +41,15 @@ class PerformanceTracker:
         # Equity-based (Intra-candle)
         max_equity_drawdown = max_drawdown
         if equity_curve:
-            eq_series = pd.Series(equity_curve)
+            if isinstance(equity_curve[0], dict) and "time" in equity_curve[0]:
+                eq_df = pd.DataFrame(equity_curve)
+                if 'strategy_id' in eq_df.columns:
+                    eq_series = eq_df.groupby('time')['equity'].sum().reset_index(drop=True)
+                else:
+                    eq_series = eq_df['equity']
+            else:
+                eq_series = pd.Series(equity_curve)
+                
             peak = eq_series.cummax()
             eq_dd = (peak - eq_series) / peak * 100
             max_equity_drawdown = eq_dd.max()
@@ -91,12 +99,12 @@ class PerformanceTracker:
     @staticmethod
     def generate_professional_dashboard(portfolio_results: Dict) -> str:
         """
-        Creates a Professional High-RRR Institutional Dashboard.
+        Creates a Professional High-RRR Institutional Dashboard (V5-INSIGNIA).
         Uses clear visual indicators and formatted tables.
         """
         lines = []
         lines.append("=" * 80)
-        lines.append(" INSTITUTIONAL TRADING SYSTEM — BACKTEST DASHBOARD (V4-PRO) ")
+        lines.append(" INSTITUTIONAL TRADING SYSTEM — BACKTEST DASHBOARD (V5-INSIGNIA) ")
         lines.append(f" Symbol: {portfolio_results.get('symbol', 'N/A')} | Range: {portfolio_results.get('start_date', 'N/A')} to {portfolio_results.get('end_date', 'N/A')}")
         lines.append("=" * 80)
         

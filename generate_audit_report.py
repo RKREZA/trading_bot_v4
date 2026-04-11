@@ -1,5 +1,5 @@
 """
-Institutional Audit Report Generator (Dynamic V4)
+Institutional Audit Report Generator (Dynamic V5)
 Automatically analyzes the latest backtest results and certifies institutional readiness.
 """
 import pandas as pd

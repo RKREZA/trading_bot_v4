@@ -3,7 +3,7 @@ version: '3.8'
 services:
   trading-bot:
     build: .
-    container_name: trading_bot_v4
+    container_name: trading_bot_v5
     restart: unless-stopped
     environment:
       - PYTHONUNBUFFERED=1

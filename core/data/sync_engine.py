@@ -12,9 +12,9 @@ logger = logging.getLogger("trading_bot.data_sync")
 
 class SyncEngine:
     """
-    V4-ULTRA Flawless MT5 Data Synchronization Engine.
+    V5-INSIGNIA Flawless MT5 Data Synchronization Engine.
     Handles Gap Detection, Automated Re-fetch, and Partitioned Persistence.
-    Strictly follows 'Step 2' of the V4-ULTRA Institutional development order.
+    Strictly follows 'Step 2' of the V5-INSIGNIA Institutional development order.
     """
     
     def __init__(self, source_handler: SourceHandler, parquet_store: ParquetStore):
@@ -130,7 +130,7 @@ class SyncEngine:
 
     def _validate_full_dataset(self, array: CandleArray, timeframe: str):
         """
-        STRICT Data Validation (V4-ULTRA Rules).
+        STRICT Data Validation (V5-INSIGNIA Rules).
         - No missing candles (within logic tolerance)
         - No duplicates
         - Strict Chronological Order

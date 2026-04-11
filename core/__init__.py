@@ -1,4 +1,4 @@
-"""Trading Bot V4 - Institutional Core Package"""
+"""Trading Bot V5 - Institutional Core Package"""
 
 # Common Infrastructure
 from .common.types import CandleArray, TradeSignal, BotConfig, MarketRegime

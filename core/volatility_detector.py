@@ -32,7 +32,7 @@ class VolatilityAnalysis:
 
 class VolatilityDetector:
     """
-    V4-ULTRA Advanced Volatility Detection System.
+    V5-INSIGNIA Advanced Volatility Detection System.
     
     Features:
     - Multi-timeframe volatility analysis (M5, M15, H1, D1)

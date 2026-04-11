@@ -5,14 +5,21 @@ import time
 import numpy as np
 from collections import deque
 from datetime import datetime, date
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 
 class RiskGuardian:
     """
-    Institutional Risk Governance Guardian.
-    Enforces strict ATR-based sizing, dynamic scaling, and multi-layer circuit breakers.
-    Independently runnable and testable.
+    V6-LOCKED: Institutional Risk Governance Guardian.
+    Enforces strict Exposure Netting 2.0, Vol-Adjusted Sizing, and Mismatch Circuit Breakers.
     """
+    
+    # Rule 1.2: Volatility-Adjusted Multipliers
+    VOL_MULTIPLIERS = {
+        "MAJOR_FX": 1.0,  # EURUSD, GBPUSD
+        "JPY_EXT": 0.8,   # USDJPY, GBPJPY
+        "XAUUSDm": 0.5,   # Gold
+        "INDICES": 0.5,   # High Beta
+    }
 
     def __init__(self, config: Dict[str, Any], broker_clock=None):
         self.config = config
@@ -30,6 +37,10 @@ class RiskGuardian:
         self.max_daily_loss_pct = float(risk_governance.get("max_daily_loss_pct", 5.0))
         self.max_drawdown_halt_pct = float(risk_governance.get("max_drawdown_halt_pct", 20.0))
         
+        # Exposure Limits
+        self.max_net_exposure_long = int(risk_governance.get("max_net_exposure_long", 3))
+        self.max_net_exposure_short = int(risk_governance.get("max_net_exposure_short", 3))
+        
         if "risk_per_trade_pct" not in risk_governance:
             logger.warning(f"Risk parameter 'risk_per_trade_pct' missing. Defaulting to safe {self.risk_per_trade_pct}%.")
         
@@ -41,6 +52,7 @@ class RiskGuardian:
         self.error_count = 0
         self.max_equity = self.initial_balance
         self.kill_switch_active = False
+        self.current_portfolio_equity = 0.0
         self.silent = False
         
         # Strategy-Level Circuit Breakers (Step 24)
@@ -100,17 +112,31 @@ class RiskGuardian:
                            current_price: float = 1.0) -> float:
         """
         Institutional Position Sizing: risk_amount / stop_loss_dist
-        HARD CONSTRAINTS:
-        - No Martingale (No size increase after loss)
-        - No Growth Boosting (Silent Martingale removed)
+        A+ HARDENING: Dynamic De-scaling based on Drawdown.
         """
         if stop_loss_dist <= 0 or self.kill_switch_active:
             return 0.0
 
-        # Anti-Martingale / Anti-Doubling (Hard Guard)
+        # 1. Base Risk Calculation
         risk_pct = self.risk_per_trade_pct
+        
+        # A+ VAULT: Equity Drawdown De-scaling
+        # If drawdown > 5%, we scale risk down linearly toward 0 at the 8% halt limit.
+                # Use the latest tracked portfolio equity for descaling math
+        eval_equity = self.current_portfolio_equity if self.current_portfolio_equity > 0 else balance
+        if self.max_equity > eval_equity:
+            drawdown = ((self.max_equity - eval_equity) / self.max_equity) * 100
+            if drawdown > 4.0:
+                # Penalty slope: reduce risk toward 0 at the limit (e.g. 8%)
+                limit = float(self.config.get("risk_governance", {}).get("max_drawdown_halt_pct", 8.0))
+                room = limit - 4.0
+                penalty = max(0, 1.0 - (drawdown - 4.0) / room) if room > 0 else 0
+                risk_pct = risk_pct * penalty
+                self.logger.info(f"[RISK] A+ Vault Scaling: {drawdown:.2f}% DD. Risk throttled: {risk_pct:.3f}% (Penalty: {penalty:.2f})")
+
+        # 2. Anti-Martingale / Anti-Doubling (Hard Guard)
         if self.consecutive_losses > 0:
-            risk_pct = min(self.risk_per_trade_pct, risk_pct * 0.5 if self.consecutive_losses >= 3 else risk_pct)
+            risk_pct = min(risk_pct, risk_pct * 0.5 if self.consecutive_losses >= 3 else risk_pct)
 
         risk_amount = balance * (risk_pct / 100.0)
         
@@ -120,56 +146,101 @@ class RiskGuardian:
         points_dist = stop_loss_dist / point if point > 0 else 0.0
         
         denominator = points_dist * tick_value
-        if denominator > 0:
-            raw_lot = risk_amount / denominator
-        else:
-            raw_lot = 0.0
+        raw_lot = (risk_amount / denominator) if denominator > 0 else 0.0
         
         return self._normalize_lots(raw_lot, symbol_info, current_price)
 
-    def check_governance(self, current_balance: float, current_equity: float, slippage: float = 0.0, is_error: bool = False, open_positions: int = 0) -> Tuple[bool, str]:
-        """Global safety check (Kill Switch, Equity Protection, and Parallel Thresholds)"""
-        # Institutional Parallel Threshold (Step 13)
-        # Defaulting to 4 to allow Trend, Breakout, MeanReversion, and Liquidity to trade together.
-        max_parallel_positions = self.config.get("risk_governance", {}).get("max_parallel_strategies", 4)
-        if open_positions >= max_parallel_positions:
-            return False, f"MAX_PARALLEL_STRATEGIES_REACHED ({max_parallel_positions})"
-
+    def check_governance(self, 
+                         current_balance: float, 
+                         current_equity: float, 
+                         positions: List[Dict[str, Any]] = None) -> Tuple[bool, str]:
+        """
+        Global safety check (Exposure Netting 2.0, Kill Switch, Equity Protection).
+        Rule 1.1: 2.0 lots per $10k equity (Vol-Adjusted)
+        Rule 1.3: Total Gross Exposure <= 8.0 lots per $10k
+        """
         if self.kill_switch_active:
             return False, "KILL_SWITCH_ACTIVE"
 
-        if is_error:
-            self.error_count += 1
-
-        # 1. Kill Switch logic (Step 5.5)
-        daily_dd = (self.daily_loss / current_balance) * 100 if current_balance > 0 else 0
-        limit = float(self.config.get("risk_governance", {}).get("max_daily_loss_pct", 5.0))
-        if daily_dd >= limit or self.error_count > 10 or slippage > 50:
-            self.kill_switch_active = True
-            return False, "KILL_SWITCH_TRIGGERED"
-
-        # 2. Equity Protection (Step 5.4)
-        # Only block if equity is materially below the MA50 (>3% drawdown from MA)
-        # This prevents minor dips from permanently blocking trading
-        # FIX: self.equity_history.append(current_equity) removed to prevent high-frequency corruption.
-        
-        if len(self.equity_history) > 50:
-            ma_equity = np.mean(list(self.equity_history)[-50:])
-            equity_gap_pct = ((ma_equity - current_equity) / ma_equity) * 100 if ma_equity > 0 else 0
-            if current_equity < ma_equity and equity_gap_pct > 3.0:
-                return False, f"EQUITY_BELOW_MA50_PROTECTION (Gap: {equity_gap_pct:.1f}%)"
-        
-        # 3. Total Drawdown Check
-        if current_equity > self.max_equity: self.max_equity = current_equity
+        # 1. Total Drawdown Check (A+ Stricter Halts)
+        if current_equity > self.max_equity: 
+            self.max_equity = current_equity
+        self.current_portfolio_equity = current_equity
+            
         total_dd = ((self.max_equity - current_equity) / self.max_equity) * 100 if self.max_equity > 0 else 0
         if total_dd >= self.max_drawdown_halt_pct:
-            if not self.kill_switch_active:
-                self.kill_switch_active = True
-                self.logger.critical(f"MAX DRAWDOWN {total_dd:.1f}% REACHED! INITIATING EMERGENCY FLATTEN.")
-                return False, "EMERGENCY_FLATTEN_REQUIRED"
+            self.kill_switch_active = True
+            self.logger.critical(f"MAX DRAWDOWN {total_dd:.1f}% REACHED! EMERGENCY HALT.")
             return False, f"MAX_DRAWDOWN_REACHED ({total_dd:.1f}%)"
 
+        # 2. Exposure Netting 2.0 Enforcement
+        if positions:
+            equity_10k_units = current_equity / 10000.0
+            total_gross = 0.0
+            ccy_exposure = {} # {CCY: lots}
+            
+            for p in positions:
+                symbol = p.get('symbol', 'UNKNOWN')
+                lots = p.get('volume', 0.0)
+                total_gross += lots
+                
+                # Derive base currency/asset for basket netting
+                basket = "MAJOR_FX"
+                if "XAU" in symbol: basket = "XAUUSDm"
+                elif "JPY" in symbol: basket = "JPY_EXT"
+                elif any(x in symbol for x in ["DE30", "US30", "NAS100"]): basket = "INDICES"
+                
+                ccy_exposure[basket] = ccy_exposure.get(basket, 0.0) + lots
+                
+                # Limit Check per Basket
+                limit = 2.0 * equity_10k_units * self.VOL_MULTIPLIERS.get(basket, 1.0)
+                if ccy_exposure[basket] > limit:
+                    self.logger.warning(f"[RISK] Basket {basket} breach: {ccy_exposure[basket]:.2f} > {limit:.2f}")
+                    return False, f"EXPOSURE_NETTING_BREACH ({basket})"
+
+            # Rule 1.3: Global Cap (8.0 lots / $10k)
+            global_cap = 8.0 * equity_10k_units
+            if total_gross > global_cap:
+                self.logger.warning(f"[RISK] Global Exposure breach: {total_gross:.2f} > {global_cap:.2f}")
+                return False, f"GLOBAL_EXPOSURE_CAP_REACHED"
+
         return True, "OK"
+
+    def detect_mismatch(self, 
+                        internal_positions: List[Dict[str, Any]], 
+                        mt5_positions: List[Any]) -> Tuple[bool, str, bool]:
+        """
+        Rule 2: Notional & Directional Conflict Trigger.
+        Returns (mismatch_detected, reason, immediate_flatten_required)
+        """
+        # Directional Conflict Check (MANDATORY: IMMEDIATE FLATTEN)
+        # We check symbol by symbol
+        int_map = {p['symbol']: p for p in internal_positions}
+        mt5_map = {p.symbol: p for p in mt5_positions}
+        
+        for symbol in set(list(int_map.keys()) + list(mt5_map.keys())):
+            ip = int_map.get(symbol)
+            mp = mt5_map.get(symbol)
+            
+            if ip and mp:
+                # Rule 2.2: Directional Conflict
+                id_dir = "BUY" if "BUY" in ip.get('type_text', '').upper() else "SELL"
+                md_dir = "BUY" if mp.type == 0 else "SELL" # 0=BUY, 1=SELL
+                if id_dir != md_dir:
+                    return True, f"DIRECTIONAL_CONFLICT on {symbol}", True
+                
+                # Rule 2.1: Notional Mismatch (> 0.5 lots)
+                if abs(ip.get('volume', 0) - mp.volume) > 0.5:
+                    return True, f"NOTIONAL_MISMATCH on {symbol} Delta > 0.5", True
+            
+            # Orphaned Position (External manual interference or desync)
+            elif not ip and mp:
+                if mp.volume > 0.1: # Tolerance for micro-residual
+                    return True, f"GHOST_POSITION on {symbol}", False # Soft sync first
+            elif ip and not mp:
+                return True, f"MISSING_POSITION on {symbol}", False # Soft sync first
+                
+        return False, "", False
 
     def check_strategy_governance(self, strategy_id: str) -> Tuple[bool, str]:
         """

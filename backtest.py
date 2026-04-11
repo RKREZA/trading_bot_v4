@@ -1,5 +1,5 @@
 """
-BACKTEST ENGINE V4 - Institutional Multi-Strategy Interface
+BACKTEST ENGINE V5 - Institutional Multi-Strategy Interface
 High-fidelity historical simulation with Portfolio Governance.
 """
 
@@ -12,6 +12,8 @@ import numpy as np
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any
 
+from backtesting.backtester import DatasetFingerprinter, ENGINE_VERSION
+
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
@@ -21,23 +23,21 @@ from dotenv import load_dotenv
 from core import SourceHandler, MT5Connection, PerformanceTracker, setup_logging
 from core.data.manager import DataManager
 from backtesting import PortfolioBacktester, MonteCarloSimulator, StressTester, WalkForwardValidator
+from backtesting.backtester import DatasetFingerprinter, ENGINE_VERSION
 from strategies import create_strategy, STRATEGY_REGISTRY
+from core.config.loader import ConfigLoader
+from core.portfolio.audit_engine import AuditEngine
+from core.common.types import CanonicalHasher
 
 load_dotenv()
 
 class BacktestCLI:
     def __init__(self):
         self.console = Console()
-        self.config = self._load_config("config.json")
+        self.config_loader = ConfigLoader()
+        self.config = self.config_loader.global_config
         self.data_manager = DataManager(self.config)
         self.connection = MT5Connection()
-        
-    def _load_config(self, path: str) -> dict:
-        if not os.path.exists(path):
-            rprint(f"[bold red]Error:[/] {path} not found. Using defaults.")
-            return {"initial_balance": 1000.0}
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
 
     def run(
         self,
@@ -54,7 +54,12 @@ class BacktestCLI:
         debug_signals: bool = False,
         no_adaptive: bool = False
     ):
-        setup_logging()
+        setup_logging(console=True)
+        
+        # [ Institutional A+ Refactor ]: Load Symbol-Specific Config
+        self.config = self.config_loader.get_symbol_config(symbol)
+        self.data_manager = DataManager(self.config) # Re-init with symbol specifics
+        
         if not self.connection.connect():
             rprint("[bold red]Critical Error:[/] Could not connect to MT5.")
             return
@@ -67,7 +72,7 @@ class BacktestCLI:
             return
 
         # 1. Flawless Data Prep (Step 2.5)
-        rprint(Panel(f"[bold cyan]V4-ULTRA Production Benchmark[/]\nSymbol: {symbol} | Range: {start} to {end}", border_style="bright_blue"))
+        rprint(Panel(f"[bold cyan]V5-INSIGNIA Production Benchmark[/]\nSymbol: {symbol} | Range: {start} to {end}", border_style="bright_blue"))
         
         with self.console.status("[bold green]Orchestrating Flawless MT5 Sync...") as status:
             m1 = self.data_manager.prepare_data(symbol, "M1", dt_from)
@@ -201,7 +206,7 @@ class BacktestCLI:
         tf_map = {"M1": m1, "M5": m5, "M15": m15, "H1": h1}
         primary_data = tf_map.get(primary_tf, m5)
         
-        rprint(f"[green]Executing V4-ULTRA Event-Driven Simulation on {primary_tf} (Resume={resume})...[/]")
+        rprint(f"[green]Executing V5-INSIGNIA Event-Driven Simulation on {primary_tf} (Resume={resume})...[/]")
         
         runtime_config = dict(self.config)
         runtime_backtest = dict(runtime_config.get("backtest", {}))
@@ -218,7 +223,18 @@ class BacktestCLI:
             rprint("[bold yellow]DIAGNOSTIC MODE ENABLED: Signal rejection reasons will be logged.[/]")
 
         backtester = PortfolioBacktester(runtime_config)
-        history, equity_history = backtester.run(symbol, strategies, primary_data, h1, m15, m5, m1, resume=resume)
+        
+        # [ Rule 3.1: Institutional Dataset Fingerprinting ]
+        dataset_hashes = {}
+        for tf in ["M1", "M5", "M15", "H1"]:
+            p = self.data_manager.store.get_path(symbol, tf)
+            if os.path.exists(p):
+                dataset_hashes[tf] = DatasetFingerprinter.get_hash(p)
+        
+        # Full Simulation Run with V5 Lockdown Guards
+        backtester.run(symbol, strategies, primary_data, h1, m15, m5, m1, data_hashes=dataset_hashes, resume=resume)
+        history = backtester.history
+        equity_history = backtester.equity_history
         
         # 5. Performance Attribution
         partition_initial = float(self.config.get("backtest", {}).get("initial_balance_per_strategy", 1000.0))
@@ -244,15 +260,28 @@ class BacktestCLI:
             "sessions": session_stats
         }
 
-        # 6. Audit Pack Generation (Step 14)
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        session_dir = f"backtest_results/session_{timestamp}"
-        PerformanceTracker.save_audit_pack(history, full_results, session_dir)
+        # 6. Audit Pack Generation (Rule 6.2: Institutional Graduation Capsule)
+        audit_dir = getattr(backtester, "audit_trail_dir", "audit_trail")
+        
+        # Extract Outcomes for Trace Lock
+        outcomes = [t["outcome"] for t in history if "outcome" in t]
+        trace_lock = AuditEngine.generate_trace_lock(outcomes)
+        fingerprint = AuditEngine.generate_fingerprint(runtime_config, {"symbol": symbol, "data_hashes": dataset_hashes})
+        
+        # Final Graduation Bundle (Capsule)
+        AuditEngine.generate_bundle(
+            output_dir=audit_dir,
+            fingerprint=fingerprint,
+            trace_lock=trace_lock,
+            data_hashes=dataset_hashes,
+            config=runtime_config,
+            audit_results=full_results
+        )
         
         # 7. Dashboard Display
         dashboard = PerformanceTracker.generate_professional_dashboard(full_results)
         rprint(f"\n[bold white]{dashboard}[/]")
-        rprint(f"\n[bold green]Institutional Audit Pack Persistence: {session_dir}[/]")
+        rprint(f"\n[bold green]Institutional Audit Pack Persistence: {audit_dir}[/]")
 
         # 8. Robustness: Monte Carlo (Step 15/16)
         if run_monte_carlo and history:
@@ -288,9 +317,9 @@ class BacktestCLI:
             
             potential_ids = [
                 pascal_name,
-                f"{pascal_name}_v4",
+                f"{pascal_name}_v5",
                 st_type.lower(),
-                f"{st_type.lower()}_v4"
+                f"{st_type.lower()}_v5"
             ]
             
             # 3. Match Identification

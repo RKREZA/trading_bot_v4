@@ -10,7 +10,7 @@ logger = logging.getLogger("trading_bot.strategy.liquidity")
 
 class LiquiditySessionStrategy(BaseStrategy):
     """
-    V4 OPTIMIZED Liquidity Session Strategy.
+    V5 OPTIMIZED Liquidity Session Strategy.
     Trades breaks of the Asian/Tokyo range during London and NY sessions.
     Uses SessionDetector for proper session handling.
     """

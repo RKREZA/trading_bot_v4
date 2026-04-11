@@ -9,15 +9,15 @@ logger = logging.getLogger("trading_bot.strategy.trend")
 
 class TrendFollowingStrategy(BaseStrategy):
     """
-    V4 Institutional Trend Following - Clean Momentum Strategy.
+    V5 Institutional Trend Following - Clean Momentum Strategy.
     Uses ADX for trend strength confirmation + multi-TF alignment.
     """
 
     def __init__(self, strategy_id: str, config: dict):
         super().__init__(strategy_id, config)
         
-        strat_config = self.config.get(strategy_id, self.config.get("TrendFollowing", {}))
-        self.enabled = strat_config.get("enabled", True)
+        # [ Institutional Config Resolution ]: Access the resolved strategy block
+        strat_config = self.get_strat_config()
         
         self.adx_period = 14
         self.adx_threshold = strat_config.get("adx_threshold", 30)
@@ -30,7 +30,7 @@ class TrendFollowingStrategy(BaseStrategy):
         
         self.sl_atr = strat_config.get("sl_atr", 2.0)
         self.tp_atr = strat_config.get("tp_atr", 4.0)
-        self.min_confidence = strat_config.get("min_confidence", 0.70)
+        self.min_confidence = float(strat_config.get("min_confidence", self.min_confidence))
         
         self.session_multipliers = {
             "TOKYO": {"adx_boost": 0, "conf_boost": 0.05},
@@ -41,18 +41,18 @@ class TrendFollowingStrategy(BaseStrategy):
         }
 
     def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
-        strat_config = self.config.get(self.strategy_id, self.config.get("TrendFollowing", {}))
+        strat_config = self.get_strat_config()
         allowed_sessions = strat_config.get("allowed_sessions", [])
         
         if not SessionDetector.is_session_active(market_data.timestamp, allowed_sessions=allowed_sessions):
             self.last_rejection_reason = f"Out of Session ({market_data.session})"
             return None
 
-        m5 = market_data.m5_candles
-        if m5 is None or len(m5) < 50:
+        m15 = market_data.m15_candles
+        if m15 is None or len(m15) < 50:
             return None
         
-        bars_since_last = len(m5) - self._last_signal_bar
+        bars_since_last = len(m15) - self._last_signal_bar
         if bars_since_last < self.min_bars_between_signals:
             self.last_rejection_reason = "Signal cooldown active"
             return None
@@ -66,8 +66,8 @@ class TrendFollowingStrategy(BaseStrategy):
             
         conf_floor = self.get_session_confidence_floor(market_data)
         
-        # --- HARDENING FILTER 1: ADX Trend Strength ---
-        adx_vals = m5.get_indicator("adx_14")
+        # --- HARDENING FILTER 1: ADX Trend Strength (M15) ---
+        adx_vals = m15.get_indicator("adx_14")
         if len(adx_vals) < 5:
             return None
             
@@ -79,7 +79,6 @@ class TrendFollowingStrategy(BaseStrategy):
             return None
         
         # --- HARDENING FILTER 2: ADX Trend Maturity ---
-        # Require ADX to have been above threshold for at least 3 bars (avoids flash trends)
         min_maturity = strat_config.get("min_trend_maturity", 2)
         mature_bars = 0
         for k in range(1, min(len(adx_vals), 10)):
@@ -91,72 +90,60 @@ class TrendFollowingStrategy(BaseStrategy):
             self.last_rejection_reason = f"Trend not mature ({mature_bars} < {min_maturity} bars)"
             return None
 
-        # ADX should not be collapsing sharply (allow flat/rising)
         adx_5_ago = adx_vals[-6] if len(adx_vals) >= 6 else adx_prev
         if adx < adx_5_ago - 5.0:
             self.last_rejection_reason = f"ADX collapsing ({adx:.1f} < {adx_5_ago:.1f} - 5)"
             return None
         
-        # --- HARDENING FILTER 3: Relative Volatility Gate ---
-        atr_vals = m5.get_indicator("atr_14")
+        # --- HARDENING FILTER 3: Relative Volatility Gate (M15) ---
+        atr_vals = m15.get_indicator("atr_14")
         if len(atr_vals) >= 14:
             avg_atr = np.mean(atr_vals[-50:]) if len(atr_vals) >= 50 else np.mean(atr_vals[-14:])
             current_atr = atr_vals[-1]
             
-            # Institutional Volatility Floor: Skip trades in "dead" markets (Step 22)
             if current_atr < avg_atr * 0.8:
                 self.last_rejection_reason = f"Volatility too low (ATR {current_atr:.4f} < {avg_atr*0.8:.4f})"
                 return None
                 
             max_vol_ratio = strat_config.get("max_vol_ratio", 2.5)
             if current_atr > avg_atr * max_vol_ratio:
-                self.last_rejection_reason = f"Volatility too high (ATR ratio {current_atr/avg_atr:.1f}x > {max_vol_ratio}x)"
+                self.last_rejection_reason = f"Volatility too high ({current_atr/avg_atr:.1f}x > {max_vol_ratio}x)"
                 return None
         
-        # --- Multi-TF Trend Alignment ---
-        m15_trend = self.get_ema_trend(market_data.m15_candles)
-        if m15_trend == 0:
-            self.last_rejection_reason = "M15 no trend"
-            return None
-        
+        # --- HTF Trend Alignment (H1 + D1 if possible) ---
         h1_trend = self.get_ema_trend(market_data.htf_candles)
         if h1_trend == 0:
             self.last_rejection_reason = "H1 no trend"
             return None
         
-        if m15_trend != h1_trend:
+        # --- EMA Direction Alignment (M15) ---
+        m15_fast = m15.ema(8)
+        m15_slow = m15.ema(21)
+        if len(m15_fast) < 6 or len(m15_slow) < 6:
+            return None
+        
+        m15_dir = 1 if m15_fast[-1] > m15_slow[-1] else -1
+        
+        if m15_dir != h1_trend:
             self.last_rejection_reason = "M15/H1 trend mismatch"
             return None
         
-        # --- EMA Direction Alignment (NOT cross) ---
-        m5_fast = m5.ema(8)
-        m5_slow = m5.ema(21)
-        if len(m5_fast) < 6 or len(m5_slow) < 6:
-            return None
-        
-        m5_dir = 1 if m5_fast[-1] > m5_slow[-1] else -1
-        
-        if m5_dir != m15_trend:
-            self.last_rejection_reason = "M5/M15 trend mismatch"
-            return None
-        
-        # --- RSI Overextension Filter (Adaptive for Parabolic Trends) ---
-        rsi_vals = m5.get_indicator("rsi_14")
+        # --- RSI Overextension Filter (M15) ---
+        rsi_vals = m15.get_indicator("rsi_14")
         if len(rsi_vals) > 0:
             rsi = rsi_vals[-1]
-            # Institutional Parabolic Rule: If trend is extreme (ADX > 45), allow RSI up to 78
             rsi_max = 65 if adx < 45 else 78
             rsi_min = 35 if adx < 45 else 22
             
-            if m5_dir == 1 and rsi > rsi_max:
+            if m15_dir == 1 and rsi > rsi_max:
                 self.last_rejection_reason = f"RSI Overextended ({rsi:.1f} > {rsi_max})"
                 return None
-            if m5_dir == -1 and rsi < rsi_min:
+            if m15_dir == -1 and rsi < rsi_min:
                 self.last_rejection_reason = f"RSI Overextended ({rsi:.1f} < {rsi_min})"
                 return None
         
         # --- Candle Strength Filter ---
-        last_candle = m5[-1]
+        last_candle = m15[-1]
         candle_range = last_candle.high - last_candle.low
         if candle_range > 0:
             candle_body = abs(last_candle.close - last_candle.open)
@@ -176,7 +163,7 @@ class TrendFollowingStrategy(BaseStrategy):
         
         # --- SIGNAL GENERATION ---
         current_price = market_data.current_price
-        direction = "BUY" if m5_dir == 1 else "SELL"
+        direction = "BUY" if m15_dir == 1 else "SELL"
         
         base_conf = 0.70 + session_mult["conf_boost"]
         adx_conf = min(0.20, (adx - self.adx_threshold) / 25.0) if adx >= self.adx_threshold else 0.0
@@ -187,7 +174,7 @@ class TrendFollowingStrategy(BaseStrategy):
             self.last_rejection_reason = f"Session Confidence Under Floor ({confidence:.2f} < {conf_floor:.2f})"
             return None
             
-        self._last_signal_bar = len(m5)
+        self._last_signal_bar = len(m15)
         
         signal = TradeSignal(direction=direction, confidence=min(0.98, confidence), price=current_price)
         signal.stop_loss = self.get_stop_loss(signal, market_data)
@@ -197,20 +184,18 @@ class TrendFollowingStrategy(BaseStrategy):
 
 
     def get_stop_loss(self, signal: TradeSignal, market_data: MarketData) -> float:
-        atr_vals = market_data.m5_candles.atr(14)
+        last = market_data.m15_candles[-1]
+        atr_vals = market_data.m15_candles.atr(14)
         atr = atr_vals[-1] if len(atr_vals) > 0 and not np.isnan(atr_vals[-1]) else 1.0
-        
         scaler = self.get_regime_scaler(market_data)
         
         if signal.direction == "BUY":
-            return market_data.current_price - (atr * self.sl_atr * scaler)
-        else:
-            return market_data.current_price + (atr * self.sl_atr * scaler)
+            return min(last.low, market_data.current_price - (atr * self.sl_atr * scaler))
+        return max(last.high, market_data.current_price + (atr * self.sl_atr * scaler))
 
     def get_take_profit(self, signal: TradeSignal, market_data: MarketData) -> float:
-        atr_vals = market_data.m5_candles.atr(14)
+        atr_vals = market_data.m15_candles.atr(14)
         atr = atr_vals[-1] if len(atr_vals) > 0 and not np.isnan(atr_vals[-1]) else 1.0
-        
         scaler = self.get_regime_scaler(market_data)
         target_dist = atr * self.tp_atr * scaler
         
@@ -220,11 +205,11 @@ class TrendFollowingStrategy(BaseStrategy):
             return market_data.current_price - target_dist
 
     def get_metrics(self, market_data: MarketData) -> Dict[str, Any]:
-        m5 = market_data.m5_candles
-        if m5 is None or len(m5) < 14: return {}
+        m15 = market_data.m15_candles
+        if m15 is None or len(m15) < 14: return {}
         
-        adx_vals = m5.adx(self.adx_period)
-        atr_vals = m5.atr(14)
+        adx_vals = m15.adx(self.adx_period)
+        atr_vals = m15.atr(14)
         
         return {
             "ADX": adx_vals[-1] if len(adx_vals) > 0 else 0,

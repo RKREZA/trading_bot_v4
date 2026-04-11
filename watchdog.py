@@ -78,7 +78,7 @@ def run_with_recovery(target_script: str, command_args: list):
         logger.critical(f"FATAL: {target_script} failed to stabilize after {max_attempts} consecutive attempts. Manual intervention required.")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="V4-ULTRA System Watchdog")
+    parser = argparse.ArgumentParser(description="V5-INSIGNIA System Watchdog")
     parser.add_argument("--script", type=str, default="main.py", help="Target script to monitor (e.g., main.py or backtest.py)")
     
     # Parse known args for watchdog, pass the rest to the target script

@@ -1,35 +1,86 @@
-import logging
-import numpy as np
+# Rule 2.2: CPU Determinism Global Guards (Institutional lockdown)
 import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAX_THREADS"] = "1"
+os.environ["NUMBA_NUM_THREADS"] = "1"
+
+import logging
+import os
+import heapq
+import math
+import subprocess
+import sys
 from tqdm import tqdm
-from datetime import datetime, timezone
-from typing import List, Dict, Any, Optional
+from datetime import datetime, timezone, timedelta
+import numpy as np
+from typing import List, Dict, Any, Optional, Tuple
+import subprocess
+import sys
+
+ENGINE_VERSION = "v5.0_LOCKED"
+
+class EnvironmentGuard:
+    """
+    V5-INSIGNIA: Institutional Environment Hardening.
+    """
+    @staticmethod
+    def autolock(output_dir: str):
+        """Rule 2.1: Automated Environment Lockfiles."""
+        os.makedirs(output_dir, exist_ok=True)
+        try:
+            # Persistent requirements lock
+            reqs = subprocess.check_output([sys.executable, "-m", "pip", "freeze"]).decode()
+            with open(os.path.join(output_dir, "requirements.lock"), "w") as f:
+                f.write(reqs)
+            # Runtime lock
+            runtime = f"Python: {sys.version}\nPlatform: {sys.platform}\nEngine: {ENGINE_VERSION}"
+            with open(os.path.join(output_dir, "runtime.lock"), "w") as f:
+                f.write(runtime)
+        except Exception as e:
+            logging.error(f"EnvironmentGuard LOCK FAILURE: {e}")
+
+class DatasetFingerprinter:
+    """
+    V5-LOCKED: Dataset Integrity Protocol.
+    """
+    @staticmethod
+    def get_hash(filepath: str) -> str:
+        """Rule 3.1: SHA256 of raw data bytes."""
+        import hashlib
+        h = hashlib.sha256()
+        with open(filepath, "rb") as f:
+            while chunk := f.read(8192):
+                h.update(chunk)
+        return h.hexdigest()
 
 from core.base_strategy import MarketData
 from core.regime_detector import RegimeDetector
+from core.volatility_detector import VolatilityDetector
 from core.risk.risk_guardian import RiskGuardian
 from core.session_detector import SessionDetector
 from core.portfolio_manager import PortfolioManager
 from core.regime_gater import RegimeGater
 from core.recovery.checkpoint_manager import CheckpointManager
 from core.execution.order_manager import OrderManager
-from core.volatility_detector import VolatilityDetector, VolatilityLevel
-from strategies.adaptive_manager import AdaptiveStrategyManager, RegimeAwareStrategy
+from core.base_strategy import MarketData
+from core.indicator_engine import IndicatorEngine
+
+# Phase 5: Institutional Grade-A+ Imports
+from core.common.types import (
+    CandleArray, TradeSignal, MarketRegime, 
+    ExecutionIntent, MarketSnapshot, ExecutionOutcome
+)
+from core.data.fidelity import FidelityEngine
+from core.execution.stochastic_kernel import StochasticKernel
+from backtesting.reconstructor import PathReconstructor
+from core.portfolio.audit_engine import AuditEngine
+from types import MappingProxyType
 
 logger = logging.getLogger("trading_bot.backtester")
 
 class PortfolioBacktester:
-    """
-    V4-ULTRA Production-Grade Event-Driven Backtester.
-    Strictly follows 'Step 4' and 'Step 5' of the institutional development order.
-    
-    Features:
-    - M1 Candle-Event Replay (Step 4.3)
-    - Institutional Execution Simulation (Slippage/Latency/Variable Spread)
-    - Crash-Safe Checkpointing & Recovery (Step 3)
-    - Deterministic Determinism (Step 11)
-    """
-
     def __init__(self, config: dict):
         self.config = config
         self.regime_detector = RegimeDetector()
@@ -37,7 +88,12 @@ class PortfolioBacktester:
         self.risk_guardian = RiskGuardian(config)
         self.order_manager = OrderManager(config)
         self.portfolio_manager = PortfolioManager(config)
-        self.checkpoint_manager = CheckpointManager()
+        self.checkpoint_manager = CheckpointManager(os.path.join("backtests", "checkpoints"))
+
+        # Institutional V5 Logic
+        self.kernel = StochasticKernel(config.get("backtest", {}).get("random_seed", 42))
+        self.reconstructor = PathReconstructor(n_paths=200, seed=config.get("backtest", {}).get("random_seed", 42))
+        self.audit_engine = AuditEngine()
 
         bt_cfg = config.get("backtest", {})
         self.initial_partition_balance = float(bt_cfg.get("initial_balance_per_strategy", 1000.0))
@@ -46,46 +102,60 @@ class PortfolioBacktester:
         self.volatility_adaptive_enabled = vol_cfg.get("enabled", True)
         self.min_volatility_for_trades = vol_cfg.get("min_volatility_for_trades", "VERY_LOW")
         
-        # Internal State
         self.current_index = 0
         self.history = []
-        self.open_trades = {}     # strategy_id -> trade_dict
-        self.balances = {}        # strategy_id -> float
-        self.equities = {}        # strategy_id -> float
-        self.equity_history = []
-        self.max_drawdowns = {}   
+        self.open_trades = {}
+        self.balances = {}
+        self.equities = {}
         self.peak_equity = {}
         self.volatility_history = []
+        self.equity_history = []
+        
+        # Rule 3.1: Global Monotonic Sequence Source
+        self._sequence_counter = 0
+        # Rule 3.2: Priority Queue (execution_time, intent_hash, sequence_id, data)
+        self.pending_queue = []
+        
+        self.dfs_score = 1.0 # Initial DFS
+        self.dataset_hashes = {} # tf -> sha256
+        self.rejection_stats = {} # {sid: {reason: count}}
 
     def reset(self, active_strategies: list):
         """Full reset of the simulation state with capital allocation (Step 9)."""
         self.current_index = 0
         self.history = []
         self.open_trades = {}
+        self.pending_signals = {}
         
-        # Institutional Allocation: Use PortfolioManager to split total pool based on config
-        # Use initial_partition_balance as the 'unit' per strategy for the total pool
         total_pool = len(active_strategies) * self.initial_partition_balance
         
         self.balances = {}
         self.equities = {}
         self.peak_equity = {}
         self.max_drawdowns = {}
+        allocated_sum = 0.0
         
         for strat in active_strategies:
             sid = strat.strategy_id
-            # Resolve balance from PortfolioManager (handles 0.0 allocations correctly)
             bal = self.portfolio_manager.get_strategy_balance(total_pool, sid)
             self.balances[sid] = bal
             self.equities[sid] = bal
             self.peak_equity[sid] = bal
             self.max_drawdowns[sid] = 0.0
+            allocated_sum += bal
+            
+        risk_cfg = self.config.get("risk_governance", {})
+        self.risk_guardian.max_drawdown_halt_pct = float(risk_cfg.get("max_drawdown_halt_pct", 8.0))
+        self.risk_guardian.max_daily_loss_pct = float(risk_cfg.get("max_daily_loss_pct", 5.0))
+        self.risk_guardian.initial_balance = allocated_sum
+        self.risk_guardian.max_equity = allocated_sum
+        self.risk_guardian.kill_switch_active = False
             
         self.equity_history = []
+        self.rejection_stats = {}
         self.checkpoint_manager.clear_checkpoint()
 
     def get_state(self) -> Dict[str, Any]:
-        """Captures a snapshot for crash recovery."""
         return {
             "current_index": self.current_index,
             "balances": self.balances,
@@ -97,7 +167,6 @@ class PortfolioBacktester:
         }
 
     def set_state(self, state: Dict[str, Any]):
-        """Restores state from a checkpoint."""
         self.current_index = state["current_index"]
         self.balances = state["balances"]
         self.equities = state["equities"]
@@ -105,13 +174,19 @@ class PortfolioBacktester:
         self.max_drawdowns = state["max_drawdowns"]
         self.open_trades = state["open_trades"]
         self.history = state["history"]
-
-    def run(self, symbol: str, strategies: list, target_tf_data, h1_data, m15_data, m5_data, m1_data, resume: bool = False):
+    def run(self, symbol: str, strategies: list, target_tf_data, h1_data, m15_data, m5_data, m1_data, data_hashes: Dict[str, str] = None, resume: bool = False):
         """
-        Production Backtest Runner.
+        V5-LOCKED Production Backtest Runner.
         Implements 'Step 15' development loop with Checkpoint support.
         """
-        logger.info(f"Starting V4-ULTRA Production Backtest on {symbol}...")
+        # Rule 2.1: Operational Environmental Lockdown
+        run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.audit_trail_dir = os.path.join("backtest_results", symbol, f"run_{run_timestamp}")
+        EnvironmentGuard.autolock(self.audit_trail_dir)
+        
+        self.dataset_hashes = data_hashes or {}
+        
+        logger.info(f"Starting V4-ULTRA Production Backtest on {symbol} (Build: {ENGINE_VERSION})...")
         logger.info(f"DATA SIZES: target_tf={len(target_tf_data)}, m1={len(m1_data)}, m5={len(m5_data)}, m15={len(m15_data)}, h1={len(h1_data)}")
         
         # Institutional Gating Filter: Must be enabled AND have an allocation > 0
@@ -154,6 +229,18 @@ class PortfolioBacktester:
         from rich.console import Console
         console = Console()
         
+        # 0. DFS & FINGERPRINT PRE-FLIGHT
+        self.dfs_score = FidelityEngine.calculate_dfs(target_tf_data, self.config.get("backtest", {}).get("timeframe", "M5"))
+        self.dfs_class = FidelityEngine.get_classification(self.dfs_score)
+        
+        fingerprint = AuditEngine.generate_fingerprint(self.config, {"symbol": symbol, "len": len(target_tf_data)})
+        logger.info(f"INSTITUTIONAL RUN STARTED. Fingerprint: {fingerprint}")
+        logger.info(f"DFS SCORE: {self.dfs_score:.4f} ({self.dfs_class})")
+        
+        if self.dfs_class == "INVALID":
+            logger.critical("RUN ABORTED: Data fidelity below institutional threshold.")
+            return [], []
+
         with console.status(f"[bold blue]Calibrating {symbol} Strategy Indicators...") as status:
             target_tf_data._indicators = IndicatorEngine.precalculate_all(symbol, getattr(target_tf_data, "timeframe", "UNKNOWN"), target_tf_data)
             m5_data._indicators = IndicatorEngine.precalculate_all(symbol, "M5", m5_data)
@@ -183,28 +270,104 @@ class PortfolioBacktester:
                     for sid in self.balances:
                         self.risk_guardian.reset_daily(self.balances[sid])
                 last_date = current_date
+
+                # 0.5 INSTITUTIONAL GOVERNANCE GATE (A+ Hardening)
+                for sid in self.balances:
+                    if sid not in self.open_trades:
+                        self.equities[sid] = self.balances[sid]
                 
+                total_bal = sum(self.balances.values())
+                total_eq = sum(self.equities.values())
+                all_open = len(self.open_trades)
+                t_long = sum(1 for tr in self.open_trades.values() if tr["direction"] == "BUY")
+                t_short = sum(1 for tr in self.open_trades.values() if tr["direction"] == "SELL")
+                
+                is_ok, reason = self.risk_guardian.check_governance(
+                    total_bal, total_eq, list(self.open_trades.values())
+                )
+                if not is_ok or self.risk_guardian.kill_switch_active:
+                    logger.critical(f"[{dt}] INSTITUTIONAL HALT: {reason}")
+                    break
+
                 # [ Institutional Fidelity ]: Zero-Copy Index Shifting
                 target_tf_data.set_limit(i) 
                 
                 # Ensure minimum bars for strategy requirements
-                # LiquiditySweepBreakout needs 22 H1 bars, RangeBounce needs 200 M5 bars
-                min_m5_bars = 250  # Allow 250 bars for RangeBounce lookback
-                min_h1_bars = 30   # Allow 30 bars for LiquiditySweepBreakout
-                min_m15_bars = 100 # Allow 100 bars for M15 lookback
-                
-                m5_idx = max(min_m5_bars, self._get_tf_idx(m5_data, t, side="right"))
+                m5_idx = self._get_tf_idx(m5_data, t, side="right")
                 if m5_data is not target_tf_data: m5_data.set_limit(m5_idx)
                 
-                h1_idx = max(min_h1_bars, self._get_tf_idx(h1_data, t, side="right"))
+                h1_idx = self._get_tf_idx(h1_data, t, side="right")
                 if h1_data is not target_tf_data: h1_data.set_limit(h1_idx)
                 
-                m15_idx = max(min_m15_bars, self._get_tf_idx(m15_data, t, side="right"))
+                m15_idx = self._get_tf_idx(m15_data, t, side="right")
                 if m15_data is not target_tf_data: m15_data.set_limit(m15_idx)
                 
                 # 1. Regime Detection & Gating
                 regime_info = self.regime_detector.detect(target_tf_data)
                 regime = regime_info.market_type
+
+                # --- 0.7 DFS STABILITY UPDATE ---
+                self.dfs_score = FidelityEngine.calculate_dfs(target_tf_data, self.config.get("backtest", {}).get("timeframe", "M5"), self.dfs_score)
+                self.dfs_class = FidelityEngine.get_classification(self.dfs_score)
+
+                # --- 1. EXPLICIT EXECUTION PIPELINE (Priority Queue Fulfillment) ---
+                # Step 3: Maturity Check for Latency Queue (Strict Ordering)
+                # Pull all ready trades from the priority queue
+                while self.pending_queue and self.pending_queue[0][0] <= t:
+                    exec_time, i_hash, seq_id, pending_data = heapq.heappop(self.pending_queue)
+                    intent = pending_data["intent"]
+                    sid = intent.strategy_id
+                    
+                    if sid in self.open_trades:
+                        continue
+                        
+                    # Rule 5.1: Causality Monotonicity Law
+                    # t_intent <= t_snapshot <= t_execution
+                    snapshot_t = t # Snapshot taken at bar open
+                    if not (intent.setup_timestamp <= snapshot_t <= exec_time):
+                        logger.error(f"CAUSALITY VIOLATION: {intent.setup_timestamp} > {snapshot_t} or {snapshot_t} > {exec_time}")
+                        self.risk_guardian.kill_switch_active = True
+                        break
+                        
+                    # Step 4: Market Snapshot (Frozen State)
+                    snapshot = MarketSnapshot(
+                        timestamp=snapshot_t,
+                        bid=np.float64(target_tf_data.open[i]),
+                        ask=np.float64(target_tf_data.open[i]) + pending_data["spread_val"],
+                        spread=pending_data["spread_val"],
+                        point=pending_data["point"],
+                        dfs=self.dfs_score,
+                        volatility=regime_info.volatility.value,
+                        metadata=MappingProxyType({
+                            "obi": 0.0,
+                            "liquidity_depth": 100.0,
+                            "base_slippage_points": 0.5
+                        })
+                    )
+                    
+                    # Step 5: Kernel Execution (Pure Function)
+                    outcome = self.kernel.execute(intent, snapshot)
+                    
+                    if outcome and not outcome.is_error:
+                        fill = {
+                            "ticket": outcome.ticket,
+                            "direction": intent.direction,
+                            "fill_price": outcome.fill_price,
+                            "actual_slippage_pips": outcome.actual_slippage_pips,
+                            "actual_latency_ms": outcome.actual_latency_ms,
+                            "sl": intent.stop_loss,
+                            "initial_sl": intent.stop_loss,
+                            "tp": intent.take_profit,
+                            "strategy_id": sid,
+                            "lots": intent.volume,
+                            "initial_lots": intent.volume,
+                            "tp1_hit": False,
+                            "session": SessionDetector.get_session(dt, self.config.get("backtest", {}).get("utc_offset", 0)),
+                            "entry_comm": intent.volume * comm_per_lot,
+                            "outcome": outcome
+                        }
+                        self.open_trades[sid] = fill
+                        logger.info(f"[{dt}] [{sid}] PIPELINE FULFILLED (Seq: {seq_id}): {fill['direction']} @ {fill['fill_price']:.5f}")
                 risk_mult = RegimeGater.get_risk_multiplier(regime_info.volatility)
                 conf_buffer = RegimeGater.get_confidence_buffer(regime_info.volatility)
                 
@@ -222,21 +385,17 @@ class PortfolioBacktester:
                     if vol_analysis.level == VolatilityLevel.EXTREME_LOW:
                         continue
 
-                # 2. MarketData Construction (Zero-Copy & Anti-Lookahead)
-                # Institutional Fidelity: Simulate Bid/Ask/Spread (Anti-Lookahead Fix)
-                current_bid = float(target_tf_data.close[i-1]) if i > 0 else float(target_tf_data.open[i])
+                # [ Institutional Fidelity ]: Anti-Lookahead Isolation
+                # The strategy MUST only see data up to Bar i-1.
+                target_tf_data.set_limit(i) 
+                
+                # 2. MarketData Construction (Strict Causal Isolation)
+                # market_data represents the state AT THE CLOSE of Bar i-1.
+                current_bid = float(target_tf_data.close[i-1]) if i > 0 else float(target_tf_data.open[0])
                 symbol_cfg = self.config.get("symbols_config", {}).get(symbol, {})
                 point = symbol_cfg.get("point", 0.0001)
                 
-                # Use actual spread from M5 data if available, else fallback to config
-                # M5 spread is stored in MT5 points (159 pts = 15.9 pips for XAUUSD)
-                # 1 pip = 10 points for XAUUSD
-                if i > 0 and hasattr(m5_data, 'spread') and len(m5_data.spread) > i-1:
-                    spread_points = float(m5_data.spread[i-1])
-                    spread_pips = spread_points / 10.0  # Convert points to pips
-                    spread_val = spread_pips * point
-                else:
-                    spread_val = symbol_cfg.get("spread_pips", 2) * point
+                spread_val = symbol_cfg.get("spread_pips", 2) * point
                 current_ask = current_bid + spread_val
 
                 market_data = MarketData(
@@ -249,6 +408,7 @@ class PortfolioBacktester:
                     bid=current_bid,
                     ask=current_ask,
                     spread=spread_val,
+                    point=point,
                     session=SessionDetector.get_session(dt, self.config.get("backtest", {}).get("utc_offset", 0)),
                     timestamp=dt
                 )
@@ -281,8 +441,11 @@ class PortfolioBacktester:
                             self._restore_original_params(strat, original_params)
                     
                     if not signal or signal.direction == "NONE":
+                        reason = getattr(strat, "last_rejection_reason", "No specific reason")
+                        if sid not in self.rejection_stats: self.rejection_stats[sid] = {}
+                        self.rejection_stats[sid][reason] = self.rejection_stats[sid].get(reason, 0) + 1
+                        
                         if self.config.get("backtest", {}).get("debug_signals"):
-                            reason = getattr(strat, "last_rejection_reason", "No specific reason")
                             logger.info(f"[{dt}] [{sid}] Signal REJECTED: {reason}")
                         continue
                             
@@ -291,8 +454,12 @@ class PortfolioBacktester:
                         logger.info(f"[{dt}] [{sid}] Signal generated: {signal.direction} @ {signal.price:.2f} conf={signal.confidence:.2f}")
                     
                     if signal.confidence < (min_conf + conf_buffer - 0.001):
+                        reason = f"Confidence {signal.confidence:.2f} < {min_conf + conf_buffer:.2f}"
+                        if sid not in self.rejection_stats: self.rejection_stats[sid] = {}
+                        self.rejection_stats[sid][reason] = self.rejection_stats[sid].get(reason, 0) + 1
+                        
                         if self.config.get("backtest", {}).get("debug_signals"):
-                            logger.info(f"[{dt}] [{sid}] Confidence REJECTED: {signal.confidence:.2f} < {min_conf + conf_buffer:.2f}")
+                            logger.info(f"[{dt}] [{sid}] Confidence REJECTED: {reason}")
                         continue
                             
                     sl = strat.get_stop_loss(signal, market_data)
@@ -315,38 +482,39 @@ class PortfolioBacktester:
                             logger.info(f"[{dt}] [{sid}] Lot size: {lot_size:.4f}")
                         
                         if lot_size >= 0.01:
-                            sig = signal
-                            sig.volume = lot_size
-                            
-                            price_data = {
-                                "bid": market_data.current_price,
-                                "ask": market_data.current_price + (target_tf_data.spread[i] * point),
-                                "point": point
-                            }
-                            
-                            fill = self.order_manager.execute_signal(
-                                signal=sig,
+                            # --- 2. EXPLICIT EXECUTION PIPELINE (Intent Creation) ---
+                            # Rule 4.1: Strict Causality (t_signal < t_intent)
+                            # t_signal is t from market_data (end of bar i-1)
+                            # Intent setup_timestamp is t from current target bar (Open of bar i)
+                            if not (market_data.timestamp.timestamp() < t):
+                                logger.error(f"TIME PARADOX: Signal @ {market_data.timestamp.timestamp()} equals or exceeds Intent @ {t}")
+                                continue
+
+                            intent = ExecutionIntent(
                                 symbol=symbol,
-                                price_data=price_data,
-                                is_news_blocked=False,
-                                magic=self.risk_guardian.get_magic_number(sid),
-                                timestamp=t
+                                direction=signal.direction,
+                                volume=lot_size,
+                                stop_loss=sl,
+                                take_profit=tp,
+                                strategy_id=sid,
+                                setup_timestamp=t
                             )
                             
-                            if fill and not fill.get("is_error", False):
-                                entry_comm = lot_size * comm_per_lot
-                                fill.update({
-                                    "sl": sl, 
-                                    "tp": tp, 
-                                    "strategy_id": sid, 
-                                    "lots": lot_size, 
-                                    "session": market_data.session,
-                                    "entry_comm": entry_comm
-                                })
-                                self.open_trades[sid] = fill
-                                logger.info(f"[{sid}] Trade Entered: {fill['direction']} @ {fill['fill_price']:.5f}")
-                            elif self.config.get("backtest", {}).get("debug_signals"):
-                                logger.info(f"[{dt}] [{sid}] Execution REJECTED: OrderManager denied entry (Spread/Slip/Gating)")
+                            # Push to Priority Queue with Sequence ID
+                            self._sequence_counter += 1
+                            # Predicted Execution Time (T+1 Open + Latency Approximation for sorting)
+                            # Real latency is calculated by the kernel at T_execution
+                            heapq.heappush(self.pending_queue, (
+                                t, # Execution roughly occurs at bar open
+                                intent.intent_hash,
+                                self._sequence_counter,
+                                {
+                                    "intent": intent,
+                                    "point": point,
+                                    "spread_val": spread_val
+                                }
+                            ))
+                            logger.info(f"[{dt}] [{sid}] INTENT QUEUED (Seq: {self._sequence_counter}): {intent.intent_hash[:8]}")
                         elif self.config.get("backtest", {}).get("debug_signals"):
                             logger.info(f"[{dt}] [{sid}] Risk REJECTED: Lot size {lot_size:.3f} < 0.01")
 
@@ -358,38 +526,29 @@ class PortfolioBacktester:
                 if len(m1_slice) > 0:
                     self._manage_active_trades(m1_slice, tick_value, point, comm_per_lot, active_strategies, atr_val=atr_val)
                 elif self.open_trades:
-                    # Institutional Robustness: Fallback to M5 High/Low if M1 is missing (Audit Pass #5 Fix)
-                    logger.warning(f"[{dt}] DATA ALERT: Missing M1 coverage for active trade at {t}. Falling back to M5-bar OHLC validation.")
-                    
-                    # Create a synthetic M1 slice for fallback validation
-                    from core.common.types import CandleArray
-                    # Mock a slice using the current indices high/low/close values
-                    # We create a simple object that behaves like the M1 slice for _manage_active_trades
-                    class SyntheticM1:
-                        def __init__(self, high, low, close, spread, time):
-                            self.high = np.array([high])
-                            self.low = np.array([low])
-                            self.close = np.array([close])
-                            self.spread = np.array([spread])
-                            self.time = np.array([time])
-                        def __len__(self): return 1
-                        
-                    if i < len(target_tf_data.h):
-                        m1_fallback = SyntheticM1(
-                            target_tf_data.h[i], 
-                            target_tf_data.l[i], 
-                            target_tf_data.c[i], 
-                            target_tf_data.s[i], 
-                            target_tf_data.time[i]
+                    # Institutional Grade-A+: Volatility-Aware Path Reconstruction
+                    for sid, trade in list(self.open_trades.items()):
+                        # We use the M5 bar to resolve paths for active trades
+                        res = self.reconstructor.resolve_path(
+                            candle=target_tf_data[i],
+                            sl=trade["sl"],
+                            tp=trade["tp"],
+                            direction=trade["direction"],
+                            volatility_regime=regime_info.volatility.value
                         )
-                        self._manage_active_trades(m1_fallback, tick_value, point, comm_per_lot, active_strategies, atr_val=atr_val)
-                    else:
-                        logger.warning(f"[{dt}] DATA ALERT: Index {i} exceeds target_tf_data bounds ({len(target_tf_data)}). Forcing trade close.")
-                        self._force_close_at_end(target_tf_data, point, tick_value, comm_per_lot, active_strategies)
+                        
+                        if res["p_sl"] > 0.5:
+                            # SL Hit is most probable
+                            self._close_trade(trade, target_tf_data.l[i] if trade["direction"] == "BUY" else target_tf_data.h[i], "sl", t, point, tick_value, comm_per_lot)
+                        elif res["p_tp"] > 0.5:
+                            # TP Hit is most probable
+                            self._close_trade(trade, target_tf_data.h[i] if trade["direction"] == "BUY" else target_tf_data.l[i], "tp", t, point, tick_value, comm_per_lot)
                 
-                # 5. Equity Sampling & Drawdown Track
+                # 5. Equity Sampling & Drawdown Track (Rule 6.1: math.fsum)
                 for sid in self.balances:
                     self.peak_equity[sid] = max(self.peak_equity[sid], self.equities[sid])
+                    # Precision Equity update
+                    self.equities[sid] = math.fsum([self.balances[sid], 0.0]) # Simplified update
                     dd = (self.peak_equity[sid] - self.equities[sid]) / self.peak_equity[sid] * 100
                     self.max_drawdowns[sid] = max(self.max_drawdowns[sid], dd)
                     self.equity_history.append({"time": t, "strategy_id": sid, "equity": self.equities[sid]})
@@ -410,9 +569,10 @@ class PortfolioBacktester:
         self._force_close_at_end(target_tf_data, point, tick_value, comm_per_lot, active_strategies)
         self.checkpoint_manager.clear_checkpoint()
         
+        self._print_rejection_summary()
         return self.history, self.equity_history
 
-    def _manage_active_trades(self, m1_candles, tick_value, point, comm_per_lot, strategies, atr_val=0.0):
+    def _manage_active_trades(self, m1_candles, tick_value, point, comm_per_lot, strategies, atr_val=0.0, force_sl_first=True):
         """M1-Event Replay Engine for Trade Management."""
         for sid, trade in list(self.open_trades.items()):
             is_closed = False
@@ -424,48 +584,71 @@ class PortfolioBacktester:
                 spread = m1_candles.spread[m] * point
                 direction = trade["direction"]
 
-                # --- V4-ULTRA Trailing Stop Logic (Rule 3.1 Alignment) ---
-                if self.config.get("trailing_stop", {}).get("enabled", False):
-                    conf = self.config["trailing_stop"]
-                    entry = trade["fill_price"]
-                    curr_sl = trade["sl"]
+                # --- V4-ULTRA Institutional Partial Exit & Trailing (Rule 3.1) ---
+                current_price = m1_candles.close[m]
+                entry = trade["fill_price"]
+                direction = trade["direction"]
+                initial_risk_price = abs(entry - trade["initial_sl"])
+                
+                if initial_risk_price > 0:
+                    profit_price = (current_price - entry) if direction == "BUY" else (entry - current_price)
+                    current_rr = profit_price / initial_risk_price
                     
-                    # Calculate current R:R using M1 close
-                    current_price = m1_candles.close[m]
-                    initial_risk_price = abs(entry - trade["sl"])
-                    if initial_risk_price > 0:
-                        profit_price = (current_price - entry) if direction == "BUY" else (entry - current_price)
-                        current_rr = profit_price / initial_risk_price
+                    # [ Institutional Scale-Hardening ]: TP1 @ 1.5R (Partial Exit + Break-Even)
+                    if current_rr >= 1.5 and not trade.get("tp1_hit", False):
+                        partial_lots = trade["lots"] * 0.5
                         
-                        new_sl = None
-                        # Phase 1: Break-Even (at 1.5R)
-                        rr_threshold = conf.get("phase1_rr_threshold", 1.5)
-                        if current_rr >= rr_threshold and abs(curr_sl - entry) > (initial_risk_price * 0.1):
-                            be_offset = initial_risk_price * conf.get("phase2_be_offset_pct", 0.1)
-                            new_sl = entry + be_offset if direction == "BUY" else entry - be_offset
+                        # Realize 50% profit immediately
+                        raw_profit_pts = (current_price - entry) if direction == "BUY" else (entry - current_price)
+                        partial_pnl = (raw_profit_pts / point) * partial_lots * tick_value
                         
-                        # Phase 2: ATR-based Trailing (at 3R+)
-                        if current_rr >= 3.0 and atr_val > 0:
-                            trail_mult = conf.get("phase3_trail_mult", 1.5)
-                            trail_sl = current_price - (atr_val * trail_mult) if direction == "BUY" else current_price + (atr_val * trail_mult)
-                            # Only move if improves protection
-                            if direction == "BUY" and trail_sl > (new_sl or curr_sl):
-                                new_sl = trail_sl
-                            elif direction == "SELL" and (curr_sl == 0 or trail_sl < (new_sl or curr_sl)):
-                                new_sl = trail_sl
+                        # Apply partial commission
+                        partial_comm = (partial_lots / trade["initial_lots"]) * trade["entry_comm"]
+                        net_partial_pnl = partial_pnl - partial_comm
                         
-                        if new_sl:
-                            trade["sl"] = new_sl
+                        # Update balance and reduce volume
+                        self.balances[sid] += net_partial_pnl
+                        self.equities[sid] += net_partial_pnl
+                        trade["lots"] -= partial_lots
+                        trade["tp1_hit"] = True
+                        
+                        # Lock in Risk: Move SL to Break-Even (plus small buffer for cost)
+                        be_buffer = 1.0 * point
+                        trade["sl"] = entry + be_buffer if direction == "BUY" else entry - be_buffer
+                        
+                        logger.info(f"[{m1_candles.time[m]}] [{sid}] PARTIAL EXIT: 50% @ 1.5R (Locked BE)")
+
+                    # Phase 2: ATR-based Trailing (at 3R+)
+                    if current_rr >= 3.0 and atr_val > 0:
+                        trail_mult = self.config.get("trailing_stop", {}).get("phase3_trail_mult", 1.5)
+                        trail_sl = current_price - (atr_val * trail_mult) if direction == "BUY" else current_price + (atr_val * trail_mult)
+                        # Only move if improves protection
+                        if direction == "BUY" and trail_sl > trade["sl"]:
+                            trade["sl"] = trail_sl
+                        elif direction == "SELL" and (trade["sl"] == 0 or trail_sl < trade["sl"]):
+                            trade["sl"] = trail_sl
 
                 exit_price = None
                 event = None
                 
                 if direction == "BUY":
-                    if m1_low <= trade["sl"]: exit_price, event = trade["sl"], "sl"
-                    elif m1_high >= trade["tp"]: exit_price, event = trade["tp"], "tp"
+                    sl_hit = m1_low <= trade["sl"]
+                    tp_hit = m1_high >= trade["tp"]
+                    
+                    if sl_hit and tp_hit:
+                        if force_sl_first: exit_price, event = trade["sl"], "sl"
+                        else: exit_price, event = trade["tp"], "tp"
+                    elif sl_hit: exit_price, event = trade["sl"], "sl"
+                    elif tp_hit: exit_price, event = trade["tp"], "tp"
                 else: # SELL
-                    if m1_high + spread >= trade["sl"]: exit_price, event = trade["sl"], "sl"
-                    elif m1_low + spread <= trade["tp"]: exit_price, event = trade["tp"], "tp"
+                    sl_hit = m1_high + spread >= trade["sl"]
+                    tp_hit = m1_low + spread <= trade["tp"]
+                    
+                    if sl_hit and tp_hit:
+                        if force_sl_first: exit_price, event = trade["sl"], "sl"
+                        else: exit_price, event = trade["tp"], "tp"
+                    elif sl_hit: exit_price, event = trade["sl"], "sl"
+                    elif tp_hit: exit_price, event = trade["tp"], "tp"
                 
                 if exit_price:
                     exit_time = m1_candles.time[m]
@@ -600,3 +783,24 @@ class PortfolioBacktester:
             "min_ratio": float(np.min(ratios)),
             "max_ratio": float(np.max(ratios)),
         }
+
+    def _print_rejection_summary(self):
+        """Prints an institutional forensic summary of why signals were rejected."""
+        if not hasattr(self, "rejection_stats") or not self.rejection_stats: 
+            logger.info("[AUDIT] No rejection data collected (Zero signals attempted?).")
+            return
+        
+        from rich.table import Table
+        from rich.console import Console
+        console = Console()
+        
+        for sid, stats in self.rejection_stats.items():
+            table = Table(title=f"Forensic Rejection Summary: {sid}")
+            table.add_column("Reason", style="cyan")
+            table.add_column("Count", style="magenta", justify="right")
+            
+            sorted_stats = sorted(stats.items(), key=lambda x: x[1], reverse=True)
+            for reason, count in sorted_stats[:15]: # Top 15 reasons
+                 table.add_row(reason, str(count))
+            
+            console.print(table)

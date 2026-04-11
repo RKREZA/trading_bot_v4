@@ -55,10 +55,13 @@ class StressTester:
         }
 
         fresh_strategies = self._create_fresh_strategies(strategies)
-        shock_data = self._apply_spread_multiplier(data, 3.0)
         spread_config = copy.deepcopy(self.config)
-        spread_config["symbols_config"][symbol]["spread_pips"] = spread_config["symbols_config"].get(symbol, {}).get("spread_pips", 6) * 3
+        # Fix: Resilient config resolution for Stress Scenarios
+        sym_cfg = spread_config.get("symbol_info", {})
+        sym_cfg["spread_pips"] = float(sym_cfg.get("spread_pips", 6)) * 3
+        spread_config["symbol_info"] = sym_cfg
         
+        shock_data = self._apply_spread_multiplier(data, 3.0)
         spread_history, spread_equity = self._run_pass(symbol, fresh_strategies, shock_data, spread_config)
         spread_metrics = PerformanceTracker.calculate_metrics(
             spread_history, 
@@ -71,11 +74,16 @@ class StressTester:
             "profit_retention": (spread_profit / baseline_profit * 100) if baseline_profit != 0 else 0.0
         }
 
-        fresh_strategies = self._create_fresh_strategies(strategies)
+        # Fix: Resilient config resolution for Slip Scenario
         slip_config = copy.deepcopy(self.config)
-        slip_config["symbols_config"][symbol]["spread_pips"] = slip_config["symbols_config"].get(symbol, {}).get("spread_pips", 6) * 5
-        slip_config["execution"]["entry_slippage_points"] = slip_config["execution"].get("entry_slippage_points", 1.5) * 5
-        slip_config["execution"]["sl_exit_slippage_points"] = slip_config["execution"].get("sl_exit_slippage_points", 2.5) * 5
+        sym_cfg = slip_config.get("symbol_info", {})
+        sym_cfg["spread_pips"] = float(sym_cfg.get("spread_pips", 6)) * 5
+        slip_config["symbol_info"] = sym_cfg
+        
+        exec_cfg = slip_config.get("execution", {})
+        exec_cfg["entry_slippage_points"] = float(exec_cfg.get("entry_slippage_points", 1.5)) * 5
+        exec_cfg["sl_exit_slippage_points"] = float(exec_cfg.get("sl_exit_slippage_points", 2.5)) * 5
+        slip_config["execution"] = exec_cfg
         
         slip_history, slip_equity = self._run_pass(symbol, fresh_strategies, data, slip_config)
         slip_metrics = PerformanceTracker.calculate_metrics(
@@ -91,9 +99,16 @@ class StressTester:
 
         fresh_strategies = self._create_fresh_strategies(strategies)
         toxic_config = copy.deepcopy(self.config)
-        toxic_config["symbols_config"][symbol]["spread_pips"] = toxic_config["symbols_config"].get(symbol, {}).get("spread_pips", 6) * 5
-        toxic_config["execution"]["entry_slippage_points"] = toxic_config["execution"].get("entry_slippage_points", 1.5) * 5
-        toxic_config["execution"]["sl_exit_slippage_points"] = toxic_config["execution"].get("sl_exit_slippage_points", 2.5) * 5
+        
+        # Fix: Resilient config resolution for Toxic Scenario
+        sym_cfg = toxic_config.get("symbol_info", {})
+        sym_cfg["spread_pips"] = float(sym_cfg.get("spread_pips", 6)) * 5
+        toxic_config["symbol_info"] = sym_cfg
+        
+        exec_cfg = toxic_config.get("execution", {})
+        exec_cfg["entry_slippage_points"] = float(exec_cfg.get("entry_slippage_points", 1.5)) * 5
+        exec_cfg["sl_exit_slippage_points"] = float(exec_cfg.get("sl_exit_slippage_points", 2.5)) * 5
+        toxic_config["execution"] = exec_cfg
         
         toxic_history, toxic_equity = self._run_pass(symbol, fresh_strategies, shock_data, toxic_config)
         toxic_metrics = PerformanceTracker.calculate_metrics(
@@ -140,6 +155,9 @@ class StressTester:
         """Creates a copy of data with boosted spreads."""
         new_data = {}
         for tf, candles in data.items():
+            if candles is None:
+                new_data[tf] = None
+                continue
             c_copy = copy.copy(candles)
             c_copy.spread = np.array(candles.spread) * multiplier
             new_data[tf] = c_copy

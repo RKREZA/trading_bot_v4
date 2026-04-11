@@ -24,7 +24,7 @@ class MarketState:
 
 class DataEngine:
     """
-    V4-ULTRA Asynchronous Data & Indicator Engine (Institutional Pillar 3).
+    V5-INSIGNIA Asynchronous Data & Indicator Engine (Institutional Pillar 3).
     Runs on a dedicated background thread to fetch candles and calculate 
     complex technical indicators (ADX, ATR, RSI, EMAs) non-blockingly.
     """

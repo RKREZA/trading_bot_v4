@@ -4,6 +4,47 @@ from dataclasses import dataclass, fields, field
 from typing import Dict, List, Optional, Any, Tuple
 from enum import Enum
 from datetime import datetime
+import hashlib
+import json
+from types import MappingProxyType
+import math
+
+class CanonicalHasher:
+    """
+    V5-INSIGNIA Bit-Level Canonical Serialization Engine.
+    Ensures cross-platform hash stability via string-canonicalization.
+    """
+    @staticmethod
+    def normalize_float(x: Any) -> str:
+        if not isinstance(x, (float, int, np.floating, np.integer)):
+            return str(x)
+        fx = float(x)
+        if math.isnan(fx): return "NaN"
+        if math.isinf(fx): return "Inf" if fx > 0 else "-Inf"
+        # Institutional Rule 1.1: Normalize -0.0 and enforce .10f
+        if fx == 0.0: return "0.0000000000"
+        return format(fx, ".10f")
+
+    @staticmethod
+    def canonicalize(data: Any) -> Any:
+        """Recursively normalizes data for bit-level JSON stability."""
+        if isinstance(data, dict):
+            return {str(k): CanonicalHasher.canonicalize(v) for k, v in sorted(data.items())}
+        if isinstance(data, (list, tuple)):
+            return [CanonicalHasher.canonicalize(v) for v in data]
+        if isinstance(data, (float, int, np.floating, np.integer)):
+            return CanonicalHasher.normalize_float(data)
+        return str(data)
+
+    @staticmethod
+    def get_hash(domain: str, data: Dict[str, Any]) -> str:
+        """Generates a domain-separated SHA256 hash from canonical JSON."""
+        # Rule 1.2: Deterministic JSON (No whitespace, sorted keys)
+        canonical_data = CanonicalHasher.canonicalize(data)
+        serialized = json.dumps(canonical_data, sort_keys=True, separators=(",", ":"))
+        # Rule 1.4: UTF-8 encoding lock
+        payload = f"{domain}|{serialized}".encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
 
 class MarketRegime(Enum):
     TREND           = "TRENDING"
@@ -34,7 +75,7 @@ class Candle:
 class CandleArray:
     """
     Vectorized container for OHLCVT+S candle data.
-    Institutional V4-ULTRA Edition: Supports index-aware zero-copy views.
+    Institutional V5-INSIGNIA Edition: Supports index-aware zero-copy views.
     """
     time: np.ndarray      # int64 timestamps
     open: np.ndarray
@@ -43,6 +84,13 @@ class CandleArray:
     close: np.ndarray
     tick_volume: np.ndarray
     spread: np.ndarray     
+    
+    def __post_init__(self):
+        """ المؤسسة (Institutional): Enforce immutable arrays. """
+        for f in fields(self):
+            attr = getattr(self, f.name)
+            if isinstance(attr, np.ndarray):
+                attr.setflags(write=False)
     
     # Internal state for simulation fidelity
     _limit: Optional[int] = field(default=None, repr=False)
@@ -292,7 +340,93 @@ class CandleArray:
         lower = sma - (rolling_std * std_dev)
         return upper, lower, sma
 
-@dataclass
+@dataclass(frozen=True, slots=True)
+class ExecutionIntent:
+    """
+    Institutional V5-INSIGNIA Execution Intent.
+    IMMUTABLE. Any mutation post-creation is an integrity violation.
+    """
+    symbol: str
+    direction: str
+    volume: float
+    stop_loss: float
+    take_profit: float
+    strategy_id: str
+    setup_timestamp: float
+    
+    @property
+    def intent_hash(self) -> str:
+        """Rule 1.1: Bit-Level Canonical Fingerprint."""
+        data = {
+            "symbol": self.symbol,
+            "direction": self.direction,
+            "volume": self.volume,
+            "sl": self.stop_loss,
+            "tp": self.take_profit,
+            "sid": self.strategy_id,
+            "t": self.setup_timestamp
+        }
+        return CanonicalHasher.get_hash("INTENT", data)
+
+@dataclass(frozen=True, slots=True)
+class MarketSnapshot:
+    """
+    Institutional V5-INSIGNIA Market Snapshot.
+    FROZEN at the moment of intent processing.
+    """
+    timestamp: float
+    bid: float
+    ask: float
+    spread: float
+    point: float
+    dfs: float  # Data Fidelity Score
+    volatility: str # HIGH/LOW/NORMAL
+    metadata: MappingProxyType = field(default_factory=lambda: MappingProxyType({}))
+
+    @property
+    def snapshot_id(self) -> str:
+        """Rule 1.1: Domain-Separated Snapshot Hash."""
+        data = {
+            "t": self.timestamp,
+            "bid": self.bid,
+            "ask": self.ask,
+            "spread": self.spread,
+            "point": self.point,
+            "dfs": self.dfs,
+            "vol": self.volatility,
+            "meta": dict(self.metadata)
+        }
+        return CanonicalHasher.get_hash("SNAPSHOT", data)
+
+@dataclass(frozen=True, slots=True)
+class ExecutionOutcome:
+    """
+    Institutional V5-INSIGNIA Execution Outcome.
+    Includes friction decomposition and audit trail.
+    """
+    ticket: int
+    fill_price: float
+    actual_slippage_pips: float
+    actual_latency_ms: float
+    alpha_price: float       # Ideal entry price (no friction)
+    microstructure_loss: float
+    execution_drag: float
+    timestamp: float
+    intent_hash: str
+    is_error: bool = False
+    error_msg: str = ""
+
+@dataclass(frozen=True)
+class FilteredSignal:
+    """
+    Immutable safe DTO returned by AI predictor shielding original evaluation logic.
+    """
+    original: 'TradeSignal'
+    approved: bool
+    confidence: float
+    comment: str = ""
+
+@dataclass(frozen=True)
 class TradeSignal:
     """
     V4 Institutional Trade Signal.
@@ -311,6 +445,7 @@ class TradeSignal:
     confluence_score: int = 0
     reasons: List[str] = field(default_factory=list)
     rr_ratio: float = 2.0
+    vol_ratio: float = 1.0
 
 class RiskConfig(BaseModel):
     model_config = ConfigDict(extra='allow')

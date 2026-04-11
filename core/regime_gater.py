@@ -11,20 +11,32 @@ class RegimeGater:
     Controls strategy activation and risk parameters based on the current Market Regime.
     """
 
-    @staticmethod
-    def is_strategy_allowed(strategy_type: str, market_type: MarketRegime) -> bool:
+    # Institutional Regime Contract Mapping (Priority 2)
+    # Strategies MUST exist in these buckets to execute under the specific regime flag
+    REGIME_CONTRACT: Dict[MarketRegime, list] = {
+        MarketRegime.TREND: ["TrendFollowing", "LiquiditySweepBreakout", "TrendFollowingStrategy", "LiquiditySweepBreakoutStrategy"],
+        MarketRegime.RANGE: ["SmartMeanReversion", "RangeBounce", "SmartMeanReversionStrategy", "RangeBounceStrategy"],
+        MarketRegime.UNCERTAIN: [] # Pure uncertainty disables entry vectors naturally
+    }
+
+    @classmethod
+    def is_strategy_allowed(cls, strategy_name: str, market_type: MarketRegime) -> bool:
         """
-        Institutional Regime Routing.
-        
-        V4-ULTRA Policy: Strategies are self-gating via their own ADX, RSI, and
-        volatility filters. The regime gater provides advisory routing only —
-        it no longer hard-blocks strategies to avoid redundant double-gating.
-        
-        Each strategy's generate_signal() is the final authority.
+        Institutional Regime Deterministic Routing.
+        Strictly enforces centroid assignments against active model names protecting against drift.
         """
-        # All strategies are allowed to evaluate — they self-reject if conditions
-        # don't match their internal institutional filters.
-        return True
+        # Some generic strategy classes pass slightly modified names, clean it natively:
+        clean_name = strategy_name.replace('_v4', '')
+        
+        allowed_list = cls.REGIME_CONTRACT.get(market_type, [])
+        
+        # If strategy isn't explicitly listed in the regime contract, it is mathematically blocked.
+        for allowed in allowed_list:
+            if allowed in clean_name:
+                return True
+                
+        # If market type isn't defined or strategy misses contract -> Hard block
+        return False
 
     @staticmethod
     def get_risk_multiplier(volatility: VolatilityStatus) -> float:

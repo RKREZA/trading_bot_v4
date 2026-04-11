@@ -9,7 +9,7 @@ from typing import Dict, Any, Optional
 logger = logging.getLogger("trading_bot.recovery.checkpoint")
 
 class InstitutionalEncoder(json.JSONEncoder):
-    """Handles V4-ULTRA native types for JSON serialization."""
+    """Handles V5-INSIGNIA native types for JSON serialization."""
     def default(self, obj):
         if isinstance(obj, datetime.datetime):
             return obj.isoformat()
@@ -23,7 +23,7 @@ class InstitutionalEncoder(json.JSONEncoder):
 
 class CheckpointManager:
     """
-    V4-ULTRA State Persistence System (Step 3).
+    V5-INSIGNIA State Persistence System (Step 3).
     Saves and restores system state to ensure 'Zero Data Loss' on VPS crashes.
     """
     

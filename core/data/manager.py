@@ -11,7 +11,7 @@ logger = logging.getLogger("trading_bot.data_manager")
 
 class DataManager:
     """
-    V4-ULTRA Production Data Orchestrator.
+    V5-INSIGNIA Production Data Orchestrator.
     Manages MT5 <-> Local Parquet Cache lifecycle.
     Ensures 'Zero Data Inconsistency' before any backtest or strategy cycle.
     """

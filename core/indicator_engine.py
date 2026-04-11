@@ -6,7 +6,7 @@ logger = logging.getLogger("trading_bot.indicators")
 
 class IndicatorEngine:
     """
-    V4-ULTRA High-Performance Indicator Engine.
+    V5-INSIGNIA High-Performance Indicator Engine.
     Pre-calculates all strategy features (RSI, ATR, BB, EMA) exactly once 
     before the backtest loop to eliminate the O(N^2) bottleneck.
     """
@@ -25,6 +25,8 @@ class IndicatorEngine:
         features = {}
         
         # 1. Trend & Averages
+        features["ema_8"] = df['close'].ewm(span=8, adjust=False).mean().values
+        features["ema_21"] = df['close'].ewm(span=21, adjust=False).mean().values
         features["ema_20"] = df['close'].ewm(span=20, adjust=False).mean().values
         features["ema_50"] = df['close'].ewm(span=50, adjust=False).mean().values
         features["ema_200"] = df['close'].ewm(span=200, adjust=False).mean().values

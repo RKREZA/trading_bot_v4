@@ -10,7 +10,7 @@ logger = logging.getLogger("trading_bot.volatility_adaptive_strategy")
 
 class VolatilityAdaptiveStrategy:
     """
-    V4-ULTRA Volatility-Adaptive Strategy Wrapper.
+    V5-INSIGNIA Volatility-Adaptive Strategy Wrapper.
     
     Dynamically selects and adjusts strategy parameters based on detected
     market volatility conditions. Wraps existing strategies with intelligent

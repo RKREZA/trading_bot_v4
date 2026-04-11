@@ -7,7 +7,7 @@ logger = logging.getLogger("trading_bot.adaptive_manager")
 
 class AdaptiveStrategyManager:
     """
-    V4-ULTRA Adaptive Strategy Selector.
+    V5-INSIGNIA Adaptive Strategy Selector.
     Dynamically selects the best strategy based on detected market regime.
     
     Strategy -> Regime Mapping:

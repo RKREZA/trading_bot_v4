@@ -32,6 +32,7 @@ class MarketData:
     bid: float
     ask: float
     spread: float
+    point: float
     session: str
     timestamp: datetime
     preprocessed: Optional[dict] = None   # Precomputed indicators per M5 bar
@@ -72,12 +73,33 @@ class BaseStrategy(ABC):
     def __init__(self, strategy_id: str, config: dict):
         self.strategy_id = strategy_id
         self.config = config
-        self.enabled = True # Default state; subclasses should override from their config block
+        
+        # [ Institutional Config Resolution ]: Resolve Strategy-Specific Block
+        strat_cfg = self.get_strat_config()
+        self.enabled = strat_cfg.get("enabled", True)
         self.last_rejection_reason = ""
         
-        # Institutional Gating Attributes
-        self.min_confidence = float(config.get("min_confidence", 0.5))
-        self.min_rr = float(config.get("min_rr", 2.0))
+        # Institutional Gating Attributes (Resolved with fallbacks)
+        self.min_confidence = float(strat_cfg.get("min_confidence", config.get("risk_governance", {}).get("min_confidence", 0.5)))
+        self.min_rr = float(strat_cfg.get("min_rr", config.get("risk_governance", {}).get("min_rr", 2.0)))
+
+    def get_strat_config(self) -> Dict[str, Any]:
+        """Ensures consistent access to the strategy-specific configuration block regardless of nesting."""
+        # Check 'strategies' key first (Standard V5 structure)
+        strategies_block = self.config.get("strategies", {})
+        if self.strategy_id in strategies_block:
+            return strategies_block[self.strategy_id]
+            
+        # Fallback 1: Direct key at root (Legacy/Diagnostic support)
+        if self.strategy_id in self.config:
+            return self.config[self.strategy_id]
+            
+        # Fallback 2: Case-insensitive search
+        for key in self.config:
+            if key.lower() == self.strategy_id.lower():
+                return self.config[key]
+                
+        return {}
 
     @abstractmethod
     def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
@@ -159,27 +181,45 @@ class BaseStrategy(ABC):
     def is_spread_safe(self, market_data: MarketData) -> bool:
         """
         Institutional Liquidity Guard.
-        Rejects entries if the spread exceeds the safety ceiling to prevent 'Death by Slippage'.
+        Rejects entries if the spread exceeds a dynamic volatility-based threshold.
+        Rule: Spread cost should be < 15% of the current M15 ATR.
         """
-        # Load from strategy-specific or global config
-        max_spread_points = self.config.get("max_spread_points", 50)
-        
-        # Point Normalization: market_data.spread is absolute price
-        # We assume 1 pip = 10 points (Institutional Standard)
-        # But here we just want points: spread / point
-        # Using a tiny epsilon to avoid div by zero
-        current_spread_points = market_data.spread / 0.0001 if market_data.spread < 1.0 else market_data.spread / 0.01
-        
-        # Actually safer way: just use a standard point mapper if unknown
-        # Better: let's use the point passed in backtest if available
-        # FOR NOW: We assume XAUUSD point is 0.01 (2 dec) or 0.001 (3 dec)
-        # We will use 0.01 as the base for 'Points' in XAUUSD
-        point_val = 0.01 
+        # 1. Point Normalization (Audit PASS #6 Fix)
+        # Use the actual symbol point value from MarketData
+        point_val = market_data.point
         current_points = market_data.spread / point_val if point_val > 0 else 0
         
-        if current_points > max_spread_points:
-            self.last_rejection_reason = f"Spread Gated: {current_points:.1f} pts > {max_spread_points}"
+        # 2. Static Safety Ceiling (Hard Max)
+        max_points = self.config.get("max_spread_points", 100)
+        if current_points > max_points:
+            self.last_rejection_reason = f"Spread Gated (Hard Cap): {current_points:.1f} pts > {max_points}"
             return False
+            
+        # 3. Dynamic Cost Guard (A+ Requirement)
+        # We ensure that the 'toll' paid to enter the trade doesn't eat too much of the target.
+        m15_atr = market_data.m15_candles.get_indicator("atr_14")
+        if len(m15_atr) > 0:
+            current_atr = m15_atr[-1]
+            if current_atr > 0:
+                cost_ratio = market_data.spread / current_atr
+                max_ratio = self.config.get("max_spread_atr_ratio", 0.15)
+                
+                if cost_ratio > max_ratio:
+                    self.last_rejection_reason = f"Spread Gated (ATR): Cost Ratio {cost_ratio:.1%} > {max_ratio:.1%}"
+                    return False
+        
+        # 4. Institutional Tick Density Guard (A+ Scale-Hardening)
+        # Prevent trading in 'thin' markets where bid-ask spreads are volatile.
+        # Threshold: Min 45 ticks per minute (675 per M15 bar) for institutional liquidity.
+        min_density = self.config.get("risk_governance", {}).get("min_tick_density", 45)
+        m15 = market_data.m15_candles
+        if len(m15) > 0:
+            last_vol = m15.v[-1]
+            ticks_per_min = last_vol / 15.0
+            if ticks_per_min < min_density:
+                self.last_rejection_reason = f"Liquidity Gated: Density {ticks_per_min:.1f} < {min_density} ticks/min"
+                return False
+                    
         return True
 
     def is_volatility_safe(self, market_data: MarketData) -> bool:

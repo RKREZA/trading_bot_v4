@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-LABEL maintainer="Trading Bot V4"
+LABEL maintainer="Trading Bot V5"
 LABEL description="Institutional Trading Bot - MT5 Integration"
 
 WORKDIR /app

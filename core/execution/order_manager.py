@@ -1,14 +1,19 @@
 import logging
 import time
 import random
-from typing import Optional, Dict, Any
-from core.common.types import TradeSignal
+import os
+import numpy as np
+from collections import deque
+from datetime import datetime, timezone
+from typing import Optional, Dict, Any, List
+from core.common.types import TradeSignal, ExecutionIntent, MarketSnapshot, ExecutionOutcome
+from core.execution.stochastic_kernel import StochasticKernel
 
 class OrderManager:
     """
-    V4-ULTRA Unified Execution Engine.
-    Handles both LIVE MT5 execution and historical SIMULATION.
-    Centralizes: Latency, Slippage, Spread Validation, and Retry Logic.
+    V5-INSIGNIA Unified Execution Engine (v6-LIVE).
+    Handles both LIVE MT5 execution and high-fidelity SIMULATION.
+    Unifies the execution pipeline using the V5 Stochastic Kernel.
     """
 
     def __init__(self, config: Dict[str, Any], connection=None):
@@ -19,18 +24,34 @@ class OrderManager:
         self.latency_ms = int(exe_cfg.get("latency_ms", 150))
         self.max_spread_pts = float(exe_cfg.get("max_spread_points", 500.0))
         
-        # Slippage Tiers (Points)
-        base_slip = float(exe_cfg.get("slippage_points", 1.0))
-        self.entry_slip = float(exe_cfg.get("entry_slippage_points", base_slip))
-        self.tp_slip = float(exe_cfg.get("tp_exit_slippage_points", base_slip * 0.5))
-        self.sl_slip = float(exe_cfg.get("sl_exit_slippage_points", base_slip * 1.5))
-        
         # Deterministic RNG for reproducibility (Institutional requirement)
         self.deterministic = config.get("backtest", {}).get("deterministic", False)
         self.seed = config.get("backtest", {}).get("random_seed", 42)
         self._rng = random.Random(self.seed if self.deterministic else None)
         
         self.logger = logging.getLogger("trading_bot.execution")
+        
+        # Rule 3.1: ShadowFill Metrics & Audit
+        self.audit_log = "logs/shadow_fill_audit.csv"
+        self._ensure_audit_log()
+        self.slippage_diffs = []
+        self.latency_diffs = []
+        self.recent_spreads = deque(maxlen=100) # For Z-Score
+        self.degradation_factor = 1.0 # 1.0 = Normal, 0.5 = Reduced
+        
+        # Rule 1.1: Unified Execution Kernel
+        self.kernel = StochasticKernel(global_seed=self.seed)
+
+    def _ensure_audit_log(self):
+        if not os.path.exists("logs"): os.makedirs("logs")
+        if not os.path.exists(self.audit_log):
+            with open(self.audit_log, "w") as f:
+                # Expanded Forensic Header (Phase 1 Validation)
+                f.write("timestamp,symbol,strategy_id,intent_hash,snapshot_id,snapshot_hash,bid,ask,spread,spread_zscore,regime,sim_fill,actual_fill,signed_drift,absolute_drift,sim_latency,actual_latency,outcome\n")
+
+    def get_degraded_volume(self, volume: float) -> float:
+        """Rule 3.2: Auto-Degradation Logic."""
+        return volume * self.degradation_factor
 
     def execute_signal(self, 
                        signal: TradeSignal, 
@@ -38,11 +59,11 @@ class OrderManager:
                        price_data: Dict[str, float],
                        is_news_blocked: bool = False,
                        magic: int = None,
-                       comment: str = "V4-ULTRA",
+                       comment: str = "V5-INSIGNIA",
                        timestamp: float = None) -> Optional[Dict[str, Any]]:
         """
         Processes a TradeSignal with institutional realism (Spread, News, Latency).
-        Routes to Live MT5 if connection is present, otherwise Simulates.
+        Routes to Live MT5 if connection is present, otherwise Simulates via Kernel.
         """
         if signal.direction == "NONE":
             return None
@@ -54,67 +75,162 @@ class OrderManager:
 
         # 2. Institutional Live Path
         if self.connection and not self.config.get("backtest", {}).get("enabled", False):
-            # Live execution via MT5Connection
-            return self.connection.place_order(
+            # --- PHASE 1 HARD BLOCK (NON-BYPASSABLE) ---
+            lot_to_execute = self.get_degraded_volume(getattr(signal, 'volume', 0.01))
+            if lot_to_execute > 0.05:
+                import sys
+                self.logger.critical(f"PHASE 1 SAFETY VIOLATION: Intent {lot_to_execute} > 0.05! TERMINATING PROCESS.")
+                sys.exit("PHASE 1 LOT VIOLATION")
+
+            # 2.0: Generate Parallel Shadow (Simulated) Fill for Audit
+            intent = ExecutionIntent(
                 symbol=symbol,
-                signal=signal,
-                lot_size=getattr(signal, 'volume', 0.01),
-                magic=magic,
-                comment=comment
+                direction=signal.direction,
+                volume=getattr(signal, 'volume', 0.01),
+                stop_loss=signal.stop_loss,
+                take_profit=signal.take_profit,
+                strategy_id=getattr(signal, 'strategy_id', "V6_LIVE"),
+                setup_timestamp=time.time()
             )
+            snapshot = MarketSnapshot(
+                timestamp=time.time(),
+                bid=price_data.get('bid'),
+                ask=price_data.get('ask'),
+                spread=price_data.get('ask') - price_data.get('bid'),
+                point=price_data.get('point', 0.00001),
+                dfs=price_data.get('dfs', 1.0),
+                volatility=price_data.get('volatility', 'NORMAL')
+            )
+            sim_outcome = self.kernel.execute(intent, snapshot)
 
-        # 3. Simulation Path (Audit Bug #7 Fix)
-        bid = price_data.get('bid')
-        ask = price_data.get('ask')
-        point = price_data.get('point', 0.00001)
-        
-        if not bid or not ask:
-            self.logger.warning(f"Execution failed: Missing price data for {symbol}")
+            # Live execution via MT5Connection with Institutional Retry Queue
+            start_time = time.time()
+            max_retries = 3
+            backoff = 0.5
+            
+            result = None
+            for attempt in range(max_retries):
+                result = self.connection.place_order(
+                    symbol=symbol,
+                    signal=signal,
+                    lot_size=self.get_degraded_volume(getattr(signal, 'volume', 0.01)),
+                    magic=magic,
+                    comment=comment
+                )
+                
+                if result and not result.get("is_error", False):
+                    break
+                    
+                err_msg = result.get("error", "Unknown MT5 Rejection") if result else "None/Timeout"
+                self.logger.warning(f"Execute attempt {attempt+1}/{max_retries} failed on {symbol}: {err_msg}")
+                if attempt < max_retries - 1:
+                    time.sleep(backoff)
+                    backoff *= 2.0
+            
+            # Rule 3: Forensic Reconciliation & Audit (Phase 1 Hardening)
+            if result and not result.get("is_error", False):
+                latency = (time.time() - start_time) * 1000.0
+                actual_fill = result.get("price")
+                point = price_data.get('point', 0.00001)
+                
+                # 3.1: Drift Calculations (Signed, Absolute, Tail)
+                signed_drift = (actual_fill - sim_outcome.fill_price) / point if point > 0 else 0
+                absolute_drift = abs(signed_drift)
+                latency_diff = abs(latency - sim_outcome.actual_latency_ms)
+                
+                # 3.2: Spread Z-Score
+                current_spread = snapshot.spread / point
+                self.recent_spreads.append(current_spread)
+                mean_s = np.mean(self.recent_spreads)
+                std_s = np.std(self.recent_spreads) if len(self.recent_spreads) > 1 else 1.0
+                spread_z = (current_spread - mean_s) / (std_s if std_s > 0 else 1.0)
+                
+                # 3.3: Execution Regime Tagging
+                dt_now = datetime.now(timezone.utc)
+                is_rollover = 21 <= dt_now.hour <= 22 # 21:55-22:05 typical
+                regime = "ROLLOVER" if is_rollover else f"{snapshot.volatility}_VOL"
+                
+                self.slippage_diffs.append(absolute_drift)
+                if len(self.slippage_diffs) > 50: self.slippage_diffs.pop(0)
+                
+                # Rule 3.2: Auto-Degradation Trigger (Threshold: 0.2 pip drift on P95)
+                p95_drift = np.percentile(self.slippage_diffs, 95) if self.slippage_diffs else 0
+                if p95_drift > 0.2:
+                    self.degradation_factor = 0.5
+                    self.logger.warning(f"[SHADOW] High Slippage Drift Detected ({p95_drift:.2f} pips). AUTO-DEGRADING.")
+                else:
+                    self.degradation_factor = 1.0
+
+                # 3.4: Log Forensic Data (Phase 1 Mandatory Fields)
+                with open(self.audit_log, "a") as f:
+                    f.write(f"{time.time()},{symbol},{intent.strategy_id},{intent.intent_hash},"
+                            f"{snapshot.snapshot_id},{snapshot.snapshot_id},{snapshot.bid},{snapshot.ask},"
+                            f"{current_spread:.2f},{spread_z:.2f},{regime},{sim_outcome.fill_price},"
+                            f"{actual_fill},{signed_drift:.4f},{absolute_drift:.4f},"
+                            f"{sim_outcome.actual_latency_ms:.1f},{latency:.1f},SUCCESS\n")
+                
+                result["outcome"] = sim_outcome # Attach for trace
+                return result
+                    
             return None
 
-        # Variable Spread Simulation
-        base_spread_pts = (ask - bid) / point
-        effective_spread = self._get_effective_spread(base_spread_pts)
+        # 3. Unified Simulation Path (Rule 1.1: Hardware Parity)
+        # We prepare the SNAPSHOT and INTENT to pass to the Grade-A+ Kernel
+        intent = ExecutionIntent(
+            symbol=symbol,
+            direction=signal.direction,
+            volume=getattr(signal, 'volume', 0.01),
+            stop_loss=signal.stop_loss,
+            take_profit=signal.take_profit,
+            strategy_id=getattr(signal, 'strategy_id', "V6_LIVE"),
+            setup_timestamp=timestamp or time.time()
+        )
         
-        if effective_spread > self.max_spread_pts:
-            self.logger.warning(f"Execution Rejected: Spread too high ({effective_spread:.1f} > {self.max_spread_pts})")
-            return None
-
-        # Simulate Latency
-        if not self.deterministic:
-            time.sleep(self._rng.uniform(0.5, 1.5) * (self.latency_ms / 1000.0))
-
-        # Simulate Entry Slippage
-        slip_points = self._sample_slippage(point, tier="entry")
-        fill_price = ask + slip_points if signal.direction == "BUY" else bid - slip_points
+        # Prepare Snapshot (Simulated)
+        snapshot = MarketSnapshot(
+            timestamp=timestamp or time.time(),
+            bid=price_data.get('bid'),
+            ask=price_data.get('ask'),
+            spread=price_data.get('ask') - price_data.get('bid'),
+            point=price_data.get('point', 0.00001),
+            dfs=price_data.get('dfs', 1.0),
+            volatility=price_data.get('volatility', 'NORMAL'),
+            metadata=price_data.get('metadata', {})
+        )
         
-        actual_slippage_pips = slip_points / point if point > 0 else 0
+        # Kernel Execution (Standardized)
+        outcome = self.kernel.execute(intent, snapshot)
         
         return {
-            "ticket": self._rng.randint(1000000, 9999999),
+            "ticket": random.randint(1000000, 9999999), 
             "symbol": symbol,
             "direction": signal.direction,
-            "fill_price": fill_price,
-            "actual_slippage_pips": actual_slippage_pips,
-            "sl": signal.stop_loss,
-            "tp": signal.take_profit,
-            "lots": getattr(signal, 'volume', 0.0),
-            "timestamp": timestamp if timestamp is not None else time.time(),
+            "fill_price": outcome.fill_price,
+            "actual_slippage_pips": outcome.actual_slippage_pips,
+            "sl": outcome.stop_loss,
+            "tp": outcome.take_profit,
+            "lots": outcome.volume,
+            "timestamp": outcome.execution_timestamp,
+            "execution_drag": outcome.execution_drag,
+            "outcome": outcome, # Preserve for Audit
             "is_error": False
         }
 
     def simulate_exit(self, ticket: int, exit_type: str, price: float, point: float, direction: str = "BUY", exit_time: float = None) -> Dict[str, Any]:
-        """Simulates an exit event (SL/TP) with appropriate slippage."""
-        slip_points = self._sample_slippage(point, tier=exit_type)
+        """
+        Simulates an exit event (SL/TP) with institutional realism (Pessimistic).
+        Uses a fixed slippage model aligned with kernel expectations.
+        """
+        # Exits use the same stochastic logic as entry slippage
+        # SL is a market order (sampled slippage), TP is a limit order (minimal/zero)
+        slip_pct = 1.0 if exit_type == "sl" else 0.1
+        slip_pts = self._rng.uniform(0, 2.0) * point * slip_pct
         
-        # TP usually gets better/neutral execution, SL usually gets worse (negative) slippage
-        if exit_type == "tp":
-            # Better price: Higher for BUY exit (selling), Lower for SELL exit (buying)
-            exit_price = price + slip_points if direction == "BUY" else price - slip_points
-        else:
-            # Worse price: Lower for BUY exit, Higher for SELL exit
-            exit_price = price - slip_points if direction == "BUY" else price + slip_points
-            
+        if direction == "BUY": # Exit is a SELL
+             exit_price = price - slip_pts
+        else: # Exit is a BUY
+             exit_price = price + slip_pts
+             
         return {
             "ticket": ticket,
             "exit_price": exit_price,
@@ -122,39 +238,12 @@ class OrderManager:
             "exit_time": exit_time if exit_time is not None else time.time()
         }
 
-    def _get_effective_spread(self, base_spread: float) -> float:
-        """
-        Institutional Realism: Stochastic Spread Expansion.
-        Simulates the widening of spreads during volatility.
-        """
-        # Volatility Multiplier: 1.0 to 2.5x base spread
-        vol_mult = self._rng.uniform(1.0, 2.5)
-        # Apply a 'Low Liquidity' boost occasionally
-        if self._rng.random() < 0.1: vol_mult *= 1.5
-        
-        return base_spread * vol_mult
-
-    def _sample_slippage(self, point: float, tier: str = "entry") -> float:
-        """Samples slippage based on configured tiers."""
-        pips = {"entry": self.entry_slip, "tp": self.tp_slip, "sl": self.sl_slip}.get(tier, self.entry_slip)
-        # Random variance 0 to 100% of the tier limit
-        return self._rng.uniform(0.0, pips) * point
-
 if __name__ == "__main__":
-    # Standalone Test logic
+    # Institutional Standalone Test
     logging.basicConfig(level=logging.INFO)
     test_config = {
-        "execution": {"latency_ms": 0, "slippage_pips": 0.2},
+        "execution": {"latency_ms": 100, "max_spread_points": 500},
         "backtest": {"deterministic": True, "random_seed": 42}
     }
-    
     manager = OrderManager(test_config)
-    signal = TradeSignal(direction="BUY", stop_loss=1.0900, take_profit=1.1100)
-    prices = {"bid": 1.1000, "ask": 1.1001, "point": 0.0001}
-    
-    print("\n--- OrderManager Standalone Test ---")
-    order = manager.execute_signal(signal, "XAUUSDm", prices)
-    print(f"Executed Order: {order}")
-    
-    exit_res = manager.simulate_exit(order['ticket'], "sl", 1.0900, 0.0001, direction="BUY")
-    print(f"Simulated SL Exit: {exit_res}")
+    print("V6-LIVE OrderManager initialized successfully.")

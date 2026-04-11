@@ -1,94 +1,157 @@
 import logging
-from typing import Dict, List, Optional
+import numpy as np
+from typing import Dict, List, Optional, Tuple, Any
 from core.common.types import TradeSignal
 
 logger = logging.getLogger("trading_bot.portfolio")
 
 class PortfolioManager:
     """
-    Institutional Portfolio Manager.
-    Allocates capital across strategies and resolves signal conflicts.
+    V6-LIVE: Institutional Dynamic Portfolio Manager.
+    Allocates capital using a Performance-Responsive Framework.
+    Features: Equity-Growth Scaling, Drawdown De-scaling, and Adaptive Ranking.
     """
 
     def __init__(self, config: dict):
         self.config = config
         self.initial_balance = float(config.get("initial_balance", 1000.0))
         
-        # Institutional Allocation (Step 9)
-        self.allocations = config.get("portfolio_allocations", {
+        # 1. Base Institutional Allocation Weights
+        self.base_allocations = config.get("portfolio_allocations", {
             "TrendFollowing": 0.40,
             "MeanReversion": 0.30,
             "Breakout": 0.30,
             "LiquiditySession": 0.0
         })
         
-        # Verify Checksum
-        total = sum(self.allocations.values())
-        if total > 1.01 or total < 0.99:
-            logger.warning(f"Portfolio allocation checksum error: {total}. Normalizing...")
-            self.allocations = {k: v/total for k, v in self.allocations.items()}
-            
-    def resolve_signals(self, signals: Dict[str, TradeSignal]) -> List[tuple[str, TradeSignal]]:
+        # 2. Performance Tracking (Institutional State)
+        self.strategy_performance = {} # {sid: {"peak": float, "current_dd": float}}
+        self.scaling_enabled = config.get("portfolio_scaling", {}).get("enabled", True)
+        
+        # Rule 3.1: Stability History & Guards
+        self.allocation_history = {} # {sid: last_weight}
+        self.portfolio_peak = self.initial_balance
+        
+        self._normalize_base_weights()
+
+    def _normalize_base_weights(self):
+        total = sum(self.base_allocations.values())
+        if total > 0.001:
+            self.base_allocations = {k: v/total for k, v in self.base_allocations.items()}
+
+    def resolve_signals(self, signals: Dict[str, TradeSignal], state: Dict[str, Any] = None) -> List[tuple[str, TradeSignal]]:
         """
-        Institutional Parallel Signal Audit (Step 9).
-        Allows multiple non-conflicting strategies to execute in the same cycle.
-        Now enforces allocation filters and confidence prioritizing.
+        Institutional Dynamic Signal Auction.
+        1. Filters by direction and allocation.
+        2. Applies Dynamic Scaling (Drawdown/Performance).
+        3. Ranks by Performance Efficiency (PnL/Risk).
         """
-        # 1. Filter by Direction
         active_signals = {sid: sig for sid, sig in signals.items() if sig.direction != "NONE"}
         if not active_signals:
             return []
 
-        # 2. Institutional Allocation Audit (Audit Bug #4 Fix)
-        # Filter out strategies with 0% allocation
-        eligible_signals = {}
+        # 1. Filter out Zero-Allocation Strategies
+        eligible = {}
         for sid, sig in active_signals.items():
-            # Calculate mock balance to check if strategy is enabled/allocated
-            allocation = self.get_strategy_allocation(sid)
-            if allocation > 0:
-                eligible_signals[sid] = sig
+            base_weight = self.get_strategy_allocation(sid, dynamic=False)
+            if base_weight > 0:
+                eligible[sid] = sig
             else:
                 logger.info("Signal from %s REJECTED: 0.0 core allocation.", sid)
 
-        if not eligible_signals:
+        # 2. Institutional Conflict Resolution (No Hedging)
+        # Prevent opposing trades on the same symbol to avoid commission traps
+        buy_sigs = {sid: sig for sid, sig in eligible.items() if sig.direction == "BUY"}
+        sell_sigs = {sid: sig for sid, sig in eligible.items() if sig.direction == "SELL"}
+        if buy_sigs and sell_sigs:
+            logger.warning("Signal Conflict! Opposing trades detected. Canceling all to prevent hedging traps.")
             return []
 
-        # 3. Institutional Conflict Resolution (Rule: No Hegded positions on same symbol)
-        buy_signals = {sid: sig for sid, sig in eligible_signals.items() if sig.direction == "BUY"}
-        sell_signals = {sid: sig for sid, sig in eligible_signals.items() if sig.direction == "SELL"}
-
-        # If conflicting signals exist on the same symbol, cancel both to prevent hedging traps
-        if buy_signals and sell_signals:
-            logger.warning("Signal Conflict detected! Canceling opposing trades on same symbol to prevent hedging.")
-            return []
-
-        # 4. Final Approval & Ranking
+        # 3. Dynamic Performance Ranking
+        # We sort by (Confidence * Dynamic_Weight) to give better allocation to performing strats
         approved = []
-        for sid, sig in eligible_signals.items():
-            approved.append((sid, sig))
+        for sid, sig in eligible.items():
+            dynamic_weight = self.get_strategy_allocation(sid, dynamic=True)
+            # Ranking Score = Confidence (Strategy) * Efficiency (Portfolio)
+            score = sig.confidence * (dynamic_weight / self.base_allocations.get(sid, 0.1))
+            approved.append((sid, sig, score))
             
-        # Optional: Sort by confidence for sequential execution pulse
-        approved.sort(key=lambda x: x[1].confidence, reverse=True)
-        return approved
+        approved.sort(key=lambda x: x[2], reverse=True)
+        return [(sid, sig) for sid, sig, score in approved]
 
-    def get_strategy_allocation(self, strategy_id: str) -> float:
-        """Looks up raw allocation weight (0.0 to 1.0)."""
-        allocation = self.allocations.get(strategy_id)
-        if allocation is not None:
-            return allocation
+    def get_strategy_allocation(self, strategy_id: str, dynamic: bool = True, current_portfolio_equity: float = 0.0) -> float:
+        """
+        Returns the final allocation weight for a strategy.
+        If dynamic=True, applies Drawdown De-scaling and Performance Adjustment.
+        Includes EMA Damping, Peak Lock, and Allocation Floors (v6-LOCKED).
+        """
+        base_weight = self.base_allocations.get(strategy_id, 0.0)
+        if base_weight == 0:
+            # [ Institutional Resiliency ]: Enhanced Fuzzy Naming Resolution
+            # Handles: TrendFollowing vs trend_following vs TrendFollowing_v4
+            normalized = strategy_id.replace("_v4", "").replace("_v5", "").replace("_", "").lower()
+            for key, weight in self.base_allocations.items():
+                k_norm = key.replace("_", "").lower()
+                if k_norm == normalized or normalized in k_norm or k_norm in normalized:
+                    base_weight = weight
+                    logger.info(f"[PORTFOLIO] Resilient Match: '{strategy_id}' resolved to '{key}' ({base_weight:.2%})")
+                    break
         
-        normalized = strategy_id.replace("_v4", "").replace("_", "").lower()
-        for key in self.allocations:
-            if key.lower().replace("_", "") == normalized:
-                return self.allocations[key]
-        return 0.0 # Default to 0 if not found in config
+        if not dynamic or not self.scaling_enabled:
+            return base_weight
 
+        # --- Rule 3.3: Institutional Drawdown De-scaling ---
+        perf = self.strategy_performance.get(strategy_id, {"peak": 0.0, "current_dd": 0.0})
+        dd = perf.get("current_dd", 0.0)
+        
+        # Penalty Function: 
+        # If DD < 3%, No penalty.
+        # If DD > 10%, Weight -> 0.
+        penalty = 1.0
+        if dd > 3.0:
+            penalty = max(0.0, 1.0 - (dd - 3.0) / 7.0)
+            
+        # --- Rule 3.4/6.2: Equity-Growth Scaling (PEAK LOCK) ---
+        # Only scale up if we are at NEW PORTFOLIO PEAK
+        boost = 1.0
+        if current_portfolio_equity > self.portfolio_peak:
+            self.portfolio_peak = current_portfolio_equity
+            if dd < 0.5: boost = 1.1 
+        
+        # Calculate raw dynamic target
+        raw_target = base_weight * penalty * boost
+        
+        # --- Rule 6.1: Floor Constraint (0.2x Base) ---
+        # Prevents strategy starvation during minor drawdown
+        floor = base_weight * 0.2
+        target = max(floor, raw_target) if base_weight > 0 else 0.0
+        
+        # --- Rule 3.1: EMA Damping (0.8 Prev / 0.2 New) ---
+        # Prevents violent allocation swings
+        prev = self.allocation_history.get(strategy_id, target)
+        # Cap Delta Change (Rule 3.2: 15% per step)
+        delta_max = base_weight * 0.15
+        diff = target - prev
+        if abs(diff) > delta_max:
+            target = prev + (np.sign(diff) * delta_max)
+            
+        final_weight = (0.8 * prev) + (0.2 * target)
+        self.allocation_history[strategy_id] = final_weight
+        
+        return final_weight
+
+    def update_performance_state(self, strategy_id: str, current_equity: float, total_history: List[float]):
+        """Updates internal strategy health state used for next-cycle scaling."""
+        if strategy_id not in self.strategy_performance:
+            self.strategy_performance[strategy_id] = {"peak": current_equity, "current_dd": 0.0}
+            
+        perf = self.strategy_performance[strategy_id]
+        if current_equity > perf["peak"]:
+            perf["peak"] = current_equity
+            
+        perf["current_dd"] = ((perf["peak"] - current_equity) / perf["peak"] * 100) if perf["peak"] > 0 else 0.0
+        
     def get_strategy_balance(self, total_balance: float, strategy_id: str) -> float:
-        """Calculates allocated balance for a strategy."""
-        allocation = self.get_strategy_allocation(strategy_id)
-        if allocation > 0:
-            return total_balance * allocation
-        
-        # Fallback: equal share if somehow matched but not in dict (Should not happen with get_strategy_allocation)
-        logger.warning(f"No allocation found for '{strategy_id}'. Using minimum share.")
-        return total_balance * (1.0 / (len(self.allocations) or 4))
+        """Calculates final USD-equivalent balance for sizing calculation."""
+        weight = self.get_strategy_allocation(strategy_id, dynamic=True)
+        return total_balance * weight
