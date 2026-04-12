@@ -376,6 +376,9 @@ class LiveOrchestrator:
                     d1_data = state.d1
 
                     # 2. Package Market State (Satisfy V4 MarketData contract)
+                    sym_info = mt5.symbol_info(self.symbol)
+                    sym_point = sym_info.point if sym_info else 0.00001
+                    
                     md = MarketData(
                         symbol=self.symbol,
                         htf_candles=h1_data,
@@ -386,6 +389,7 @@ class LiveOrchestrator:
                         bid=float(tick.bid),
                         ask=float(tick.ask),
                         spread=float(tick.ask - tick.bid),
+                        point=sym_point,
                         session=SessionDetector.get_session(dt_server, self.connection.server_utc_offset),
                         timestamp=dt_server
                     )

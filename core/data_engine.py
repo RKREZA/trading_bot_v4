@@ -76,15 +76,22 @@ class DataEngine:
 
     def _update_symbol_state(self, symbol: str):
         """Fetches and processes all timeframes for a symbol."""
+        from datetime import timedelta, datetime, timezone
         try:
             # 1. Fetch Multi-Timeframe Candles (Non-blocking because of lock sharing)
             # Use a slightly larger lookback than the strategy requirement to ensure indicators are valid
-            m5_candles = self.data_manager.prepare_data(symbol, "M5", bars=300)
-            m15_candles = self.data_manager.prepare_data(symbol, "M15", bars=300)
-            h1_candles = self.data_manager.prepare_data(symbol, "H1", bars=300)
-            d1_candles = self.data_manager.prepare_data(symbol, "D1", bars=100)
+            # We multiply required bars by a generous safety factor (days) to account for weekends/holidays.
+            # M5 (300 bars = ~1.04 trading days) -> 5 days
+            # M15 (300 bars = ~3.12 trading days) -> 10 days
+            # H1 (300 bars = ~12.5 trading days) -> 20 days
+            # D1 (100 bars = 100 trading days) -> 150 days
+            now = datetime.now(timezone.utc)
+            m5_candles = self.data_manager.prepare_data(symbol, "M5", start_date=now - timedelta(days=5))
+            m15_candles = self.data_manager.prepare_data(symbol, "M15", start_date=now - timedelta(days=10))
+            h1_candles = self.data_manager.prepare_data(symbol, "H1", start_date=now - timedelta(days=20))
+            d1_candles = self.data_manager.prepare_data(symbol, "D1", start_date=now - timedelta(days=150))
             
-            if m5_candles.empty:
+            if len(m5_candles) == 0:
                 return
 
             # 2. Parallel Indicator Calculation (CPU Heavy)

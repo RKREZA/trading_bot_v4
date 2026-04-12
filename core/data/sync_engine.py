@@ -48,10 +48,9 @@ class SyncEngine:
                 last_time = chunk.time[-1]
                 current_start = datetime.datetime.fromtimestamp(last_time + 1, datetime.timezone.utc)
             else:
-                # If we get no data, we might be hitting a weekend or a gap
-                # Try moving forward by one interval (M1/M5 based)
-                tf_secs = {"M1": 60, "M5": 300, "M15": 900, "H1": 3600, "D1": 86400}.get(timeframe, 300)
-                current_start += datetime.timedelta(seconds=tf_secs)
+                # If we get no data in this chunk, the entire range had no candles.
+                # Advance by the full chunk delta to prevent infinite looping.
+                current_start = current_end
             
             # Check if we're making progress
             if current_start >= now:

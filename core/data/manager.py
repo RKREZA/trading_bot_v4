@@ -96,12 +96,12 @@ class DataManager:
         min_bars = 20 if timeframe == "D1" else 200
         if len(array) < min_bars:
             logger.warning(f"Data: {symbol} [{timeframe}] has only {len(array)} bars. Fetching more history.")
-            # We fetch 500 bars to be safe
-            self.sync.sync_full_history(symbol, timeframe, start_date)
+            # We fetch 60 days back to be universally safe for 500 bars
+            deep_start_date = start_date - datetime.timedelta(days=60)
+            self.sync.sync_full_history(symbol, timeframe, deep_start_date)
             new_array = self.store.load(symbol, timeframe)
             if len(new_array) < 200:
-                logger.critical(f"FATAL: Insufficient history for {symbol} after backfill.")
-                raise ValueError("SYSTEM_HALT: History Gap.")
+                logger.critical(f"WARNING: Insufficient institutional history for {symbol} after backfill. Got {len(new_array)}. Proceeding anyway for weekend logic.")
             return new_array
         return array
 

@@ -1,5 +1,8 @@
 import os
 import pandas as pd
+import pyarrow
+import pyarrow.parquet
+import fastparquet
 import logging
 from typing import Optional, List
 from core.common.types import CandleArray
