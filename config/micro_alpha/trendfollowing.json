@@ -1,0 +1,7 @@
+{
+  "adx_threshold": 15,
+  "tp_atr": 11.5,
+  "sl_atr": 3.6,
+  "min_trend_maturity": 1,
+  "min_confidence": 0.5
+}

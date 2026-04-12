@@ -5,6 +5,7 @@ import datetime
 import numpy as np
 import time
 from typing import Dict, Any, Optional
+import dataclasses
 
 logger = logging.getLogger("trading_bot.recovery.checkpoint")
 
@@ -19,6 +20,10 @@ class InstitutionalEncoder(json.JSONEncoder):
             return float(obj)
         if isinstance(obj, np.ndarray):
             return obj.tolist()
+        if dataclasses.is_dataclass(obj):
+            return dataclasses.asdict(obj)
+        if hasattr(obj, "__dict__"):
+            return obj.__dict__
         return super().default(obj)
 
 class CheckpointManager:

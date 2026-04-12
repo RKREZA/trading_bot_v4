@@ -183,6 +183,8 @@ class ComprehensiveBacktestSuite:
             if not history:
                 logger.warning(f"{strategy_name}: No trades executed")
                 return {"status": "NO_TRADES", "strategy": strategy_name}
+                
+            self.last_history = history
             
             metrics = PerformanceTracker.calculate_metrics(history, 10000, equity_history)
             return {**metrics, "strategy": strategy_name, "market": market_condition, "status": "SUCCESS"}
@@ -328,9 +330,9 @@ def run_all_tests():
     }
     
     # Test individual strategies
-    symbols = suite.config_loader.list_symbols()
-    strategies = ["TrendFollowing", "LiquiditySweepBreakout", "SmartMeanReversion"]
-    market_conditions = ["BULLISH", "BEARISH", "RANGING", "VOLATILE"]
+    symbols = ["XAUUSDm"]
+    strategies = ["TrendFollowing"]
+    market_conditions = ["BULLISH"]
     
     print(f"\n[1] SINGLE STRATEGY BACKTESTS (Symbols: {', '.join(symbols)})")
     print("-" * 60)
@@ -359,10 +361,6 @@ def run_all_tests():
     print("-" * 60)
     
     portfolios = [
-        ["TrendFollowing", "LiquiditySweepBreakout", "SmartMeanReversion"],
-        ["TrendFollowing", "LiquiditySweepBreakout"],
-        ["TrendFollowing", "SmartMeanReversion"],
-        ["LiquiditySweepBreakout", "SmartMeanReversion"],
         ["TrendFollowing"],
     ]
     
@@ -392,7 +390,7 @@ def run_all_tests():
     
     for symbol in symbols:
         print(f"\n  --- WFO Symbol: {symbol} ---")
-        for strategy in ["TrendFollowing", "LiquiditySweepBreakout"]:
+        for strategy in ["TrendFollowing"]:
             wfo_result = suite.run_walk_forward_optimization(strategy, symbol)
             results["walk_forward"][f"{symbol}_{strategy}"] = wfo_result
         

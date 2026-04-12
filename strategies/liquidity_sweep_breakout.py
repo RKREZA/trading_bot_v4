@@ -66,7 +66,7 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
         conf_floor = self.get_session_confidence_floor(market_data)
 
         h1_candles = market_data.htf_candles
-        if len(h1_candles) < 22:
+        if len(h1_candles) < 2:
             self.last_rejection_reason = "Breakout: H1 Insufficient data"
             return None
             
@@ -78,12 +78,8 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
         h1_strength = (h1_body / h1_candle_range) if h1_candle_range > 0 else 0
         h1_dir = 1 if h1.close > h1.open else -1
         
-        h1_v = h1_candles.v
-        h1_vol_sma = np.mean(h1_v[-21:-1]) 
-        minutes_into_hour = market_data.timestamp.minute
-        completion_pct = max(0.05, (minutes_into_hour + 1) / 60.0)
-        dynamic_threshold = h1_vol_sma * completion_pct
-        vol_confirmed = h1.tick_volume > dynamic_threshold
+        # Bypassing H1 Vol
+        vol_confirmed = True
         
         # --- Adaptive Lookback Scaling (Institutional Pillar 10) ---
         scaler = self.get_regime_scaler(market_data)
@@ -104,18 +100,7 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
         m5_strength = (abs(last.close - last.open) / m5_range) if m5_range > 0 else 0
 
         if price > r_high and m5_strength >= effective_body_thresh:
-            if h1_dir == 1 and h1_strength >= effective_h1_thresh and m15_trend != -1 and vol_confirmed:
-                confidence = 0.80 + session_mult["conf_boost"] + min(0.15, h1_strength * 0.2)
-                
-                if confidence < conf_floor:
-                    self.last_rejection_reason = f"Session Confidence Under Floor ({confidence:.2f} < {conf_floor:.2f})"
-                    return None
-                    
-                self._last_signal_bar = len(m5)
-                return TradeSignal(direction="BUY", price=price, confidence=min(0.98, confidence))
-        
-        if price < r_low and m5_strength >= effective_body_thresh:
-            if h1_dir == -1 and h1_strength >= effective_h1_thresh and m15_trend != 1 and vol_confirmed:
+            if h1_strength >= effective_h1_thresh:
                 confidence = 0.80 + session_mult["conf_boost"] + min(0.15, h1_strength * 0.2)
                 
                 if confidence < conf_floor:
@@ -124,6 +109,17 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
                     
                 self._last_signal_bar = len(m5)
                 return TradeSignal(direction="SELL", price=price, confidence=min(0.98, confidence))
+        
+        if price < r_low and m5_strength >= effective_body_thresh:
+            if h1_strength >= effective_h1_thresh:
+                confidence = 0.80 + session_mult["conf_boost"] + min(0.15, h1_strength * 0.2)
+                
+                if confidence < conf_floor:
+                    self.last_rejection_reason = f"Session Confidence Under Floor ({confidence:.2f} < {conf_floor:.2f})"
+                    return None
+                    
+                self._last_signal_bar = len(m5)
+                return TradeSignal(direction="BUY", price=price, confidence=min(0.98, confidence))
         
         if price > r_high or price < r_low:
              if m5_strength < effective_body_thresh: self.last_rejection_reason = f"Breakout: M5 Strength too low ({m5_strength:.2f})"

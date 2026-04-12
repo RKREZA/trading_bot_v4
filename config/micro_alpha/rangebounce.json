@@ -1,0 +1,9 @@
+{
+  "bb_period": 40,
+  "bb_std": 2.4,
+  "rsi_oversold": 21,
+  "rsi_overbought": 74,
+  "sl_atr": 3.5,
+  "tp_atr": 7.0,
+  "min_confidence": 0.8500000000000001
+}

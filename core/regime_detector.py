@@ -42,12 +42,10 @@ class RegimeDetector:
         vol_ratio = atr / avg_atr if avg_atr > 0 else 1.0
         
         # Metric 1: Directional Type (ADX)
-        market_type = MarketRegime.UNCERTAIN
-        conf_type = 0.5
-        if adx >= 25:
+        if adx >= 20: 
             market_type = MarketRegime.TREND
-            conf_type = min(1.0, (adx - 20) / 30)
-        elif adx <= 20:
+            conf_type = min(1.0, (adx - 15) / 30)
+        else:
             market_type = MarketRegime.RANGE
             conf_type = min(1.0, (25 - adx) / 10)
         

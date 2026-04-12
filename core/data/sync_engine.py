@@ -173,7 +173,9 @@ class SyncEngine:
         logger.info(f"Auto-Repair: Fixing {len(gap_windows)} gaps for {symbol} [{timeframe}]...")
         
         repaired_segments = []
-        for start_ts, end_ts in gap_windows:
+        # Phase 5 Optimization: Progress-aware repair loop
+        from tqdm import tqdm
+        for start_ts, end_ts in tqdm(gap_windows, desc=f"Repairing {symbol} [{timeframe}]"):
             # Institutional Buffer: Widen by 2s to ensure MT5 inclusive capture
             dt_start = datetime.datetime.fromtimestamp(start_ts - 2, datetime.timezone.utc)
             dt_end = datetime.datetime.fromtimestamp(end_ts + 2, datetime.timezone.utc)

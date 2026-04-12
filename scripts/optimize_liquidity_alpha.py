@@ -5,6 +5,7 @@ import sys
 import logging
 import pandas as pd
 import numpy as np
+import copy
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any
 
@@ -17,65 +18,53 @@ from comprehensive_backtest import ComprehensiveBacktestSuite
 from strategies import create_strategy, STRATEGY_REGISTRY
 from core.performance_tracker import PerformanceTracker
 from core.indicator_engine import IndicatorEngine
-from core.connection import MT5Connection
-from backtesting.backtester import PortfolioBacktester
-from strategies import create_strategy, STRATEGY_REGISTRY
-from core.performance_tracker import PerformanceTracker
-from core.indicator_engine import IndicatorEngine
 
 # Disable excessive logging
 logging.getLogger("trading_bot").setLevel(logging.WARNING)
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 def objective(trial: optuna.Trial, master_config, m1, m5, m15, h1, symbol="XAUUSDm"):
-    import copy
     config = copy.deepcopy(master_config)
     
-    # Suggest TrendFollowing Parameters
-    adx_threshold = trial.suggest_int("adx_threshold", 20, 35)
-    tp_atr = trial.suggest_float("tp_atr", 3.0, 8.0, step=0.5)
-    sl_atr = trial.suggest_float("sl_atr", 1.5, 3.5, step=0.2)
-    min_trend_maturity = trial.suggest_int("min_trend_maturity", 2, 6)
-    min_conf = trial.suggest_float("min_confidence", 0.65, 0.85, step=0.05)
-    
-    # Trailing Stop Parameters
-    be_rr = trial.suggest_float("phase1_rr_threshold", 1.0, 2.0, step=0.1)
-    trail_mult = trial.suggest_float("phase3_trail_mult", 1.5, 3.5, step=0.1)
+    # Suggest LiquiditySweepBreakout Parameters
+    lookback = trial.suggest_int("lookback", 10, 60)
+    body_thresh = trial.suggest_float("body_thresh", 0.4, 0.9, step=0.05)
+    h1_strength_thresh = trial.suggest_float("h1_strength_thresh", 0.4, 0.9, step=0.05)
+    sl_atr = trial.suggest_float("sl_atr", 1.5, 4.0, step=0.1)
+    tp_atr = trial.suggest_float("tp_atr", 3.0, 12.0, step=0.5)
+    min_conf = trial.suggest_float("min_confidence", 0.2, 0.9, step=0.05)
+    min_bars_between = trial.suggest_int("min_bars_between_signals", 1, 100)
     
     # Update Config for specific strategy
     if "strategies" not in config:
         config["strategies"] = {}
         
-    if "TrendFollowing" not in config["strategies"]:
-        config["strategies"]["TrendFollowing"] = {}
+    if "LiquiditySweepBreakout" not in config["strategies"]:
+        config["strategies"]["LiquiditySweepBreakout"] = {}
         
-    config["strategies"]["TrendFollowing"].update({
-        "adx_threshold": adx_threshold,
-        "tp_atr": tp_atr,
+    config["strategies"]["LiquiditySweepBreakout"].update({
+        "lookback": lookback,
+        "body_thresh": body_thresh,
+        "h1_strength_thresh": h1_strength_thresh,
         "sl_atr": sl_atr,
-        "min_trend_maturity": min_trend_maturity,
+        "tp_atr": tp_atr,
         "min_confidence": min_conf,
+        "min_bars_between_signals": min_bars_between,
         "enabled": True
     })
     
-    if "trailing_stop" not in config:
-        config["trailing_stop"] = {}
-        
-    config["trailing_stop"].update({
-        "phase1_rr_threshold": be_rr,
-        "phase3_trail_mult": trail_mult,
-        "enabled": True
-    })
+    # Isolate LiquiditySweepBreakout for Alpha finding
+    config["portfolio_allocations"] = {"LiquiditySweepBreakout": 1.0}
     
-    # Isolate TrendFollowing for Alpha finding
-    config["portfolio_allocations"] = {"TrendFollowing": 1.0}
+    # Ensure balance is set to $1000 for the simulation
+    config["backtest"]["initial_balance_per_strategy"] = 1000.0
     
     try:
         backtester = PortfolioBacktester(config)
         
         # Instantiate strategy correctly
-        norm_name = "TRENDFOLLOWING"
-        strategy_instance = STRATEGY_REGISTRY[norm_name]("TrendFollowing", config=config)
+        norm_name = "LIQUIDITYSWEEPBREAKOUT"
+        strategy_instance = STRATEGY_REGISTRY[norm_name]("LiquiditySweepBreakout", config=config)
         
         backtester.run(
             symbol=symbol,
@@ -91,33 +80,41 @@ def objective(trial: optuna.Trial, master_config, m1, m5, m15, h1, symbol="XAUUS
         if not history:
             return -100.0
         
-        initial_bal = backtester.initial_partition_balance
+        initial_bal = 1000.0
         metrics = PerformanceTracker.calculate_metrics(history, initial_bal)
         sharpe = metrics.get("sharpe_ratio", 0)
         max_dd_str = str(metrics.get("max_drawdown", "100%"))
         max_dd = float(max_dd_str.replace("%", ""))
         trades = len(history)
         
-        # Penalty for low frequency (Alpha must be tradeable)
-        if trades < 25:
-            return -50.0 + (trades * 1.5)
+        # Penalty for low frequency
+        if trades < 10:
+            return -50.0 + (trades * 2.0)
             
-        # Hard Penalty for Drawdown
-        if max_dd > 15.0:
-            return -150.0 - (max_dd - 15.0)
+        # Hard Penalty for Drawdown (Aggressive for $1000 balance)
+        if max_dd > 10.0:
+            return -200.0 - (max_dd - 10.0)
             
-        return sharpe
+        # Reward profitability + Sharpe
+        profit = metrics.get("net_profit", 0)
+        if profit <= 0:
+            return -10.0 + sharpe # Small reward for sharpe if just below zero
+            
+        return sharpe + (profit / 100.0)
         
     except Exception as e:
-        return -200.0
+        # print(f"Trial Error: {e}")
+        return -500.0
 
-def run_alpha_optimization(n_trials=50, symbol="XAUUSDm"):
-    print(f"--- Starting TrendFollowing Alpha Optimization [Trials: {n_trials}] ---")
+def run_alpha_optimization(n_trials=100, symbol="XAUUSDm"):
+    print(f"--- Starting LiquiditySweep Alpha Optimization for Micro ($1000) [Trials: {n_trials}] ---")
     
     suite = ComprehensiveBacktestSuite()
+    # Use symbol config but we'll override balance
     master_config = suite.config_loader.get_symbol_config(symbol)
     
     print(f"Preparing data via local parquet cache...")
+    # Use a longer window for better robustness
     m5 = suite.load_real_data(symbol=symbol, timeframe="M5", n_bars=35000)
     m15 = suite.load_real_data(symbol=symbol, timeframe="M15", n_bars=12000)
     h1 = suite.load_real_data(symbol=symbol, timeframe="H1", n_bars=3000)
@@ -132,19 +129,21 @@ def run_alpha_optimization(n_trials=50, symbol="XAUUSDm"):
     study.optimize(lambda trial: objective(trial, master_config, m1, m5, m15, h1, symbol), n_trials=n_trials)
     
     print("\n" + "=" * 40)
-    print(f"BEST ALPHA FOUND FOR TRENDFOLLOWING")
-    print(f"Objective Value (Sharpe): {study.best_value:.2f}")
+    print(f"BEST LIQUIDITY ALPHA FOUND")
+    print(f"Objective Value: {study.best_value:.2f}")
     print("Best Params:", json.dumps(study.best_params, indent=2))
     print("=" * 40)
     
     # Save best alpha
     os.makedirs("config", exist_ok=True)
-    with open("config/alpha_trend.json", "w") as f:
+    out_file = "config/alpha_liquidity_micro.json"
+    with open(out_file, "w") as f:
         json.dump(study.best_params, f, indent=2)
+    print(f"Results saved to {out_file}")
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--trials", type=int, default=50)
+    parser.add_argument("--trials", type=int, default=100)
     args = parser.parse_args()
     run_alpha_optimization(n_trials=args.trials)

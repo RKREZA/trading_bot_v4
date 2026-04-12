@@ -1,26 +1,30 @@
-# V5-INSIGNIA Portfolio Stress Test Report (Institutional Grade)
+# Portfolio Stress Test Report
 
-**Audit Session**: `Final Certification - session_20260412`
-**System Status**: 🏆 **GRADE A+ CERTIFIED**
-**Deployment Readiness**: **$10M+ AUM READY**
+**Source**: backtest_results\session_final_20260412_065619\trades.csv
+**Trades**: 13
 
-## 🛡️ Resilience Metrics
-| Stress Test | Result | Retention | Logic |
-| :--- | :--- | :--- | :--- |
-| **Baseline** | **PASS** | 100% | Optimized Execution |
-| **Slippage Shock** | **PASS** | **79.0%** | **Pessimistic Realism** |
-| **Spread Shock** | **PASS** | **0.0%** | **Dynamic Gating** |
-| **Toxic Flow** | **PASS** | **0.0%** | **Capital Defense** |
+## Monte Carlo Analysis (1,000 Trials)
+- **95% Confidence Drawdown**: 19.98%
+- **Probability of Ruin (>15%)**: 51.6%
+- **Avg. Simulated Profit**: $-158546.10
 
-## 📐 Monte Carlo Analysis (1,000 Trials)
-- **Robustness Score**: **100/100**
-- **Probability of Ruin (8% Limit)**: **0.00%**
-- **Worst-Case Drawdown (95% CI)**: **1.81%**
+## Cost Robustness Table
+| Multiplier   |   NetProfit |   ProfitFactor |
+|:-------------|------------:|---------------:|
+| 1.0x         |     -160634 |      0.0824458 |
+| 1.5x         |     -160696 |      0.0824095 |
+| 2.0x         |     -160757 |      0.0823732 |
+| 3.0x         |     -160880 |      0.0823007 |
+| 4.0x         |     -161003 |      0.0822283 |
 
-## 📉 Correlation Risk (Liquidity Sweep & Trend)
+## 📉 Correlation Risk
 ```
-Correlation: 0.14 (Low) -> Divergent strategies successfully provide risk-mitigation.
+strategy_id        trendfollowing_v4
+strategy_id                         
+trendfollowing_v4                1.0
 ```
 
-## 📜 Final Auditor Verdict
-The V5-INSIGNIA system has been successfully hardened against "Ghost Drawdowns" and "Lookahead Bias". The execution model is now strictly pessimistic, ensuring that backtest results are a reliable floor for live production performance. **ZERO RUIN probability verified.**
+## 🏆 Certification Status
+> [!WARNING]
+> **STATUS: CAUTION REQUIRED**
+> Potential sensitivity to execution costs or tail-risk detected.

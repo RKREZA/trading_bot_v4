@@ -115,7 +115,7 @@ class RangeBounceStrategy(BaseStrategy):
             current_atr = atr_14[-1]
             avg_atr_100 = np.mean(atr_14[-100:])
             vol_ratio = current_atr / avg_atr_100 if avg_atr_100 > 0 else 1.0
-            max_vol = strat_config.get("max_vol_ratio", 1.5)
+            max_vol = strat_config.get("max_vol_ratio", 3.5)
             if vol_ratio > max_vol:
                 self.last_rejection_reason = f"Volatility Gated: Ratio {vol_ratio:.2f} > {max_vol}"
                 return None
@@ -125,9 +125,9 @@ class RangeBounceStrategy(BaseStrategy):
         adx_14 = m5.get_indicator("adx_14")
         if len(adx_14) > 3:
             current_adx = adx_14[-1]
-            # Absolute Gate: Institutional mean-reversion is suicide if ADX > 35
-            if current_adx > 35:
-                self.last_rejection_reason = f"Trend Too Strong (ADX {current_adx:.1f} > 35)"
+            # Absolute Gate: Disabled for calibration
+            if current_adx > 80:
+                self.last_rejection_reason = f"Trend Too Strong (ADX {current_adx:.1f} > 80)"
                 return None
                 
             adx_slope = adx_14[-1] - adx_14[-3]
@@ -144,20 +144,9 @@ class RangeBounceStrategy(BaseStrategy):
             self.last_rejection_reason = "RangeBounce: BB not ready"
             return None
 
-        # 2.5 HARDENING: Bollinger "Walk" Detection
-        # If the last 3 closes were all within 2% of the outer band, it's a trend, not a bounce.
-        if len(closes) > 3:
-            # We check the relative position of previous closes
-            recent_closes = closes[-3:]
-            
-            # Detect Long Walk (Price hugging upper band)
-            is_hugging_upper = all(c > (bb_upper * 0.98) for c in recent_closes)
-            # Detect Short Walk (Price hugging lower band)
-            is_hugging_lower = all(c < (bb_lower * 1.02) for c in recent_closes)
-            
-            if is_hugging_upper or is_hugging_lower:
-                self.last_rejection_reason = "Bollinger Walk Detected (Momentum prevents bounce)"
-                return None
+        # 2.5 HARDENING: Bollinger "Walk" Detection (DISABLED FOR CALIBRATION)
+        if False: # len(closes) > 5:
+            pass
 
         bars_since_last = len(m5) - self._last_signal_bar
         if bars_since_last < self.min_bars_between_signals:

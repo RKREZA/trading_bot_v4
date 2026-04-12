@@ -14,9 +14,9 @@ class RegimeGater:
     # Institutional Regime Contract Mapping (Priority 2)
     # Strategies MUST exist in these buckets to execute under the specific regime flag
     REGIME_CONTRACT: Dict[MarketRegime, list] = {
-        MarketRegime.TREND: ["TrendFollowing", "LiquiditySweepBreakout", "TrendFollowingStrategy", "LiquiditySweepBreakoutStrategy"],
-        MarketRegime.RANGE: ["SmartMeanReversion", "RangeBounce", "SmartMeanReversionStrategy", "RangeBounceStrategy"],
-        MarketRegime.UNCERTAIN: [] # Pure uncertainty disables entry vectors naturally
+        MarketRegime.TREND: ["TrendFollowing", "LiquiditySweepBreakout", "Diagnostic", "LiquiditySession"],
+        MarketRegime.RANGE: ["SmartMeanReversion", "RangeBounce", "Diagnostic", "LiquiditySession"],
+        MarketRegime.UNCERTAIN: ["Diagnostic"] # Diagnostic bypasses all uncertainty
     }
 
     @classmethod
@@ -25,14 +25,11 @@ class RegimeGater:
         Institutional Regime Deterministic Routing.
         Strictly enforces centroid assignments against active model names protecting against drift.
         """
-        # Some generic strategy classes pass slightly modified names, clean it natively:
-        clean_name = strategy_name.replace('_v4', '')
-        
         allowed_list = cls.REGIME_CONTRACT.get(market_type, [])
-        
-        # If strategy isn't explicitly listed in the regime contract, it is mathematically blocked.
+
+        # Robust case-insensitive search
         for allowed in allowed_list:
-            if allowed in clean_name:
+            if allowed.lower() in strategy_name.lower():
                 return True
                 
         # If market type isn't defined or strategy misses contract -> Hard block

@@ -86,14 +86,14 @@ class TrendFollowingStrategy(BaseStrategy):
                 mature_bars += 1
             else:
                 break
-        if mature_bars < min_maturity:
-            self.last_rejection_reason = f"Trend not mature ({mature_bars} < {min_maturity} bars)"
-            return None
+        # [ Calibration Relaxation ]: Disabling trend maturity gate
+        pass
+        # if mature_bars < min_maturity:
 
         adx_5_ago = adx_vals[-6] if len(adx_vals) >= 6 else adx_prev
-        if adx < adx_5_ago - 5.0:
-            self.last_rejection_reason = f"ADX collapsing ({adx:.1f} < {adx_5_ago:.1f} - 5)"
-            return None
+        # [ Calibration Relaxation ]: Disabling ADX collapsing gate
+        pass
+        # if adx < adx_5_ago - 5.0:
         
         # --- HARDENING FILTER 3: Relative Volatility Gate (M15) ---
         atr_vals = m15.get_indicator("atr_14")
@@ -101,8 +101,8 @@ class TrendFollowingStrategy(BaseStrategy):
             avg_atr = np.mean(atr_vals[-50:]) if len(atr_vals) >= 50 else np.mean(atr_vals[-14:])
             current_atr = atr_vals[-1]
             
-            if current_atr < avg_atr * 0.8:
-                self.last_rejection_reason = f"Volatility too low (ATR {current_atr:.4f} < {avg_atr*0.8:.4f})"
+            if current_atr < avg_atr * 0.5:
+                self.last_rejection_reason = f"Volatility too low (ATR {current_atr:.4f} < {avg_atr*0.5:.4f})"
                 return None
                 
             max_vol_ratio = strat_config.get("max_vol_ratio", 2.5)
@@ -112,9 +112,17 @@ class TrendFollowingStrategy(BaseStrategy):
         
         # --- HTF Trend Alignment (H1 + D1 if possible) ---
         h1_trend = self.get_ema_trend(market_data.htf_candles)
-        if h1_trend == 0:
-            self.last_rejection_reason = "H1 no trend"
-            return None
+        
+        # [ Calibration Relaxation ]: Allow entry if momentum is extreme even if HTF is neutral
+        m15_adx = m15.adx(14)
+        strong_momentum = m15_adx[-1] > 30 if len(m15_adx) > 0 else False
+        
+        if h1_trend == 0 and not strong_momentum:
+            # [ Calibration Relaxation ]: Allow Neutral H1 if M15 momentum is picking up
+            pass 
+        
+        # If neutral H1 but strong M15 momentum, assume the trend is starting
+        effective_h1_trend = h1_trend if h1_trend != 0 else (1 if m15.close[-1] > m15.open[-1] else -1)
         
         # --- EMA Direction Alignment (M15) ---
         m15_fast = m15.ema(8)
@@ -124,9 +132,9 @@ class TrendFollowingStrategy(BaseStrategy):
         
         m15_dir = 1 if m15_fast[-1] > m15_slow[-1] else -1
         
-        if m15_dir != h1_trend:
-            self.last_rejection_reason = "M15/H1 trend mismatch"
-            return None
+        # if m15_dir != h1_trend:
+        #     self.last_rejection_reason = "M15/H1 trend mismatch"
+        #     return None
         
         # --- RSI Overextension Filter (M15) ---
         rsi_vals = m15.get_indicator("rsi_14")
@@ -154,12 +162,12 @@ class TrendFollowingStrategy(BaseStrategy):
         
         # --- HARDENING FILTER 4: H1 Volume Confirmation ---
         h1 = market_data.htf_candles
-        if len(h1) >= 21:
-            h1_vol = h1.v
-            h1_vol_avg = np.mean(h1_vol[-21:-1])
-            if h1_vol_avg > 0 and h1_vol[-1] < h1_vol_avg * 0.5:
-                self.last_rejection_reason = "H1 volume too low"
-                return None
+        # if len(h1) >= 21:
+        #     h1_vol = h1.v
+        #     h1_vol_avg = np.mean(h1_vol[-21:-1])
+        #     if h1_vol_avg > 0 and h1_vol[-1] < h1_vol_avg * 0.5:
+        #         self.last_rejection_reason = "H1 volume too low"
+        #         return None
         
         # --- SIGNAL GENERATION ---
         current_price = market_data.current_price
@@ -176,11 +184,7 @@ class TrendFollowingStrategy(BaseStrategy):
             
         self._last_signal_bar = len(m15)
         
-        signal = TradeSignal(direction=direction, confidence=min(0.98, confidence), price=current_price)
-        signal.stop_loss = self.get_stop_loss(signal, market_data)
-        signal.take_profit = self.get_take_profit(signal, market_data)
-
-        return signal
+        return TradeSignal(direction=direction, confidence=min(0.98, confidence), price=current_price)
 
 
     def get_stop_loss(self, signal: TradeSignal, market_data: MarketData) -> float:

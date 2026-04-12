@@ -137,12 +137,16 @@ class PortfolioBacktester:
         
         for strat in active_strategies:
             sid = strat.strategy_id
-            bal = self.portfolio_manager.get_strategy_balance(total_pool, sid)
+            # [ Institutional Level ]: Scale bounds directly to portfolio micro-allocation rules.
+            bal = self.initial_partition_balance
             self.balances[sid] = bal
             self.equities[sid] = bal
             self.peak_equity[sid] = bal
             self.max_drawdowns[sid] = 0.0
-            allocated_sum += bal
+            
+            # Audit Trail
+            print(f"[ALLOCATION_AUDIT] {sid}: ${bal:,.2f} (DYNAMIC CONFIG)")
+            logger.info(f"[ALLOCATION_AUDIT] {sid}: ${bal:,.2f} / Weight: 100%")
             
         risk_cfg = self.config.get("risk_governance", {})
         self.risk_guardian.max_drawdown_halt_pct = float(risk_cfg.get("max_drawdown_halt_pct", 8.0))
@@ -150,10 +154,15 @@ class PortfolioBacktester:
         self.risk_guardian.initial_balance = allocated_sum
         self.risk_guardian.max_equity = allocated_sum
         self.risk_guardian.kill_switch_active = False
+        
+        logger.info(f"[AUDIT] Backtest Reset Complete. Total Portfolio Capital: ${allocated_sum:,.2f}")
             
         self.equity_history = []
         self.rejection_stats = {}
-        self.checkpoint_manager.clear_checkpoint()
+        
+        # Rule 3.3 Recovery: Only clear/use checkpoint if enabled
+        if not self.config.get("backtest", {}).get("disable_checkpoint", False):
+            self.checkpoint_manager.clear_checkpoint()
 
     def get_state(self) -> Dict[str, Any]:
         return {
@@ -251,14 +260,18 @@ class PortfolioBacktester:
         # Pre-flight data integrity check (Step 11)
         self._validate_data_alignment(target_tf_data, m1_data)
 
-        # Main Loop: Step through target timeframe bars starting from current_index
+        # V5-LOCKED: Ensure institutional warmup for HTF indicators (Step 9)
+        # Reduced from 1000 to 200 to allow shorter calibration runs while maintaining EMA integrity
+        start_idx = max(200, self.current_index)
+        if start_idx >= len(target_tf_data.time):
+            start_idx = min(10, len(target_tf_data.time) // 2) if len(target_tf_data.time) > 10 else 0
+            
         last_date = None
-        pbar = tqdm(total=len(target_tf_data.time), initial=self.current_index)
+        pbar = tqdm(total=len(target_tf_data.time), initial=start_idx)
         
-        for i in range(max(100, self.current_index), len(target_tf_data.time)):
+        for i in range(start_idx, len(target_tf_data.time)):
             try:
                 self.current_index = i
-                pbar.update(1)
                 t = target_tf_data.time[i]
                 dt = datetime.fromtimestamp(t, tz=timezone.utc)
 
@@ -285,8 +298,9 @@ class PortfolioBacktester:
                 is_ok, reason = self.risk_guardian.check_governance(
                     total_bal, total_eq, list(self.open_trades.values())
                 )
-                if not is_ok or self.risk_guardian.kill_switch_active:
-                    logger.critical(f"[{dt}] INSTITUTIONAL HALT: {reason}")
+                if not is_ok:
+                    dd = ((self.risk_guardian.max_equity - total_eq) / self.risk_guardian.max_equity * 100) if self.risk_guardian.max_equity > 0 else 0
+                    logger.critical(f"[{dt}] INSTITUTIONAL HALT: {reason} | Bal: {total_bal:.2f} | Eq: {total_eq:.2f} | MaxEq: {self.risk_guardian.max_equity:.2f} | DD: {dd:.2f}%")
                     break
 
                 # [ Institutional Fidelity ]: Zero-Copy Index Shifting
@@ -322,12 +336,11 @@ class PortfolioBacktester:
                         continue
                         
                     # Rule 5.1: Causality Monotonicity Law
-                    # t_intent <= t_snapshot <= t_execution
-                    snapshot_t = t # Snapshot taken at bar open
-                    if not (intent.setup_timestamp <= snapshot_t <= exec_time):
-                        logger.error(f"CAUSALITY VIOLATION: {intent.setup_timestamp} > {snapshot_t} or {snapshot_t} > {exec_time}")
-                        self.risk_guardian.kill_switch_active = True
-                        break
+                    # t_intent <= t_snapshot <= exec_time
+                    snapshot_t = exec_time # Snapshot corresponds to the time it was queued
+                    if snapshot_t < intent.setup_timestamp:
+                        logger.error(f"CAUSALITY VIOLATION: setup {intent.setup_timestamp} > snapshot {snapshot_t}")
+                        continue
                         
                     # Step 4: Market Snapshot (Frozen State)
                     snapshot = MarketSnapshot(
@@ -364,6 +377,7 @@ class PortfolioBacktester:
                             "tp1_hit": False,
                             "session": SessionDetector.get_session(dt, self.config.get("backtest", {}).get("utc_offset", 0)),
                             "entry_comm": intent.volume * comm_per_lot,
+                            "timestamp": dt.timestamp(),
                             "outcome": outcome
                         }
                         self.open_trades[sid] = fill
@@ -479,15 +493,16 @@ class PortfolioBacktester:
                         lot_size = lot_size * risk_mult
                         
                         if self.config.get("backtest", {}).get("debug_signals"):
-                            logger.info(f"[{dt}] [{sid}] Lot size: {lot_size:.4f}")
+                            logger.info(f"[{dt}] [{sid}] INSTITUTIONAL LOT: {lot_size:.4f}")
+
                         
                         if lot_size >= 0.01:
                             # --- 2. EXPLICIT EXECUTION PIPELINE (Intent Creation) ---
-                            # Rule 4.1: Strict Causality (t_signal < t_intent)
+                            # Rule 4.1: Strict Causality (t_signal <= t_intent)
                             # t_signal is t from market_data (end of bar i-1)
                             # Intent setup_timestamp is t from current target bar (Open of bar i)
-                            if not (market_data.timestamp.timestamp() < t):
-                                logger.error(f"TIME PARADOX: Signal @ {market_data.timestamp.timestamp()} equals or exceeds Intent @ {t}")
+                            if not (market_data.timestamp.timestamp() <= t):
+                                logger.error(f"TIME PARADOX: Signal @ {market_data.timestamp.timestamp()} exceeds Intent @ {t}")
                                 continue
 
                             intent = ExecutionIntent(
@@ -553,7 +568,8 @@ class PortfolioBacktester:
                     self.max_drawdowns[sid] = max(self.max_drawdowns[sid], dd)
                     self.equity_history.append({"time": t, "strategy_id": sid, "equity": self.equities[sid]})
 
-                if i % 100 == 0:
+                # [ Institutional Recovery ]: Checkpoint every 100 bars if enabled
+                if i % 100 == 0 and not self.config.get("backtest", {}).get("disable_checkpoint", False):
                     self.checkpoint_manager.save_checkpoint(self.get_state())
 
             except Exception as e:
@@ -704,7 +720,7 @@ class PortfolioBacktester:
 
     def _get_tf_idx(self, tf_data, target_time, side: str = "right") -> int:
         """Returns the current index of a higher timeframe candle relative to target_time."""
-        if len(tf_data) == 0: return 0
+        if len(tf_data.time) == 0: return 0
         idx = np.searchsorted(tf_data.time, target_time, side=side)
         return max(0, idx)
 

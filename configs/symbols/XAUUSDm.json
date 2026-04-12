@@ -3,6 +3,10 @@
     "point": 0.01,
     "spread_pips": 6,
     "tick_value": 10.0,
+    "contract_size": 100.0,
+    "min_lot": 0.01,
+    "max_lot": 100.0,
+    "lot_step": 0.01,
     "commission_per_lot": 7.0,
     "backtest_timeframe": "M15"
   },
@@ -17,17 +21,17 @@
         "ROLLOVER",
         "GLOBAL"
       ],
-      "adx_threshold": 26,
-      "adx_strong": 24,
+      "adx_threshold": 15,
+      "adx_strong": 30,
       "rsi_period": 14,
-      "sl_atr": 3.0,
-      "tp_atr": 9.0,
-      "min_confidence": 0.3,
-      "min_rr": 1.0,
+      "sl_atr": 3.6,
+      "tp_atr": 11.5,
+      "min_confidence": 0.5,
+      "min_rr": 3.0,
+      "min_trend_maturity": 1,
       "max_spread_points": 1000,
-      "max_spread_atr_ratio": 0.1,
-      "min_bars_between_signals": 1,
-      "adx_threshold": 20,
+      "max_spread_atr_ratio": 0.2,
+      "min_bars_between_signals": 1
     },
     "LiquiditySweepBreakout": {
       "enabled": true,
@@ -39,15 +43,15 @@
         "ROLLOVER",
         "GLOBAL"
       ],
-      "lookback": 17,
-      "body_thresh": 0.5,
-      "h1_strength_thresh": 0.55,
-      "sl_atr": 3.2,
-      "tp_atr": 6.8,
+      "lookback": 29,
+      "body_thresh": 0.30,
+      "h1_strength_thresh": 0.40,
+      "sl_atr": 1.1,
+      "tp_atr": 4.5,
       "min_confidence": 0.3,
       "max_spread_points": 1000,
       "max_spread_atr_ratio": 0.1,
-      "min_bars_between_signals": 1
+      "min_bars_between_signals": 11
     },
     "RangeBounce": {
       "enabled": true,
@@ -59,19 +63,19 @@
         "ROLLOVER",
         "GLOBAL"
       ],
-      "bb_period": 20,
-      "bb_std": 2.5,
+      "bb_period": 40,
+      "bb_std": 2.4,
       "rsi_period": 14,
-      "rsi_oversold": 30,
-      "rsi_overbought": 70,
-      "sl_atr": 3.2,
-      "tp_atr": 6.8,
-      "min_confidence": 0.3,
+      "rsi_oversold": 21,
+      "rsi_overbought": 74,
+      "sl_atr": 3.5,
+      "tp_atr": 7.0,
+      "min_confidence": 0.85,
       "max_spread_points": 1000,
-      "max_spread_atr_ratio": 0.1,
-      "min_bars_between_signals": 15,
-      "max_vol_ratio": 1.5,
-      "max_adx_slope": 6.5
+      "max_spread_atr_ratio": 0.2,
+      "min_bars_between_signals": 10,
+      "max_vol_ratio": 2.5,
+      "max_adx_slope": 10.0
     },
     "SmartMeanReversion": {
       "enabled": true,
@@ -83,20 +87,20 @@
         "ROLLOVER",
         "GLOBAL"
       ],
-      "bb_period": 20,
-      "bb_std": 2.2,
+      "bb_period": 40,
+      "bb_std": 2.5,
       "rsi_period": 14,
-      "rsi_overbought": 75,
-      "rsi_oversold": 25,
-      "sl_atr": 2.2,
-      "tp_atr": 5.8,
-      "min_confidence": 0.3,
+      "rsi_overbought": 85,
+      "rsi_oversold": 18,
+      "sl_atr": 1.0,
+      "tp_atr": 3.0,
+      "min_confidence": 0.9,
       "max_spread_points": 1000,
-      "max_spread_atr_ratio": 0.15,
-      "min_bars_between_signals": 15
+      "max_spread_atr_ratio": 0.2,
+      "min_bars_between_signals": 10
     },
     "LiquiditySession": {
-      "enabled": true,
+      "enabled": false,
       "allowed_sessions": [
         "TOKYO",
         "LONDON",
@@ -105,18 +109,18 @@
         "ROLLOVER",
         "GLOBAL"
       ],
-      "range_maturity_limit": 3.0,
-      "vol_trigger_mult": 0.4,
+      "range_maturity_limit": 2.0,
+      "vol_trigger_mult": 0.3,
       "sl_atr": 2.2,
       "tp_atr": 5.2,
       "lookback_bars": 60,
       "min_range_bars": 20,
-      "min_confidence": 0.7
+      "min_confidence": 0.2
     }
   },
   "backtest": {
-    "initial_balance_per_strategy": 10000.0,
+    "initial_balance_per_strategy": 1000.0,
     "adaptive_strategy": false,
-    "debug_signals": false
+    "debug_signals": true
   }
 }
