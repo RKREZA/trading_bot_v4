@@ -17,8 +17,7 @@
       "allowed_sessions": [
         "LONDON",
         "NEW_YORK",
-        "LONDON/NY",
-        "GLOBAL"
+        "LONDON/NY"
       ],
       "adx_threshold": 25,
       "sl_atr": 3.0,
@@ -70,8 +69,7 @@
       "allowed_sessions": [
         "LONDON",
         "NEW_YORK",
-        "LONDON/NY",
-        "GLOBAL"
+        "LONDON/NY"
       ],
       "bb_period": 30,
       "bb_std": 2.3,

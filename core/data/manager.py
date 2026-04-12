@@ -92,8 +92,9 @@ class DataManager:
         return relevant_array
 
     def _ensure_min_history(self, array: CandleArray, symbol: str, timeframe: str, start_date: datetime.datetime) -> CandleArray:
-        """Enforces a 200-bar minimum history for reliable indicator calculation (Audit #1)."""
-        if len(array) < 200:
+        """Enforces institutional history buffers for indicator stability (Audit #1)."""
+        min_bars = 20 if timeframe == "D1" else 200
+        if len(array) < min_bars:
             logger.warning(f"Data: {symbol} [{timeframe}] has only {len(array)} bars. Fetching more history.")
             # We fetch 500 bars to be safe
             self.sync.sync_full_history(symbol, timeframe, start_date)
