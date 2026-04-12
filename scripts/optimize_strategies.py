@@ -33,7 +33,7 @@ def optimize_strategy(strategy_name: str, symbol: str = "XAUUSDm", n_trials: int
     print(f"--- Starting Optimization for {strategy_name} on {symbol} ---")
     
     # 1. Setup Environment
-    with open("config.json", "r") as f:
+    with open("config/config.json", "r") as f:
         master_config = json.load(f)
     
     # Force single strategy allocation for optimization
@@ -50,7 +50,7 @@ def optimize_strategy(strategy_name: str, symbol: str = "XAUUSDm", n_trials: int
     
     # 2. Prepare Data (1 year window)
     end_dt = datetime.now(timezone.utc)
-    start_dt = end_dt - timedelta(days=365)
+    start_dt = end_dt - timedelta(days=180)
     
     print(f"Preparing data from {start_dt.date()} to {end_dt.date()}...")
     m1 = data_manager.prepare_data(symbol, "M1", start_dt)
@@ -95,18 +95,21 @@ def optimize_strategy(strategy_name: str, symbol: str = "XAUUSDm", n_trials: int
             strat_cfg["bb_std"] = trial.suggest_float("bb_std", 1.5, 3.0, step=0.1)
             strat_cfg["rsi_oversold"] = trial.suggest_int("rsi_oversold", 20, 45)
             strat_cfg["rsi_overbought"] = trial.suggest_int("rsi_overbought", 55, 80)
-            strat_cfg["adx_threshold"] = trial.suggest_int("adx_threshold", 20, 40)
-            strat_cfg["max_vol_ratio"] = trial.suggest_float("max_vol_ratio", 1.5, 3.5, step=0.1)
+            strat_cfg["adx_threshold"] = trial.suggest_int("adx_threshold", 10, 35) # Lowered for more sensitivity
+            strat_cfg["max_vol_ratio"] = trial.suggest_float("max_vol_ratio", 1.5, 3.5, step=0.2)
             strat_cfg["max_adx_slope"] = trial.suggest_float("max_adx_slope", 3.0, 15.0, step=1.0)
+        elif strategy_name == "SmartMeanReversion":
+            strat_cfg["bb_std"] = trial.suggest_float("bb_std", 1.8, 3.2, step=0.1)
+            strat_cfg["rsi_oversold"] = trial.suggest_int("rsi_oversold", 15, 35)
+            strat_cfg["rsi_overbought"] = trial.suggest_int("rsi_overbought", 65, 85)
+            strat_cfg["min_bars_between_signals"] = trial.suggest_int("min_bars_between_signals", 10, 40)
         elif strategy_name == "LiquiditySweepBreakout":
-            strat_cfg["body_thresh"] = trial.suggest_float("body_thresh", 0.5, 0.8, step=0.05)
+            strat_cfg["body_thresh"] = trial.suggest_float("body_thresh", 0.4, 0.7, step=0.05)
             strat_cfg["lookback"] = trial.suggest_int("lookback", 10, 40)
         elif strategy_name == "TrendFollowing":
             strat_cfg["adx_threshold"] = trial.suggest_int("adx_threshold", 15, 30)
             strat_cfg["adx_strong"] = trial.suggest_int("adx_strong", 20, 40)
             strat_cfg["min_bars_between_signals"] = trial.suggest_int("min_bars_between_signals", 10, 50)
-            strat_cfg["max_vol_ratio"] = trial.suggest_float("max_vol_ratio", 1.5, 3.5, step=0.1)
-            strat_cfg["min_trend_maturity"] = trial.suggest_int("min_trend_maturity", 1, 5)
             
         config[strategy_name] = strat_cfg
         
@@ -138,22 +141,18 @@ def optimize_strategy(strategy_name: str, symbol: str = "XAUUSDm", n_trials: int
             sharpe = metrics.get("sharpe_ratio", 0)
             max_dd_str = str(metrics.get("max_drawdown", "100%"))
             max_dd = float(max_dd_str.replace("%", ""))
-            trades = len(history)
             
-            # Institutional Constraint: Hard Penalty for DD > 15%
-            if max_dd > 15.0:
-                return -100.0 - (max_dd - 15.0)
+            # Institutional Constraint: Hard Penalty for DD > 10%
+            if max_dd > 10.0:
+                return -100.0 - (max_dd - 10.0)
             
-            # Institutional Objective: Balanced Sharpe & Frequency
-            if trades < 20:
-                return -50.0 + (trades * 2)
+            # Institutional Objective: Balanced Sharpe
+            if len(history) < 15: # Demand minimum trade frequency
+                return -50.0 + len(history)
                 
             return sharpe
             
         except Exception as e:
-            import traceback
-            print(f"  TRIAL ERROR: {e}")
-            traceback.print_exc()
             return -200.0
 
     # 6. Optimize
@@ -161,24 +160,19 @@ def optimize_strategy(strategy_name: str, symbol: str = "XAUUSDm", n_trials: int
     study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
     
     print("\n" + "=" * 40)
-    print(f"OPTIMIZATION COMPLETE FOR {strategy_name}")
+    print(f"OPTIMIZATION COMPLETE FOR {strategy_name} on {symbol}")
     print(f"Best Sharpe: {study.best_value:.2f}")
     print("Best Params:", json.dumps(study.best_params, indent=2))
     print("=" * 40)
-    
-    # Save best params
-    output_file = f"config/opt_{strategy_name.lower()}.json"
-    os.makedirs("config", exist_ok=True)
-    with open(output_file, "w") as f:
-        json.dump(study.best_params, f, indent=2)
     
     return study.best_params
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--strategy", type=str, required=True, help="Strategy name to optimize")
-    parser.add_argument("--trials", type=int, default=30, help="Number of trials")
+    parser.add_argument("--strategy", type=str, required=True)
+    parser.add_argument("--symbol", type=str, default="XAUUSDm")
+    parser.add_argument("--trials", type=int, default=30)
     args = parser.parse_args()
     
-    optimize_strategy(args.strategy, n_trials=args.trials)
+    optimize_strategy(args.strategy, symbol=args.symbol, n_trials=args.trials)

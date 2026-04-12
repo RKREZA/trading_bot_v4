@@ -102,7 +102,7 @@
   },
   "backtest": {
     "initial_balance_per_strategy": 10000.0,
-    "adaptive_strategy": true,
+    "adaptive_strategy": false,
     "debug_signals": false
   }
 }

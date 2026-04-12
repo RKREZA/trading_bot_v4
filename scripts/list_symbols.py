@@ -5,7 +5,7 @@ Quick script to list available symbols in MT5
 import MetaTrader5 as mt5
 
 # Initialize
-if not mt5.initialize(login=413559204, password="Insia@483311", server="Exness-MT5Trial6"):
+if not mt5.initialize(login=413619357, password="Insia@483311", server="Exness-MT5Trial6"):
     print("Failed to connect")
     exit()
 

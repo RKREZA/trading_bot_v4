@@ -280,6 +280,12 @@ class BacktestCLI:
             audit_results=full_results
         )
         
+        # [ Export Trades CSV ]
+        if history:
+            import pandas as pd
+            trades_df = pd.DataFrame(history)
+            trades_df.to_csv(os.path.join(audit_dir, "trades.csv"), index=False)
+            
         # 7. Dashboard Display
         dashboard = PerformanceTracker.generate_professional_dashboard(full_results)
         rprint(f"\n[bold white]{dashboard}[/]")
@@ -440,11 +446,40 @@ if __name__ == "__main__":
     parser.add_argument("--resume", action="store_true", help="Resume from last crash checkpoint")
     parser.add_argument("--debug-signals", action="store_true", help="Log reason for every signal rejection")
     parser.add_argument("--no-adaptive", action="store_true", help="Disable adaptive strategy selection (run ALL strategies)")
+    
+    # [ Institutional High-Fidelity Flags ]
+    parser.add_argument("--tick-model", choices=["true", "false"], default="true", help="Use M1 tick-replay for execution")
+    parser.add_argument("--variable-spread", choices=["true", "false"], default="true", help="Use variable spreads from historical data")
+    parser.add_argument("--slippage-model", choices=["pessimistic", "standard", "none"], default="standard")
+    parser.add_argument("--commission", choices=["realistic", "none"], default="realistic")
+    parser.add_argument("--execution-delay", choices=["simulated", "none"], default="simulated")
+    parser.add_argument("--export-trades", action="store_true", default=True)
+    parser.add_argument("--equity-curve", action="store_true", default=True)
 
     args = parser.parse_args()
     cli = BacktestCLI()
+    
+    # Map Institutional Flags to Config
+    if "backtest" not in cli.config: cli.config["backtest"] = {}
+    
     if args.stress_test:
-        cli.config.setdefault("backtest", {})["run_stress_test"] = True
+        cli.config["backtest"]["run_stress_test"] = True
+        
+    if args.slippage_model == "pessimistic":
+        cli.config["backtest"]["base_slippage_points"] = 2.5
+        cli.config["backtest"]["latency_mu"] = 250.0
+    elif args.slippage_model == "none":
+        cli.config["backtest"]["base_slippage_points"] = 0.0
+        cli.config["backtest"]["latency_mu"] = 0.0
+
+    if args.commission == "realistic":
+        # Force $7/lot across all symbols if realistic is set
+        for sym in cli.config.get("symbols_config", {}):
+            cli.config["symbols_config"][sym]["commission_per_lot"] = 7.0
+            
+    if args.execution_delay == "none":
+         cli.config["backtest"]["latency_mu"] = 0.0
+         cli.config["backtest"]["latency_sigma"] = 0.0
 
     cli.run(args.symbol, args.start_date, args.end_date, args.strategy, args.monte_carlo, args.walk_forward, args.stress_test, args.seed, 
             None if args.deterministic is None else (args.deterministic == "on"), resume=args.resume, debug_signals=args.debug_signals, no_adaptive=args.no_adaptive)

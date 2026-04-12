@@ -158,8 +158,11 @@ class LiveOrchestrator:
         # Weekend Waiver: Allow large drift if market is closed
         session = SessionDetector.get_session(datetime.now().astimezone())
         if "(CLOSED)" in session:
-            if drift > 3600: # Wait until it's more than an hour late on Monday before worrying
-                logger.info(f"Weekend Sync: Drift {drift:.1f}s ignored (Market Closed).")
+            if drift > 3600: 
+                # Throttle log to once every 30 minutes
+                if not hasattr(self, "_last_weekend_log") or (time.time() - self._last_weekend_log > 1800):
+                    logger.info(f"Weekend Sync: Drift {drift:.1f}s ignored (Market Closed).")
+                    self._last_weekend_log = time.time()
                 return
             
         if drift > 10.0:
@@ -359,7 +362,7 @@ class LiveOrchestrator:
                     
                     if state is None or state.m5 is None:
                         msg = "Awaiting initial DataEngine calculation..."
-                        self.logs.append(f"[{dt_server.strftime('%H:%M:%S')}] {msg}")
+                        self.logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
                         self._update_ui(live, dashboard, status="CALCULATING...", tick=tick)
                         time.sleep(1)
                         continue
@@ -529,11 +532,19 @@ class LiveOrchestrator:
         tick_lag = 0
         if tick:
             tick_lag = int(time.time() - tick.time)
-            if tick_lag > 10:
+            
+            # Weekend Check: Don't trigger cache buster/logs if market is closed
+            current_session = SessionDetector.get_session(datetime.now().astimezone())
+            is_market_closed = "(CLOSED)" in current_session
+            
+            if tick_lag > 10 and not is_market_closed:
                 # Aggressive Cache Buster: Toggle subscription to force refresh
                 mt5.symbol_select(self.symbol, False)
                 mt5.symbol_select(self.symbol, True)
                 logging.warning(f"Extreme Stale Feed Detected for {self.symbol} ({tick_lag}s). Cache Buster Triggered.")
+            elif tick_lag > 3600 and is_market_closed:
+                # Silent handling for weekend gaps
+                pass
         else:
             # If no tick yet, we are still waiting for initial data
             tick_lag = 0

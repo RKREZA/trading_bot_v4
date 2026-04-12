@@ -21,9 +21,18 @@ class SessionDetector:
             utc_dt = dt.replace(tzinfo=datetime.timezone.utc)
             
         hour = utc_dt.hour
-        is_weekend = utc_dt.weekday() in [5, 6]
+        weekday = utc_dt.weekday()
         
-        # Mapping (UTC Hours)
+        # 1. Weekend Detection (Institutional Protocol)
+        is_weekend = False
+        if weekday == 5: # Saturday
+            is_weekend = True
+        elif weekday == 4 and hour >= 22: # Friday Close
+            is_weekend = True
+        elif weekday == 6 and hour < 21: # Sunday before open (10PM UTC-ish)
+            is_weekend = True
+            
+        # 2. Mapping (UTC Hours)
         session = "GLOBAL"
         if 13 <= hour < 16:
             session = "LONDON/NY"
@@ -35,7 +44,7 @@ class SessionDetector:
             session = "TOKYO"
         elif 21 <= hour < 24:
             session = "ROLLOVER"
-            
+
         if is_weekend:
             return f"{session} (CLOSED)"
             

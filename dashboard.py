@@ -162,7 +162,7 @@ class TradingDashboard:
             
         return Panel(table, title="Institutional Setups", border_style="yellow")
 
-    def _make_footer(self, state: dict) -> Panel:
+    def _make_footer(self, state: dict) -> Any:
         logs = state.get("logs", [])
         news = state.get("news_list", [])
         
@@ -185,7 +185,7 @@ class TradingDashboard:
             Panel(log_text, title="Live Analysis", border_style="dim"),
             Panel(news_text, title="Economic Calendar", border_style="magenta")
         )
-        return Panel(grid, box=None)
+        return grid
 
     def update(self, state: dict) -> Layout:
         """Update Layout with fresh state objects."""

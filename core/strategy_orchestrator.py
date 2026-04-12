@@ -83,7 +83,7 @@ class StrategyOrchestrator:
             "news_blocked": blocking_event,
             "upcoming_news": [e["title"] for e in upcoming_obj],
             "upcoming_news_obj": upcoming_obj,
-            "timestamp": market_data.timestamp.strftime("%H:%M:%S"),
+            "timestamp": datetime.now().strftime("%H:%M:%S"),
             "open_tickets": list(self._open_tickets) # Dashboard visibility
         }
         
