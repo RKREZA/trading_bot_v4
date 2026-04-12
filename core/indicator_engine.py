@@ -29,6 +29,7 @@ class IndicatorEngine:
         features["ema_21"] = df['close'].ewm(span=21, adjust=False).mean().values
         features["ema_20"] = df['close'].ewm(span=20, adjust=False).mean().values
         features["ema_50"] = df['close'].ewm(span=50, adjust=False).mean().values
+        features["ema_100"] = df['close'].ewm(span=100, adjust=False).mean().values
         features["ema_200"] = df['close'].ewm(span=200, adjust=False).mean().values
         
         # 2. Volatility (ATR)
@@ -37,11 +38,49 @@ class IndicatorEngine:
         low_close = (df['low'] - df['close'].shift()).abs()
         ranges = pd.concat([high_low, high_close, low_close], axis=1)
         true_range = ranges.max(axis=1)
-        # Calculate both 14 and 20 periods for different strategy/regime defaults
+        features["atr_10"] = true_range.rolling(10).mean().values
         features["atr_14"] = true_range.rolling(14).mean().values
         features["atr_20"] = true_range.rolling(20).mean().values
         
-        # 3. Momentum (RSI) — Using Wilder's EMA to match types.py
+        # 3. SuperTrend (10, 3.0) — Modern Trend Signal
+        atr_10 = features["atr_10"]
+        mid_price = (df['high'] + df['low']) / 2
+        
+        upper_band = mid_price + (3.0 * atr_10)
+        lower_band = mid_price - (3.0 * atr_10)
+        
+        final_upper = np.zeros(len(df))
+        final_lower = np.zeros(len(df))
+        trend = np.ones(len(df)) # 1 for Long, -1 for Short
+        supertrend = np.zeros(len(df))
+        
+        close = df['close'].values
+        
+        for i in range(1, len(df)):
+            # Final Upper Band
+            if upper_band[i] < final_upper[i-1] or close[i-1] > final_upper[i-1]:
+                final_upper[i] = upper_band[i]
+            else:
+                final_upper[i] = final_upper[i-1]
+                
+            # Final Lower Band
+            if lower_band[i] > final_lower[i-1] or close[i-1] < final_lower[i-1]:
+                final_lower[i] = lower_band[i]
+            else:
+                final_lower[i] = final_lower[i-1]
+                
+            # Trend calculation
+            if trend[i-1] == 1:
+                trend[i] = 1 if close[i] > final_lower[i] else -1
+            else:
+                trend[i] = -1 if close[i] < final_upper[i] else 1
+            
+            supertrend[i] = final_lower[i] if trend[i] == 1 else final_upper[i]
+            
+        features["supertrend_val"] = supertrend
+        features["supertrend_dir"] = trend
+
+        # 4. Momentum (RSI)
         # ... (rest of momentum code)
         delta = df['close'].diff()
         gain = delta.where(delta > 0, 0)

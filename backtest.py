@@ -79,6 +79,7 @@ class BacktestCLI:
             m5 = self.data_manager.prepare_data(symbol, "M5", dt_from)
             m15 = self.data_manager.prepare_data(symbol, "M15", dt_from)
             h1 = self.data_manager.prepare_data(symbol, "H1", dt_from)
+            d1 = self.data_manager.prepare_data(symbol, "D1", dt_from)
             
             # [ Institutional Alignment Filter ]: Cap all TFs by available M1 execution data
             # This prevents simulation crashes on last forming M15/H1 bars.
@@ -87,6 +88,7 @@ class BacktestCLI:
                 m5 = m5[m5.time <= max_t]
                 m15 = m15[m15.time <= max_t]
                 h1 = h1[h1.time <= max_t]
+                d1 = d1[d1.time <= max_t]
 
         if len(m5) < 100:
             rprint("[bold red]Error:[/] Insufficient data for benchmark.")
@@ -232,7 +234,7 @@ class BacktestCLI:
                 dataset_hashes[tf] = DatasetFingerprinter.get_hash(p)
         
         # Full Simulation Run with V5 Lockdown Guards
-        backtester.run(symbol, strategies, primary_data, h1, m15, m5, m1, data_hashes=dataset_hashes, resume=resume)
+        backtester.run(symbol, strategies, primary_data, h1, m15, m5, m1, d1_data=d1, data_hashes=dataset_hashes, resume=resume)
         history = backtester.history
         equity_history = backtester.equity_history
         

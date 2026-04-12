@@ -33,8 +33,8 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
         self.session_multipliers = {
             "TOKYO": {"body_boost": 0.05, "h1_boost": 0.05, "conf_boost": 0.05},
             "LONDON": {"body_boost": 0.05, "h1_boost": 0.05, "conf_boost": 0.05},
-            "NEW_YORK": {"body_boost": 0.0, "h1_boost": 0.0, "conf_boost": 0.0},
-            "LONDON/NY": {"body_boost": 0.10, "h1_boost": 0.10, "conf_boost": 0.10},
+            "NEW_YORK": {"body_boost": 0.0, "h1_boost": 0.15, "conf_boost": 0.05},
+            "LONDON/NY": {"body_boost": 0.10, "h1_boost": 0.15, "conf_boost": 0.10},
             "GLOBAL": {"body_boost": 0.0, "h1_boost": 0.0, "conf_boost": 0.0}
         }
 
@@ -62,6 +62,14 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
         # --- HARDENING: Institutional Safety Gates (Pillar 6 & 7) ---
         if not self.is_spread_safe(market_data):
             return None
+            
+        # 1. Regime Gating: Strictly reject Breakouts in a Range market
+        adx_vals = market_data.m15_candles.get_indicator("adx_14")
+        if len(adx_vals) > 0:
+            adx = adx_vals[-1]
+            if adx < 22: # Higher threshold than default to ensure breakout momentum
+                self.last_rejection_reason = f"Breakout: Gated in RANGE regime (ADX {adx:.1f})"
+                return None
             
         conf_floor = self.get_session_confidence_floor(market_data)
 
@@ -99,8 +107,34 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
         m5_range = last.high - last.low
         m5_strength = (abs(last.close - last.open) / m5_range) if m5_range > 0 else 0
 
+        # --- HARDENING: HTF Alignment & Overextension (Certification Pillar) ---
+        d1 = market_data.d1_candles
+        if d1 is not None and len(d1) > 0:
+            d1_last = d1[-1]
+            d1_bullish = d1_last.close > d1_last.open
+            d1_bearish = d1_last.close < d1_last.open
+        else:
+            d1_bullish = d1_bearish = True # Fallback if no D1
+            
+        m15_rsi = market_data.m15_candles.get_indicator("rsi_14")
+        rsi = m15_rsi[-1] if len(m15_rsi) > 0 else 50
+
+        # --- HARDENING FILTER 1: Volume Climax Validation ---
+        h1_v = h1_candles.v
+        h1_v_avg = np.mean(h1_v[-21:-1]) if len(h1_v) >= 21 else 1
+        vol_climax = h1_candles[-1].tick_volume > (h1_v_avg * 1.2)
+        
+        # Relax thresholds if volume is confirming the move
+        if vol_climax:
+            effective_body_thresh *= 0.8
+            effective_h1_thresh *= 0.8
+            
         if price > r_high and m5_strength >= effective_body_thresh:
-            if h1_strength >= effective_h1_thresh:
+            if h1_strength >= effective_h1_thresh and d1_bearish: # Logic Fix: Price > High = SELL (Liquidity Sweep)
+                if rsi < 30: # Don't sell if already oversold
+                    self.last_rejection_reason = f"Breakout: RSI Overextended for SELL ({rsi:.1f})"
+                    return None
+                    
                 confidence = 0.80 + session_mult["conf_boost"] + min(0.15, h1_strength * 0.2)
                 
                 if confidence < conf_floor:
@@ -111,7 +145,11 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
                 return TradeSignal(direction="SELL", price=price, confidence=min(0.98, confidence))
         
         if price < r_low and m5_strength >= effective_body_thresh:
-            if h1_strength >= effective_h1_thresh:
+            if h1_strength >= effective_h1_thresh and d1_bullish: # Price < Low = BUY (Liquidity Sweep)
+                if rsi > 70: # Don't buy if already overbought
+                    self.last_rejection_reason = f"Breakout: RSI Overextended for BUY ({rsi:.1f})"
+                    return None
+                    
                 confidence = 0.80 + session_mult["conf_boost"] + min(0.15, h1_strength * 0.2)
                 
                 if confidence < conf_floor:
@@ -124,7 +162,6 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
         if price > r_high or price < r_low:
              if m5_strength < effective_body_thresh: self.last_rejection_reason = f"Breakout: M5 Strength too low ({m5_strength:.2f})"
              elif h1_strength < effective_h1_thresh: self.last_rejection_reason = f"Breakout: H1 Strength too low ({h1_strength:.2f})"
-             elif not vol_confirmed: self.last_rejection_reason = "Breakout: Volume not confirmed"
              else: self.last_rejection_reason = "Breakout: MTF/Dir Mismatch"
         else:
              self.last_rejection_reason = "Breakout: Price inside range"

@@ -58,6 +58,7 @@ class DatasetFingerprinter:
 from core.base_strategy import MarketData
 from core.regime_detector import RegimeDetector
 from core.volatility_detector import VolatilityDetector
+from strategies.adaptive_manager import AdaptiveStrategyManager
 from core.risk.risk_guardian import RiskGuardian
 from core.session_detector import SessionDetector
 from core.portfolio_manager import PortfolioManager
@@ -183,7 +184,7 @@ class PortfolioBacktester:
         self.max_drawdowns = state["max_drawdowns"]
         self.open_trades = state["open_trades"]
         self.history = state["history"]
-    def run(self, symbol: str, strategies: list, target_tf_data, h1_data, m15_data, m5_data, m1_data, data_hashes: Dict[str, str] = None, resume: bool = False):
+    def run(self, symbol: str, strategies: list, target_tf_data, h1_data, m15_data, m5_data, m1_data, d1_data=None, data_hashes: Dict[str, str] = None, resume: bool = False):
         """
         V5-LOCKED Production Backtest Runner.
         Implements 'Step 15' development loop with Checkpoint support.
@@ -255,6 +256,8 @@ class PortfolioBacktester:
             m5_data._indicators = IndicatorEngine.precalculate_all(symbol, "M5", m5_data)
             m15_data._indicators = IndicatorEngine.precalculate_all(symbol, "M15", m15_data)
             h1_data._indicators = IndicatorEngine.precalculate_all(symbol, "H1", h1_data)
+            if d1_data is not None:
+                d1_data._indicators = IndicatorEngine.precalculate_all(symbol, "D1", d1_data)
             logger.info("Indicator Pre-calculation COMPLETED.")
 
         # Pre-flight data integrity check (Step 11)
@@ -315,6 +318,10 @@ class PortfolioBacktester:
                 
                 m15_idx = self._get_tf_idx(m15_data, t, side="right")
                 if m15_data is not target_tf_data: m15_data.set_limit(m15_idx)
+                
+                if d1_data is not None:
+                    d1_idx = self._get_tf_idx(d1_data, t, side="right")
+                    d1_data.set_limit(d1_idx)
                 
                 # 1. Regime Detection & Gating
                 regime_info = self.regime_detector.detect(target_tf_data)
@@ -417,7 +424,7 @@ class PortfolioBacktester:
                     htf_candles=h1_data,
                     m15_candles=m15_data,
                     m5_candles=m5_data,
-                    d1_candles=None,
+                    d1_candles=d1_data,
                     current_price=current_bid,
                     bid=current_bid,
                     ask=current_ask,

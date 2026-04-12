@@ -177,27 +177,21 @@ class RangeBounceStrategy(BaseStrategy):
         sell_signal = False
         confidence = 0.0
         
-        if extreme_oversold and bb_position < 0.20:
+        if extreme_oversold or (bb_position < 0.15):
             buy_signal = True
             confidence = 0.85
-        elif oversold and bb_position < 0.35 and is_rsi_rev_up:
-            if trend == 1:
+        elif oversold and bb_position < 0.40:
+            if trend == 1 or trend == 0:
                 buy_signal = True
                 confidence = 0.75
-            elif trend == 0 and rsi <= 35:
-                buy_signal = True
-                confidence = 0.65
         
-        if extreme_overbought and bb_position > 0.80:
+        if extreme_overbought or (bb_position > 0.85):
             sell_signal = True
             confidence = 0.85
-        elif overbought and bb_position > 0.65 and is_rsi_rev_down:
-            if trend == -1:
+        elif overbought and bb_position > 0.60:
+            if trend == -1 or trend == 0:
                 sell_signal = True
                 confidence = 0.75
-            elif trend == 0 and rsi >= 65:
-                sell_signal = True
-                confidence = 0.65
         
         if buy_signal:
             self._last_signal_bar = len(m5)

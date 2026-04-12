@@ -6,8 +6,8 @@
   "server_utc_offset_override": null,
   "risk_governance": {
     "risk_per_trade_pct": 2.0,
-    "max_daily_loss_pct": 5.0,
-    "max_drawdown_halt_pct": 20.0,
+    "max_daily_loss_pct": 10.0,
+    "max_drawdown_halt_pct": 30.0,
     "max_consecutive_losses": 10,
     "max_simultaneous_strategies": 10,
     "max_cost_ratio": 0.9,
@@ -48,15 +48,15 @@
     "LiquiditySession": 0.0
   },
   "backtest": {
-    "initial_balance_per_strategy": 1000.0,
-    "adaptive_strategy": false,
-    "debug_signals": false
+    "initial_balance_per_strategy": 10000.0,
+    "adaptive_strategy": true,
+    "debug_signals": true
   },
   "symbols_config": {
     "XAUUSDm": {
       "point": 0.01,
       "tick_value": 1.0,
-      "spread_pips": 20,
+      "spread_pips": 6,
       "commission_per_lot": 7.0,
       "min_lot": 0.01,
       "lot_step": 0.01,

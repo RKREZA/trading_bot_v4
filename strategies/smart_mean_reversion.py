@@ -86,35 +86,35 @@ class SmartMeanReversionStrategy(BaseStrategy):
         bb_width = upper_band - lower_band
         price_deviation = abs(current_price - sma_bands[-1]) / bb_width if bb_width > 0 else 0
         
-        # [ Calibration Relaxation ]: Lowered to 0.001 to ensure density
-        if price_deviation < 0.001:
+        # [ Calibration Relaxation ]: Lowered to ensure density in low-volatility pockets
+        if price_deviation < 0.0005: 
             self.last_rejection_reason = "Price not extended from mean"
             return None
         
         top_wick = last_candle.high - max(last_candle.open, last_candle.close)
         bottom_wick = min(last_candle.open, last_candle.close) - last_candle.low
 
-        # wick relaxation for calibration
-        min_wick_ratio = 0.05 
+        # wick relaxation for density
+        min_wick_ratio = 0.02 
 
         if current_price >= upper_band and current_rsi >= self.rsi_overbought:
             wick_ratio = top_wick / candle_range if candle_range > 0 else 0
             if wick_ratio > min_wick_ratio:
                 self._last_signal_bar = len(m5)
-                confidence = 0.75 + min(0.15, (current_rsi - self.rsi_overbought) / 50)
+                confidence = 0.70 + min(0.15, (current_rsi - self.rsi_overbought) / 50)
                 return TradeSignal(direction="SELL", price=current_price, confidence=min(0.95, confidence))
             else:
-                self.last_rejection_reason = "MR: Weak Top Wick"
+                self.last_rejection_reason = f"MR: Weak Top Wick ({wick_ratio:.3f})"
                 return None
 
         if current_price <= lower_band and current_rsi <= self.rsi_oversold:
             wick_ratio = bottom_wick / candle_range if candle_range > 0 else 0
             if wick_ratio > min_wick_ratio:
                 self._last_signal_bar = len(m5)
-                confidence = 0.75 + min(0.15, (self.rsi_oversold - current_rsi) / 50)
+                confidence = 0.70 + min(0.15, (self.rsi_oversold - current_rsi) / 50)
                 return TradeSignal(direction="BUY", price=current_price, confidence=min(0.95, confidence))
             else:
-                self.last_rejection_reason = "MR: Weak Bottom Wick"
+                self.last_rejection_reason = f"MR: Weak Bottom Wick ({wick_ratio:.3f})"
                 return None
 
         return None
