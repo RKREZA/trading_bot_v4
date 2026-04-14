@@ -79,7 +79,20 @@
     "enabled": true,
     "max_spread_points": 1000,
     "min_confidence": 0.05,
-    "min_rr": 1.0
+    "min_rr": 1.0,
+    "cooldown_seconds": 12600,
+    "max_trades_per_day": 2,
+    "post_sl_cooldown_seconds": 14400,
+    "max_atr_spike_mult": 2.5,
+    "lookback": 40,
+    "adx_trend_threshold": 25.0,
+    "session_multipliers": {
+      "TOKYO": {"rej_boost": 0.0, "conf_boost": 0.0},
+      "LONDON": {"rej_boost": 0.05, "conf_boost": 0.05},
+      "NEW_YORK": {"rej_boost": 0.0, "conf_boost": 0.05},
+      "LONDON/NY": {"rej_boost": 0.10, "conf_boost": 0.10},
+      "GLOBAL": {"rej_boost": 0.0, "conf_boost": 0.0}
+    }
   },
   "SmartMeanReversion": {
     "enabled": true,

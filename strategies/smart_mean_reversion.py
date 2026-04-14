@@ -29,6 +29,11 @@ class SmartMeanReversionStrategy(BaseStrategy):
         self.tp_atr = strat_config.get("tp_atr", 4.5)
         self.min_confidence = float(strat_config.get("min_confidence", self.min_confidence))
         
+        # [ Institutional Upgrades ]
+        self.adx_max_threshold = strat_config.get("adx_max_threshold", 25.0)
+        self.vol_mult_threshold = strat_config.get("vol_mult_threshold", 1.25)
+        self.min_wick_ratio = strat_config.get("min_wick_ratio", 0.10)
+        
         self.min_bars_between_signals = strat_config.get("min_bars_between_signals", 15)
         self._last_signal_bar = 0
 
@@ -67,6 +72,22 @@ class SmartMeanReversionStrategy(BaseStrategy):
             self.last_rejection_reason = "Signal cooldown active"
             return None
 
+        # [ Institutional Gating ]: Trend Filter (ADX)
+        # Prevents fading a strong directional trend
+        adx_vals = market_data.m15_candles.get_indicator("adx_14")
+        current_adx = adx_vals[-1] if len(adx_vals) > 0 else 0
+        if current_adx > self.adx_max_threshold:
+            self.last_rejection_reason = f"MR: Trend too strong (ADX {current_adx:.1f})"
+            return None
+
+        # [ Institutional Gating ]: Volume Filter (Exhaustion)
+        # MR works best on volume climaxes
+        vol_sma = m5.get_indicator("vol_sma_20")[-1]
+        last_vol = m5[-1].tick_volume
+        if vol_sma > 0 and last_vol < vol_sma * self.vol_mult_threshold:
+            self.last_rejection_reason = f"MR: No Volume Climax ({last_vol}/{int(vol_sma)})"
+            return None
+
         upper_bands, lower_bands, sma_bands = m5.bollinger_bands(self.bb_period, self.bb_std)
         upper_band = upper_bands[-1]
         lower_band = lower_bands[-1]
@@ -94,8 +115,8 @@ class SmartMeanReversionStrategy(BaseStrategy):
         top_wick = last_candle.high - max(last_candle.open, last_candle.close)
         bottom_wick = min(last_candle.open, last_candle.close) - last_candle.low
 
-        # wick relaxation for density
-        min_wick_ratio = 0.02 
+        # Wick rejection logic for better quality
+        min_wick_ratio = self.min_wick_ratio 
 
         if current_price >= upper_band and current_rsi >= self.rsi_overbought:
             wick_ratio = top_wick / candle_range if candle_range > 0 else 0

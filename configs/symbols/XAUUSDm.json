@@ -57,7 +57,7 @@
       "rsi_overbought": 75,
       "sl_atr": 2.5,
       "tp_atr": 7.5,
-      "min_confidence": 0.70,
+      "min_confidence": 0.7,
       "max_spread_points": 1000,
       "max_spread_atr_ratio": 0.3,
       "min_bars_between_signals": 4,
@@ -65,20 +65,23 @@
       "max_adx_slope": 15.0
     },
     "SmartMeanReversion": {
-      "enabled": false,
+      "enabled": true,
       "allowed_sessions": [
         "LONDON",
         "NEW_YORK",
         "LONDON/NY"
       ],
       "bb_period": 30,
-      "bb_std": 2.3,
+      "bb_std": 2.5,
       "rsi_period": 14,
       "rsi_overbought": 80,
-      "rsi_oversold": 22,
-      "sl_atr": 1.5,
-      "tp_atr": 5.0,
+      "rsi_oversold": 20,
+      "sl_atr": 2.0,
+      "tp_atr": 3.0,
       "min_confidence": 0.75,
+      "adx_max_threshold": 25.0,
+      "vol_mult_threshold": 1.15,
+      "min_wick_ratio": 0.10,
       "max_spread_points": 1000,
       "max_spread_atr_ratio": 0.3,
       "min_bars_between_signals": 4

@@ -372,7 +372,7 @@ class BacktestCLI:
         res = mc.run(history, initial_balance=initial_balance)
         
         if res.get("status") == "INSUFFICIENT_DATA":
-            rprint(f"\n[bold red]⚠ AUDIT HALTED: {res.get('message')}[/]")
+            rprint(f"\n[bold red][!] AUDIT HALTED: {res.get('message')}[/]")
             return False
 
         score = float(res.get("robustness_score", 0))

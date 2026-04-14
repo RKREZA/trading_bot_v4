@@ -1,0 +1,38 @@
+[
+  {
+    "profit": -1080.02,
+    "wr": 33.33,
+    "trades": 24,
+    "params": {
+      "bb_std": 2.2,
+      "rsi_overbought": 75,
+      "rsi_oversold": 25,
+      "sl_atr": 2.0,
+      "tp_atr": 4.0
+    }
+  },
+  {
+    "profit": -215.01,
+    "wr": 55.56,
+    "trades": 9,
+    "params": {
+      "bb_std": 2.5,
+      "rsi_overbought": 80,
+      "rsi_oversold": 20,
+      "sl_atr": 2.0,
+      "tp_atr": 3.0
+    }
+  },
+  {
+    "profit": -211.46,
+    "wr": 0.0,
+    "trades": 1,
+    "params": {
+      "bb_std": 2.8,
+      "rsi_overbought": 85,
+      "rsi_oversold": 15,
+      "sl_atr": 2.5,
+      "tp_atr": 2.5
+    }
+  }
+]

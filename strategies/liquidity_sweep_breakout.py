@@ -1,5 +1,6 @@
 import numpy as np
 import logging
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 from core.base_strategy import BaseStrategy, MarketData
 from core.common.types import TradeSignal
@@ -31,16 +32,33 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
         self.min_confidence = float(strat_config.get("min_confidence", self.min_confidence))
         
         self.adx_trend_threshold = strat_config.get("adx_trend_threshold", 25.0)
-        self.min_bars_between_signals = strat_config.get("min_bars_between_signals", 35)
-        self._last_signal_bar = 0
         
-        self.session_multipliers = {
+        # FIX: Timestamp-based cooldown instead of broken `len(m5)` bar counting.
+        # The previous approach stored `len(m5)` which is constant (full dataset size),
+        # not the current sliding-window position — making the guard permanently 0 bars.
+        # Cooldown duration: configurable in seconds (default 3.5 hours = 12,600s)
+        self.cooldown_seconds = strat_config.get("cooldown_seconds", 12_600)  # 3.5h
+        self._last_signal_time: float = 0.0  # UNIX timestamp of last queued signal
+        
+        # Daily trade cap: prevents over-trading on volatile days
+        self.max_trades_per_day = strat_config.get("max_trades_per_day", 2)
+        self._daily_trade_count: int = 0
+        self._last_trade_date: str = ""  # ISO date string
+        
+        # Post-SL cooldown: after a stopout, add extra pause (seconds)
+        self.post_sl_cooldown_seconds = strat_config.get("post_sl_cooldown_seconds", 14_400)  # 4h
+        self._last_sl_time: float = 0.0  # UNIX timestamp of last SL hit
+        
+        # ATR spike filter: block entries when current ATR > N * 30-bar average (extreme trend days)
+        self.max_atr_spike_mult = strat_config.get("max_atr_spike_mult", 2.5)
+        
+        self.session_multipliers = strat_config.get("session_multipliers", {
             "TOKYO": {"rej_boost": 0.0, "conf_boost": 0.0},
             "LONDON": {"rej_boost": 0.05, "conf_boost": 0.05},
             "NEW_YORK": {"rej_boost": 0.0, "conf_boost": 0.05},
             "LONDON/NY": {"rej_boost": 0.10, "conf_boost": 0.10},
             "GLOBAL": {"rej_boost": 0.0, "conf_boost": 0.0}
-        }
+        })
         self._current_regime = "UNCERTAIN"
 
     def _get_m15_atr(self, market_data: MarketData) -> float:
@@ -62,9 +80,29 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
             self.last_rejection_reason = "Insufficient M5 data"
             return None
         
-        bars_since_last = len(m5) - self._last_signal_bar
-        if bars_since_last < self.min_bars_between_signals:
-            self.last_rejection_reason = "Signal cooldown active"
+        # FIX: Timestamp-based cooldown (replaces broken `len(m5)` bar counter).
+        # market_data.timestamp is always the current bar's datetime in UTC.
+        now_ts = market_data.timestamp.timestamp()
+        
+        # 1. Standard cooldown between any two signals
+        since_last = now_ts - self._last_signal_time
+        if since_last < self.cooldown_seconds:
+            self.last_rejection_reason = f"Signal cooldown active ({since_last/3600:.1f}h < {self.cooldown_seconds/3600:.1f}h)"
+            return None
+        
+        # 2. Post-SL recovery window: extra pause after a stopout
+        since_sl = now_ts - self._last_sl_time
+        if since_sl < self.post_sl_cooldown_seconds:
+            self.last_rejection_reason = f"Post-SL cooldown ({since_sl/3600:.1f}h < {self.post_sl_cooldown_seconds/3600:.1f}h)"
+            return None
+        
+        # 3. Daily trade cap: reset counter on new calendar day
+        today_str = market_data.timestamp.strftime("%Y-%m-%d")
+        if today_str != self._last_trade_date:
+            self._daily_trade_count = 0
+            self._last_trade_date = today_str
+        if self._daily_trade_count >= self.max_trades_per_day:
+            self.last_rejection_reason = f"Daily trade cap reached ({self._daily_trade_count}/{self.max_trades_per_day})"
             return None
 
         # ── REGIME & TREND IDENTIFICATION ──
@@ -75,6 +113,19 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
         adx = adx_vals[-1]
         is_trending = adx >= self.adx_trend_threshold
         self._current_regime = "TREND" if is_trending else "RANGE"
+        
+        # 4. ATR Spike Filter: block entries during extreme volatility explosions.
+        # On days like April 10 2026 (Trump tariff gold crash), ATR spikes 3x+
+        # making sweep entries extremely likely to get overwhelmed by the trend.
+        m5_atr_vals = m5.get_indicator("atr_14")
+        if len(m5_atr_vals) >= 31:
+            current_atr = m5_atr_vals[-1]
+            avg_atr_30 = np.mean(m5_atr_vals[-31:-1])
+            if avg_atr_30 > 0 and not np.isnan(current_atr):
+                atr_spike_mult = current_atr / avg_atr_30
+                if atr_spike_mult > self.max_atr_spike_mult:
+                    self.last_rejection_reason = f"ATR Spike Block ({atr_spike_mult:.1f}x > {self.max_atr_spike_mult}x avg)"
+                    return None
 
         m15_trend = self.get_ema_trend(market_data.m15_candles)
         
@@ -127,7 +178,8 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
                 
             conf = min(0.98, 0.82 + session_mult["conf_boost"] + (0.05 if vol_climax else 0))
             if conf >= conf_floor:
-                self._last_signal_bar = len(m5)
+                self._last_signal_time = now_ts  # FIX: timestamp-based cooldown
+                self._daily_trade_count += 1
                 sig = TradeSignal(direction="BUY", price=price, confidence=conf)
                 sig.reasons.append("MECHANIC:SWEEP")
                 sig.reasons.append(f"TARGET:{r_high}") 
@@ -144,12 +196,13 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
         if swept_high and closed_inside_from_high and bearish_rejection:
             # Regime Filter: If trending hard upward, sweeping the high is a runaway rally. Block it.
             if is_trending and m15_trend == 1:
-                self.last_rejection_reason = "Sweep: Blocked by Bullish Macro Trend"
+                self.last_rejection_reason = "Sweep: Blocked by Bullish Macro Trend (SELL)"
                 return None
                 
             conf = min(0.98, 0.82 + session_mult["conf_boost"] + (0.05 if vol_climax else 0))
             if conf >= conf_floor:
-                self._last_signal_bar = len(m5)
+                self._last_signal_time = now_ts  # FIX: timestamp-based cooldown
+                self._daily_trade_count += 1
                 sig = TradeSignal(direction="SELL", price=price, confidence=conf)
                 sig.reasons.append("MECHANIC:SWEEP")
                 sig.reasons.append(f"TARGET:{r_low}") 
@@ -206,6 +259,15 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
                 
         # Safe fallback
         return market_data.current_price + (m15_atr * 1.5) if signal.direction == "BUY" else market_data.current_price - (m15_atr * 1.5)
+
+    def on_trade_closed(self, trade_record: dict) -> None:
+        """Called by the backtester after every trade close. Records SL hits for post-SL cooldown."""
+        if trade_record.get("result", "").upper() == "SL":
+            self._last_sl_time = float(trade_record.get("exit_time", 0.0))
+
+    def reset_daily_stats(self) -> None:
+        """Called by the backtester at the start of each calendar day."""
+        self._daily_trade_count = 0
 
     # ==================================================================
     # Dashboard Metrics
