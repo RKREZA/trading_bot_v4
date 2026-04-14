@@ -19,6 +19,10 @@ class AIPredictor:
         self.engine = AIModeWrapper()
         self.drift_layer = DriftDetector()
         self.sentiment_vetter = SentimentVetter(config)
+
+        # Configurable blend weights (default: 60% model + 40% sentiment)
+        self.model_weight = float(self.config.get("model_weight", 0.6))
+        self.sentiment_weight = float(self.config.get("sentiment_weight", 0.4))
         
         if self.enabled:
             # Boot load
@@ -71,11 +75,14 @@ class AIPredictor:
                     approved = False
                     comment = f"SENTIMENT_VETO: {vet_result.get('reason', 'Macro Mismatch')}"
                 else:
-                    # Blend confidence scores (Weighted average: 60% Prob, 40% Sentiment)
-                    prob = (0.6 * prob) + (0.4 * float(vet_result.get("confidence", 0.5)))
+                    # Blend confidence scores (Weighted average: configurable)
+                    prob = (self.model_weight * prob) + (self.sentiment_weight * float(vet_result.get("confidence", 0.5)))
                 
             return FilteredSignal(original=base_signal, approved=approved, confidence=prob, comment=comment)
             
         except Exception as e:
-            logger.error(f"AI Filter Exception bypassed: {e}")
-            return FilteredSignal(original=base_signal, approved=True, confidence=0.5, comment="EVAL_ERR")
+            # INSTITUTIONAL FAIL-CLOSED: Any crash in the AI/Sentiment pipeline
+            # MUST block trading. Silent approval on error is a critical vulnerability
+            # that could allow unvetted trades through during system instability.
+            logger.error(f"AI Filter FAIL-CLOSED: {e}", exc_info=True)
+            return FilteredSignal(original=base_signal, approved=False, confidence=0.0, comment="EVAL_ERR_SYSTEM_HALT")

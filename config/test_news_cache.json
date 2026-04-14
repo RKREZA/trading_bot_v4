@@ -1,0 +1,32 @@
+[
+  {
+    "title": "Core PPI m/m",
+    "country": "USD",
+    "impact": "High",
+    "timestamp": 1776169800.0
+  },
+  {
+    "title": "PPI m/m",
+    "country": "USD",
+    "impact": "High",
+    "timestamp": 1776169800.0
+  },
+  {
+    "title": "Employment Change",
+    "country": "AUD",
+    "impact": "High",
+    "timestamp": 1776303000.0
+  },
+  {
+    "title": "Unemployment Rate",
+    "country": "AUD",
+    "impact": "High",
+    "timestamp": 1776303000.0
+  },
+  {
+    "title": "GDP m/m",
+    "country": "GBP",
+    "impact": "High",
+    "timestamp": 1776319200.0
+  }
+]

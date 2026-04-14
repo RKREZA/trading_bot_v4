@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 from core.common.types import TradeSignal, ExecutionIntent, MarketSnapshot, ExecutionOutcome
 from core.execution.stochastic_kernel import StochasticKernel
+from core.common.exceptions import CriticalRiskViolationError
 
 class OrderManager:
     """
@@ -32,7 +33,8 @@ class OrderManager:
         self.logger = logging.getLogger("trading_bot.execution")
         
         # Rule 3.1: ShadowFill Metrics & Audit
-        self.audit_log = "logs/shadow_fill_audit.csv"
+        # INSTITUTIONAL DRY: Path driven from config, not hardcoded
+        self.audit_log = config.get("paths", {}).get("shadow_fill_audit", "logs/shadow_fill_audit.csv")
         self._ensure_audit_log()
         self.slippage_diffs = []
         self.latency_diffs = []
@@ -78,9 +80,17 @@ class OrderManager:
             # --- PHASE 1 HARD BLOCK (NON-BYPASSABLE) ---
             lot_to_execute = self.get_degraded_volume(getattr(signal, 'volume', 0.01))
             if lot_to_execute > 0.05:
-                import sys
-                self.logger.critical(f"PHASE 1 SAFETY VIOLATION: Intent {lot_to_execute} > 0.05! TERMINATING PROCESS.")
-                sys.exit("PHASE 1 LOT VIOLATION")
+                # INSTITUTIONAL: Raise exception for graceful shutdown instead of sys.exit().
+                # This allows the orchestrator to close connections, flush logs, and
+                # execute emergency flatten before process termination.
+                self.logger.critical(f"PHASE 1 SAFETY VIOLATION: Intent {lot_to_execute} > 0.05! Raising CriticalRiskViolationError.")
+                raise CriticalRiskViolationError(
+                    lot_size=lot_to_execute,
+                    max_allowed=0.05,
+                    symbol=symbol,
+                    strategy_id=getattr(signal, 'strategy_id', 'V6_LIVE'),
+                    detail=f"PHASE 1 LOT VIOLATION: {lot_to_execute:.4f} > 0.05 on {symbol}"
+                )
 
             # 2.0: Generate Parallel Shadow (Simulated) Fill for Audit
             intent = ExecutionIntent(
@@ -202,15 +212,15 @@ class OrderManager:
         outcome = self.kernel.execute(intent, snapshot)
         
         return {
-            "ticket": random.randint(1000000, 9999999), 
+            "ticket": self._rng.randint(1000000, 9999999), 
             "symbol": symbol,
             "direction": signal.direction,
             "fill_price": outcome.fill_price,
             "actual_slippage_pips": outcome.actual_slippage_pips,
-            "sl": outcome.stop_loss,
-            "tp": outcome.take_profit,
-            "lots": outcome.volume,
-            "timestamp": outcome.execution_timestamp,
+            "sl": intent.stop_loss,
+            "tp": intent.take_profit,
+            "lots": intent.volume,
+            "timestamp": outcome.timestamp,
             "execution_drag": outcome.execution_drag,
             "outcome": outcome, # Preserve for Audit
             "is_error": False

@@ -5,6 +5,7 @@ os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["NUMEXPR_NUM_THREADS"] = "1"
 os.environ["VECLIB_MAX_THREADS"] = "1"
 os.environ["NUMBA_NUM_THREADS"] = "1"
+import msvcrt  # Windows file locking for singleton guard
 
 import argparse
 import logging
@@ -29,6 +30,7 @@ from core.common.types import CandleArray
 from core.strategy_runtime import StrategyRuntime
 from core.risk.risk_guardian import RiskGuardian
 from core.execution.order_manager import OrderManager
+from core.common.exceptions import CriticalRiskViolationError
 from core.health_server import HealthServer
 from core.notifications.telegram_alerter import TelegramAlerter
 from core.config.schema import V5ConfigSchema
@@ -116,13 +118,18 @@ class LiveOrchestrator:
         EnvironmentGuard.autolock(self.audit_dir)
         
         # Rule 4.3: Emergency Signal Handlers
+        self._shutdown_requested = False
         signal.signal(signal.SIGINT, self._handle_emergency_stop)
         
+        # Heartbeat tracking for liveness monitoring
+        self._cycle_count = 0
+        self._heartbeat_interval = 60  # Log heartbeat every 60 cycles
+        
     def _handle_emergency_stop(self, sig, frame):
-        """Rule 6.2: Manual Override Emergency Stop."""
+        """Rule 6.2: Manual Override Emergency Stop (Clean Shutdown)."""
         logger.critical("MANUAL OVERRIDE: Emergency Stop Signal Received (SIGINT).")
         self.emergency_flatten("MANUAL_SIGINT")
-        os._exit(0)
+        self._shutdown_requested = True
 
     def emergency_flatten(self, reason: str):
         """Rule 3: Flatten Execution Logic (Market Exit)."""
@@ -150,7 +157,7 @@ class LiveOrchestrator:
             logger.error(f"Flatten engine failure: {e}")
 
     def _handle_clock_drift(self):
-        """Rule 2: Hybrid Clock Drift Protocol."""
+        """Rule 2: Hybrid Clock Drift Protocol (3-Tier)."""
         broker_time = self.connection.get_broker_time(self.symbol)
         if not broker_time: return
         
@@ -173,8 +180,8 @@ class LiveOrchestrator:
             logger.warning(f"CLOCK DRIFT CRITICAL: {drift:.1f}s. Pausing for re-sync.")
             self.is_paused = True
             time.sleep(2)
-        elif drift > 5.0:
-            logger.warning(f"CLOCK DRIFT WARNING: {drift:.1f}s skew detected (Operational Tolerance: 10s).")
+        elif drift > 2.0:
+            logger.warning(f"CLOCK DRIFT WARNING: {drift:.1f}s skew detected (Operational Tolerance: 5s).")
             self.is_paused = False
         else:
             self.is_paused = False
@@ -220,17 +227,18 @@ class LiveOrchestrator:
     def run(self):
         # Singleton Guard & Terminal Verification
         lock_file = "bot.lock"
+        self._lock_handle = None
         try:
-            # Singleton Guard: Attempt to create an exclusive lock file
-            if os.path.exists(lock_file):
-                try:
-                    os.rename(lock_file, lock_file)
-                except OSError:
-                    print("CRITICAL: Another instance of the bot is already running.")
-                    return
-            
-            with open(lock_file, "w") as f:
-                f.write(str(os.getpid()))
+            # Singleton Guard: Windows file locking (exclusive, non-blocking)
+            self._lock_handle = open(lock_file, "w")
+            try:
+                msvcrt.locking(self._lock_handle.fileno(), msvcrt.LK_NBLCK, 1)
+            except (IOError, OSError):
+                print("CRITICAL: Another instance of the bot is already running.")
+                self._lock_handle.close()
+                return
+            self._lock_handle.write(str(os.getpid()))
+            self._lock_handle.flush()
             
             # Log Terminal Path for multi-install diagnostics
             ti = mt5.terminal_info()
@@ -294,8 +302,22 @@ class LiveOrchestrator:
                 self.orchestrator._open_tickets.add(p.ticket)
                 self.system_logs.append(f"[{datetime.now().astimezone().strftime('%H:%M:%S')}] Reconstructed active ticket {p.ticket} for {p.symbol}")
             
-            while True:
+            while not self._shutdown_requested:
                 try:
+                    # AUTO-RECONNECT: Verify MT5 connection before each cycle
+                    if not self.connection.ensure_connected():
+                        logger.warning("MT5 CONNECTION LOST. Attempting reconnection...")
+                        self.system_logs.append(f"[{datetime.now().astimezone().strftime('%H:%M:%S')}] [WARN] MT5 Connection Lost. Reconnecting...")
+                        self._update_ui(live, dashboard, status="RECONNECTING...")
+                        time.sleep(5)
+                        continue
+                    
+                    # HEARTBEAT: Periodic liveness log
+                    self._cycle_count += 1
+                    if self._cycle_count % self._heartbeat_interval == 0:
+                        uptime_min = (time.time() - self.health_server.start_time) / 60.0
+                        logger.info(f"HEARTBEAT: Cycle #{self._cycle_count} | Uptime: {uptime_min:.0f}min | Errors: {consecutive_errors}")
+                    
                     # Hot-Reload Config (Phase 3 Institutional Schema Validation)
                     try:
                         current_stat = os.stat("config/config.json").st_mtime
@@ -410,13 +432,8 @@ class LiveOrchestrator:
                         is_news_blocked=bool(is_news_blocked)
                     )
                     
-                    # Check for Phase 1 Lot Violations in pulse_report
-                    for exec_res in pulse_report.get("execution", []):
-                        vol = exec_res.get("volume", 0.0)
-                        if vol > 0.05:
-                            import sys
-                            logger.critical(f"PHASE 1 LOT VIOLATION: Intent {vol} > 0.05! TERMINATING.")
-                            sys.exit("PHASE 1 LOT VIOLATION")
+                    # Phase 1 Lot Violations are now caught as CriticalRiskViolationError
+                    # raised by OrderManager.execute_signal() — handled in outer except block
                     
                     # 4. UI SYNCHRONIZATION
                     raw_positions = self.pos_manager.get_open_positions()
@@ -472,6 +489,24 @@ class LiveOrchestrator:
                     print("\nShutdown requested by user.")
                     break
                 
+                except CriticalRiskViolationError as crve:
+                    # INSTITUTIONAL GRACEFUL SHUTDOWN: Lot safety violation detected.
+                    # We log the full forensic trail, flatten all positions, and break
+                    # the main loop cleanly — instead of the old sys.exit() nuclear option.
+                    logger.critical(f"CRITICAL RISK VIOLATION: {crve.detail}")
+                    try:
+                        crash_file = os.path.join("logs", "crash_report.log")
+                        with open(crash_file, "a") as f:
+                            import json as _json
+                            f.write(f"\n--- CRITICAL RISK VIOLATION: {datetime.now()} ---\n")
+                            f.write(_json.dumps(crve.forensic_dict(), indent=2))
+                            f.write("\n")
+                    except Exception:
+                        pass
+                    self.emergency_flatten(f"LOT_VIOLATION: {crve.detail}")
+                    self.system_logs.append(f"[{datetime.now().astimezone().strftime('%H:%M:%S')}] [FATAL] {crve.detail}")
+                    break
+
                 except Exception as e:
                     import traceback
                     consecutive_errors += 1
@@ -504,6 +539,13 @@ class LiveOrchestrator:
         logging.info("Shutting down. Open positions remain managed by MT5.")
         self.data_engine.stop()
         self.health_server.stop()  # Stop health server
+        # Release singleton lock
+        if self._lock_handle:
+            try:
+                msvcrt.locking(self._lock_handle.fileno(), msvcrt.LK_UNLCK, 1)
+                self._lock_handle.close()
+            except Exception:
+                pass
         if os.path.exists("bot.lock"):
             try:
                 os.remove("bot.lock")
@@ -575,7 +617,7 @@ class LiveOrchestrator:
             "analysis_logs": self.analysis_logs[-15:],
             "system_logs": self.system_logs[-15:],
             "local_time": datetime.now().astimezone().strftime("%d-%b-%Y %I:%M:%S %p %z"),
-            "server_time": datetime.now().astimezone().strftime("%d-%b-%Y %I:%M:%S %p %z"),
+            "server_time": self.connection.format_broker_time(self.connection.get_broker_time(self.symbol)),
             "price": price_now,
             "bid": bid_now,
             "ask": ask_now,
@@ -590,10 +632,10 @@ class LiveOrchestrator:
         # Primary Data Acquisition
         if md:
             state.update({
-                "session": SessionDetector.get_session(datetime.now().astimezone(), 0),
+                "session": md.session,
                 "timestamp": md.timestamp,
                 "local_time": datetime.now().astimezone().strftime("%d-%b-%Y %I:%M:%S %p %z"),
-                "server_time": datetime.now().astimezone().strftime("%d-%b-%Y %I:%M:%S %p %z")
+                "server_time": self.connection.format_broker_time(md.timestamp)
             })
         else:
             # Fallback for early cycles (Waiting for candles)
@@ -605,9 +647,9 @@ class LiveOrchestrator:
             # Try to detect session using broker clock if available
             dt_server = self.connection.get_broker_time(self.symbol)
             if dt_server:
-                state["session"] = SessionDetector.get_session(datetime.now().astimezone(), 0)
+                state["session"] = SessionDetector.get_session(dt_server, self.connection.server_utc_offset)
                 state["local_time"] = datetime.now().astimezone().strftime("%d-%b-%Y %I:%M:%S %p %z")
-                state["server_time"] = datetime.now().astimezone().strftime("%d-%b-%Y %I:%M:%S %p %z")
+                state["server_time"] = self.connection.format_broker_time(dt_server)
         
         if reg:
             state.update({

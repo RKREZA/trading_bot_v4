@@ -21,6 +21,17 @@ class RiskGuardian:
         "INDICES": 0.5,   # High Beta
     }
 
+    # Default Symbol → Basket Mapping (overridden by config["risk_governance"]["basket_map"])
+    DEFAULT_BASKET_MAP = {
+        "EURUSD": "MAJOR_FX", "GBPUSD": "MAJOR_FX", "AUDUSD": "MAJOR_FX",
+        "USDCHF": "MAJOR_FX", "USDCAD": "MAJOR_FX", "NZDUSD": "MAJOR_FX",
+        "USDJPY": "JPY_EXT", "GBPJPY": "JPY_EXT", "EURJPY": "JPY_EXT",
+        "AUDJPY": "JPY_EXT", "CADJPY": "JPY_EXT", "NZDJPY": "JPY_EXT",
+        "XAUUSDm": "XAUUSDm", "XAUUSD": "XAUUSDm",
+        "DE30": "INDICES", "US30": "INDICES", "NAS100": "INDICES",
+        "US500": "INDICES", "UK100": "INDICES",
+    }
+
     def __init__(self, config: Dict[str, Any], broker_clock=None):
         self.config = config
         self.broker_clock = broker_clock
@@ -62,37 +73,50 @@ class RiskGuardian:
         # Strategy-Level Circuit Breakers (Step 24)
         self.strategy_performance = {} # format: {sid: deque([ (timestamp, pnl_pct), ... ])}
         self.strategy_status = {} # format: {sid: "OK" | "HALTED"}
-        self.health_file = "config/strategy_health.json"
+        # INSTITUTIONAL DRY: Path driven from config, not hardcoded
+        self.health_file = config.get("paths", {}).get("strategy_health_file", "config/strategy_health.json")
         self.logger = logging.getLogger("trading_bot.risk")
         self._load_health_state()
+
+        # Configurable basket map: merge defaults with config overrides
+        self.basket_map = dict(self.DEFAULT_BASKET_MAP)
+        config_baskets = config.get("risk_governance", {}).get("basket_map", {})
+        self.basket_map.update(config_baskets)
+
+        # Auto-cooldown period for circuit breakers (hours, 0 = manual reset only)
+        self.circuit_breaker_cooldown_hours = float(
+            config.get("risk_governance", {}).get("circuit_breaker_cooldown_hours", 24.0)
+        )
 
     def validate_signal(self, 
                         signal: Any, 
                         balance: float, 
                         market_data: Any,
-                        symbol_info: Dict[str, Any]) -> bool:
+                        symbol_info: Dict[str, Any],
+                        sl_dist: float = 0.0) -> bool:
         """
         Institutional Pre-Auction Signal Validation (Step 12: Step 5).
         Verifies if a signal is tradable based on current risk/governance 
         before it enters the Portfolio Auction.
+        
+        DRY REFACTOR: Accepts optional `sl_dist` parameter. If the calling
+        site has already computed stop-loss distance, pass it directly to
+        avoid redundant SL derivation. Falls back to signal.stop_loss if
+        sl_dist is not provided.
         """
         if self.kill_switch_active:
             return False
             
-        # Determine temporary SL distance for sizing check
         try:
-            # We need to simulate the SL calculation to check for 'Death Lot' (too small)
-            # This is a DRY violation but necessary for decoupling pre-auction
-            # Better: pass the SL distance if already calculated.
-            # For now, we assume the strategy logic is accessible or SL is attached.
-            sl_price = signal.stop_loss if hasattr(signal, 'stop_loss') and signal.stop_loss != 0 else 0
-            if sl_price == 0:
-                self.logger.error("[RISK] Signal REJECTED: Missing or zero Stop Loss.")
-                return False # STRICT ENFORCEMENT: No SL, No Trade
+            # DRY: Use pre-computed sl_dist if provided; otherwise derive from signal
+            if sl_dist <= 0:
+                sl_price = signal.stop_loss if hasattr(signal, 'stop_loss') and signal.stop_loss != 0 else 0
+                if sl_price == 0:
+                    self.logger.error("[RISK] Signal REJECTED: Missing or zero Stop Loss.")
+                    return False  # STRICT ENFORCEMENT: No SL, No Trade
+                sl_dist = abs(market_data.current_price - sl_price)
                 
-            sl_dist = abs(market_data.current_price - sl_price)
             lot = self.calculate_lot_size(balance, sl_dist, symbol_info, current_price=market_data.current_price)
-            
             return lot > 0
         except Exception as e:
             self.logger.error(f"[RISK] Signal validation failed due to error: {e}", exc_info=True)
@@ -128,9 +152,10 @@ class RiskGuardian:
         # 1. Base Risk Calculation
         risk_pct = self.risk_per_trade_pct
         
-        # A+ VAULT: Equity Drawdown De-scaling (DISABLED FOR CALIBRATION)
-        # We maintain constant risk to ensure trade density validates the kernel logic.
-        """
+        # A+ VAULT: Equity Drawdown De-scaling (INSTITUTIONAL ENFORCEMENT)
+        # Smoothly ramps down position sizing as drawdown increases past 4%,
+        # reaching zero risk at max_drawdown_halt_pct. This prevents cliff-edge
+        # behavior where the system trades at full size right up to the kill-switch.
         eval_equity = self.current_portfolio_equity if self.current_portfolio_equity > 0 else balance
         if self.max_equity > eval_equity:
             drawdown = ((self.max_equity - eval_equity) / self.max_equity) * 100
@@ -139,8 +164,8 @@ class RiskGuardian:
                 room = limit - 4.0
                 penalty = max(0, 1.0 - (drawdown - 4.0) / room) if room > 0 else 0
                 risk_pct = risk_pct * penalty
-                self.logger.info(f"[RISK] A+ Vault Scaling: {drawdown:.2f}% DD. Risk throttled: {risk_pct:.3f}% (Penalty: {penalty:.2f})")
-        """
+                if not self.silent:
+                    self.logger.info(f"[RISK] A+ Vault Scaling: {drawdown:.2f}% DD. Risk throttled: {risk_pct:.3f}% (Penalty: {penalty:.2f})")
 
         # 2. Anti-Martingale / Anti-Doubling (Hard Guard)
         if self.consecutive_losses > 0:
@@ -173,9 +198,9 @@ class RiskGuardian:
         Rule 1.3: Total Gross Exposure <= 8.0 lots per $10k
         """
         if self.kill_switch_active:
-            # calibration bypass
-            pass
-            # return False, "KILL_SWITCH_ACTIVE"
+            # INSTITUTIONAL ENFORCEMENT: Kill-switch is absolute. No bypass.
+            # Any active kill-switch MUST halt all trading operations immediately.
+            return False, "KILL_SWITCH_ACTIVE"
 
         # 1. Total Drawdown Check (A+ Stricter Halts)
         if current_equity > self.max_equity: 
@@ -192,20 +217,21 @@ class RiskGuardian:
         if positions:
             equity_10k_units = current_equity / 10000.0
             total_gross = 0.0
-            ccy_exposure = {} # {CCY: lots}
+            ccy_exposure = {} # {basket: total_lots}
+            net_exposure = {}  # {basket: net_lots} for hedging detection
             
             for p in positions:
-                symbol = p.get('symbol', 'UNKNOWN')
+                symbol = p.get('symbol', 'UNKNOWN').upper()
                 lots = p.get('volume', 0.0)
+                direction = p.get('type', p.get('direction', 'BUY'))
+                signed_lots = lots if str(direction).upper() in ('BUY', '0') else -lots
                 total_gross += lots
                 
-                # Derive base currency/asset for basket netting
-                basket = "MAJOR_FX"
-                if "XAU" in symbol: basket = "XAUUSDm"
-                elif "JPY" in symbol: basket = "JPY_EXT"
-                elif any(x in symbol for x in ["DE30", "US30", "NAS100"]): basket = "INDICES"
+                # CONFIG-DRIVEN basket classification (replaces naive string matching)
+                basket = self.basket_map.get(symbol, self._infer_basket(symbol))
                 
                 ccy_exposure[basket] = ccy_exposure.get(basket, 0.0) + lots
+                net_exposure[basket] = net_exposure.get(basket, 0.0) + signed_lots
                 
                 # Limit Check per Basket
                 limit = 2.0 * equity_10k_units * self.VOL_MULTIPLIERS.get(basket, 1.0)
@@ -257,13 +283,40 @@ class RiskGuardian:
                 
         return False, "", False
 
+    def _infer_basket(self, symbol: str) -> str:
+        """Fallback basket inference for symbols not in the explicit basket_map."""
+        sym = symbol.upper()
+        if "XAU" in sym or "GOLD" in sym:
+            return "XAUUSDm"
+        elif "JPY" in sym:
+            return "JPY_EXT"
+        elif any(idx in sym for idx in ["DE30", "US30", "NAS100", "US500", "UK100"]):
+            return "INDICES"
+        return "MAJOR_FX"
+
     def check_strategy_governance(self, strategy_id: str) -> Tuple[bool, str]:
         """
         Institutional Strategy-Specific Circuit Breaker.
         Checks if a strategy has exceeded its 48-hour trailing loss limit.
+        
+        HARDENED: Auto-cooldown after configurable period (default 24h).
+        If cooldown_hours > 0, halted strategies auto-recover after the cooldown.
         """
         if self.strategy_status.get(strategy_id) == "HALTED":
-            return False, "STRATEGY_HALTED (Manual Reset Required)"
+            # AUTO-COOLDOWN: Check if enough time has passed since halt
+            if self.circuit_breaker_cooldown_hours > 0:
+                halt_time = self.strategy_status.get(f"{strategy_id}_halt_time", 0)
+                elapsed_hours = (time.time() - halt_time) / 3600.0
+                if elapsed_hours >= self.circuit_breaker_cooldown_hours:
+                    self.strategy_status[strategy_id] = "OK"
+                    del self.strategy_status[f"{strategy_id}_halt_time"]
+                    self._save_health_state()
+                    self.logger.info(f"CIRCUIT BREAKER AUTO-RECOVERED: Strategy {strategy_id} unsuspended after {elapsed_hours:.1f}h cooldown.")
+                else:
+                    remaining = self.circuit_breaker_cooldown_hours - elapsed_hours
+                    return False, f"STRATEGY_HALTED (Auto-recovery in {remaining:.1f}h)"
+            else:
+                return False, "STRATEGY_HALTED (Manual Reset Required)"
 
         # Calculate Rolling 48h Loss
         perf_history = self.strategy_performance.get(strategy_id, [])
@@ -282,6 +335,7 @@ class RiskGuardian:
         limit = self.config.get("risk_governance", {}).get("strategy_loss_halt_pct", 3.0)
         if total_pnl_pct <= -limit:
             self.strategy_status[strategy_id] = "HALTED"
+            self.strategy_status[f"{strategy_id}_halt_time"] = time.time()  # Track halt timestamp
             self._save_health_state()
             self.logger.critical(f"CIRCUIT BREAKER: Strategy {strategy_id} HALTED! Trailing 48h PnL: {total_pnl_pct:.2f}%")
             return False, f"CIRCUIT_BREAKER_TRIGGERED ({total_pnl_pct:.2f}%)"

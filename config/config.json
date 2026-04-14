@@ -2,6 +2,11 @@
   "_comment": "V5-INSIGNIA INSTITUTIONAL - FULL OPTIMIZATION SUITE (2024-2026)",
   "_version": "5.0-LOCKED",
   "_audit_date": "2026-04-11",
+  "paths": {
+    "strategy_health_file": "config/strategy_health.json",
+    "shadow_fill_audit": "logs/shadow_fill_audit.csv",
+    "crash_report": "logs/crash_report.log"
+  },
   "magic_number": 234000,
   "server_utc_offset_override": null,
   "risk_governance": {

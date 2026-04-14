@@ -265,7 +265,7 @@ class StrategyOrchestrator:
             
             # PHASE 6: Drift-Aware Adaptive Scaling
             drift_mult = 1.0
-            if hasattr(ai_layer.drift_layer, 'is_drifted') and ai_layer.drift_layer.is_drifted:
+            if hasattr(self.ai_predictor, 'drift_layer') and hasattr(self.ai_predictor.drift_layer, 'is_drifted') and self.ai_predictor.drift_layer.is_drifted:
                 drift_mult = self.config.get("ai_layer", {}).get("drift_multiplier", 0.5)
                 logger.warning(f"ADAPTIVE SCALING: Market structural drift detected. Reducing exposure by {drift_mult}x")
             

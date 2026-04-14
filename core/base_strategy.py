@@ -244,13 +244,6 @@ class BaseStrategy(ABC):
         Institutional Volatility Guard.
         Rejects entries if the ATR is too small relative to the spread (low profit potential per unit of cost).
         """
-        # Check if enabled in config
-        vol_config = self.config.get("volatility_adaptive", {})
-        if not vol_config:
-            # Try global config if strategy block doesn't have it
-            # In V4, global config is often passed into strategy __init__
-            pass 
-            
         min_ratio = self.config.get("min_atr_spread_ratio", 3.5)
         
         # Use M15 ATR for entry gating

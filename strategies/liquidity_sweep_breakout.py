@@ -9,45 +9,57 @@ logger = logging.getLogger("trading_bot.strategy.liquidity_sweep_breakout")
 
 class LiquiditySweepBreakoutStrategy(BaseStrategy):
     """
-    V5 Institutional Liquidity Sweep Breakout.
-    Targeting High-Momentum Range Breaks with Candle Strength filters.
+    Pure Liquidity Sweep (Anti-Breakout) Strategy.
+    
+    Core Logic:
+    - Never buys high or sells low.
+    - Waits for price to pierce the intraday range, then strongly reject and close inside.
+    - Uses ADX to filter directions:
+        - ADX < 25 (Ranging): Allow sweeps in both directions.
+        - ADX >= 25 (Trending): Only allow sweeps that align with the M15 EMA trend.
+    - Uses Hammer/Shooting Star math for rejection validation instead of pure body size.
     """
 
     def __init__(self, strategy_id: str, config: dict):
         super().__init__(strategy_id, config)
         
-        # [ Institutional Config Resolution ]: Access the resolved strategy block
         strat_config = self.get_strat_config()
-        
         self.lookback = strat_config.get("lookback", 20)
-        self.body_thresh = strat_config.get("body_thresh", 0.70)
-        self.h1_strength_thresh = strat_config.get("h1_strength_thresh", 0.55)
+        
+        # In a sweep, we care about the CLOSE position relative to the candle range (Hammer/Shooting Star)
+        self.rejection_thresh = strat_config.get("rejection_thresh", 0.60) # Must close in upper/lower 40%
         self.min_confidence = float(strat_config.get("min_confidence", self.min_confidence))
         
-        self.sl_atr = strat_config.get("sl_atr", 2.0)
-        self.tp_atr = strat_config.get("tp_atr", 6.0)
-        
-        self.min_bars_between_signals = strat_config.get("min_bars_between_signals", 25)
+        self.adx_trend_threshold = strat_config.get("adx_trend_threshold", 25.0)
+        self.min_bars_between_signals = strat_config.get("min_bars_between_signals", 35)
         self._last_signal_bar = 0
         
         self.session_multipliers = {
-            "TOKYO": {"body_boost": 0.05, "h1_boost": 0.05, "conf_boost": 0.05},
-            "LONDON": {"body_boost": 0.05, "h1_boost": 0.05, "conf_boost": 0.05},
-            "NEW_YORK": {"body_boost": 0.0, "h1_boost": 0.15, "conf_boost": 0.05},
-            "LONDON/NY": {"body_boost": 0.10, "h1_boost": 0.15, "conf_boost": 0.10},
-            "GLOBAL": {"body_boost": 0.0, "h1_boost": 0.0, "conf_boost": 0.0}
+            "TOKYO": {"rej_boost": 0.0, "conf_boost": 0.0},
+            "LONDON": {"rej_boost": 0.05, "conf_boost": 0.05},
+            "NEW_YORK": {"rej_boost": 0.0, "conf_boost": 0.05},
+            "LONDON/NY": {"rej_boost": 0.10, "conf_boost": 0.10},
+            "GLOBAL": {"rej_boost": 0.0, "conf_boost": 0.0}
         }
+        self._current_regime = "UNCERTAIN"
+
+    def _get_m15_atr(self, market_data: MarketData) -> float:
+        m15_atr_vals = market_data.m15_candles.atr(14)
+        if len(m15_atr_vals) > 0 and not np.isnan(m15_atr_vals[-1]):
+            return m15_atr_vals[-1]
+        m5_atr = market_data.m5_candles.atr(14)
+        if len(m5_atr) > 0 and not np.isnan(m5_atr[-1]):
+            return m5_atr[-1] * 2.5
+        return 15.0
 
     def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
-        strat_config = self.get_strat_config()
-        allowed_sessions = strat_config.get("allowed_sessions", [])
-        if not SessionDetector.is_session_active(market_data.timestamp, allowed_sessions=allowed_sessions):
-            self.last_rejection_reason = f"Out of Session ({market_data.session})"
+        # TRADING ALL SESSIONS
+        if not self.is_spread_safe(market_data):
             return None
-        
+            
         m5 = market_data.m5_candles
         if len(m5) < self.lookback + 1:
-            self.last_rejection_reason = "Breakout: M5 Insufficient data"
+            self.last_rejection_reason = "Insufficient M5 data"
             return None
         
         bars_since_last = len(m5) - self._last_signal_bar
@@ -55,47 +67,21 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
             self.last_rejection_reason = "Signal cooldown active"
             return None
 
-        session_mult = self.session_multipliers.get(market_data.session, {"body_boost": 0, "h1_boost": 0, "conf_boost": 0})
-        effective_body_thresh = self.body_thresh + session_mult["body_boost"]
-        effective_h1_thresh = self.h1_strength_thresh + session_mult["h1_boost"]
-
-        # --- HARDENING: Institutional Safety Gates (Pillar 6 & 7) ---
-        if not self.is_spread_safe(market_data):
-            return None
-            
-        # 1. Regime Gating: Strictly reject Breakouts in a Range market
+        # ── REGIME & TREND IDENTIFICATION ──
         adx_vals = market_data.m15_candles.get_indicator("adx_14")
-        if len(adx_vals) > 0:
-            adx = adx_vals[-1]
-            if adx < 22: # Higher threshold than default to ensure breakout momentum
-                self.last_rejection_reason = f"Breakout: Gated in RANGE regime (ADX {adx:.1f})"
-                return None
-            
-        conf_floor = self.get_session_confidence_floor(market_data)
-
-        h1_candles = market_data.htf_candles
-        if len(h1_candles) < 2:
-            self.last_rejection_reason = "Breakout: H1 Insufficient data"
+        if len(adx_vals) == 0 or np.isnan(adx_vals[-1]):
             return None
             
-        h1 = h1_candles[-1]
+        adx = adx_vals[-1]
+        is_trending = adx >= self.adx_trend_threshold
+        self._current_regime = "TREND" if is_trending else "RANGE"
+
         m15_trend = self.get_ema_trend(market_data.m15_candles)
         
-        h1_candle_range = h1.high - h1.low
-        h1_body = abs(h1.close - h1.open)
-        h1_strength = (h1_body / h1_candle_range) if h1_candle_range > 0 else 0
-        h1_dir = 1 if h1.close > h1.open else -1
-        
-        # Bypassing H1 Vol
-        vol_confirmed = True
-        
-        # --- Adaptive Lookback Scaling (Institutional Pillar 10) ---
+        # ── RANGE COMPUTATION ──
         scaler = self.get_regime_scaler(market_data)
-        # In Extreme volatility, a 20-bar range is too noisy. Expand to 40.
-        dynamic_lookback = int(self.lookback * (2.0 if scaler > 1.25 else 1.0))
-        
+        dynamic_lookback = int(self.lookback * (1.5 if scaler >= 1.5 else 1.0))
         if len(m5) < dynamic_lookback + 1:
-            self.last_rejection_reason = f"Breakout: Insufficient data for dynamic range ({dynamic_lookback})"
             return None
             
         prev_range = m5[-dynamic_lookback-1:-1]
@@ -105,133 +91,153 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
         last = m5[-1]
         price = market_data.current_price
         m5_range = last.high - last.low
-        m5_strength = (abs(last.close - last.open) / m5_range) if m5_range > 0 else 0
-
-        # --- HARDENING: HTF Alignment & Overextension (Certification Pillar) ---
-        d1 = market_data.d1_candles
-        if d1 is not None and len(d1) > 0:
-            d1_last = d1[-1]
-            d1_bullish = d1_last.close > d1_last.open
-            d1_bearish = d1_last.close < d1_last.open
-        else:
-            d1_bullish = d1_bearish = True # Fallback if no D1
+        if m5_range == 0:
+            return None
             
-        m15_rsi = market_data.m15_candles.get_indicator("rsi_14")
-        rsi = m15_rsi[-1] if len(m15_rsi) > 0 else 50
+        # Wick Rejection Math (Hammer / Shooting Star definition)
+        # Ratio of how far the close is from the extreme low/high of the candle
+        close_from_low_ratio = (last.close - last.low) / m5_range
+        close_from_high_ratio = (last.high - last.close) / m5_range
 
-        # --- HARDENING FILTER 1: Volume Climax Validation ---
-        h1_v = h1_candles.v
+        session_mult = self.session_multipliers.get(market_data.session, {"rej_boost": 0, "conf_boost": 0})
+        effective_rej_thresh = self.rejection_thresh - session_mult["rej_boost"] # Lower threshold = easier entry
+
+        # Volatility Climax -> Less stringent rejection body needed
+        h1 = market_data.htf_candles[-1]
+        h1_v = market_data.htf_candles.v
         h1_v_avg = np.mean(h1_v[-21:-1]) if len(h1_v) >= 21 else 1
-        vol_climax = h1_candles[-1].tick_volume > (h1_v_avg * 1.2)
-        
-        # Relax thresholds if volume is confirming the move
+        vol_climax = h1.tick_volume > (h1_v_avg * 1.2)
         if vol_climax:
-            effective_body_thresh *= 0.8
-            effective_h1_thresh *= 0.8
-            
-        if price > r_high and m5_strength >= effective_body_thresh:
-            if h1_strength >= effective_h1_thresh and d1_bearish: # Logic Fix: Price > High = SELL (Liquidity Sweep)
-                if rsi < 30: # Don't sell if already oversold
-                    self.last_rejection_reason = f"Breakout: RSI Overextended for SELL ({rsi:.1f})"
-                    return None
-                    
-                confidence = 0.80 + session_mult["conf_boost"] + min(0.15, h1_strength * 0.2)
-                
-                if confidence < conf_floor:
-                    self.last_rejection_reason = f"Session Confidence Under Floor ({confidence:.2f} < {conf_floor:.2f})"
-                    return None
-                    
-                self._last_signal_bar = len(m5)
-                return TradeSignal(direction="SELL", price=price, confidence=min(0.98, confidence))
+            effective_rej_thresh *= 0.9
+
+        conf_floor = self.get_session_confidence_floor(market_data)
+
+        # =================================================================
+        # BUY SWEEP (LIQUIDITY GRAB BELOW RANGE + HAMMER REJECTION)
+        # =================================================================
+        swept_low = last.low < r_low
+        closed_inside_from_low = last.close > r_low
+        bullish_rejection = close_from_low_ratio >= effective_rej_thresh and last.close >= last.open
         
-        if price < r_low and m5_strength >= effective_body_thresh:
-            if h1_strength >= effective_h1_thresh and d1_bullish: # Price < Low = BUY (Liquidity Sweep)
-                if rsi > 70: # Don't buy if already overbought
-                    self.last_rejection_reason = f"Breakout: RSI Overextended for BUY ({rsi:.1f})"
-                    return None
-                    
-                confidence = 0.80 + session_mult["conf_boost"] + min(0.15, h1_strength * 0.2)
+        if swept_low and closed_inside_from_low and bullish_rejection:
+            # Regime Filter: If trending hard downward, sweeping the low is a falling knife. Block it.
+            if is_trending and m15_trend == -1:
+                self.last_rejection_reason = "Sweep: Blocked by Bearish Macro Trend"
+                return None
                 
-                if confidence < conf_floor:
-                    self.last_rejection_reason = f"Session Confidence Under Floor ({confidence:.2f} < {conf_floor:.2f})"
-                    return None
-                    
+            conf = min(0.98, 0.82 + session_mult["conf_boost"] + (0.05 if vol_climax else 0))
+            if conf >= conf_floor:
                 self._last_signal_bar = len(m5)
-                return TradeSignal(direction="BUY", price=price, confidence=min(0.98, confidence))
+                sig = TradeSignal(direction="BUY", price=price, confidence=conf)
+                sig.reasons.append("MECHANIC:SWEEP")
+                sig.reasons.append(f"TARGET:{r_high}") 
+                sig.reasons.append(f"PROTECT:{last.low}")
+                return sig
+
+        # =================================================================
+        # SELL SWEEP (LIQUIDITY GRAB ABOVE RANGE + SHOOTING STAR REJECTION)
+        # =================================================================
+        swept_high = last.high > r_high
+        closed_inside_from_high = last.close < r_high
+        bearish_rejection = close_from_high_ratio >= effective_rej_thresh and last.close <= last.open
         
-        if price > r_high or price < r_low:
-             if m5_strength < effective_body_thresh: self.last_rejection_reason = f"Breakout: M5 Strength too low ({m5_strength:.2f})"
-             elif h1_strength < effective_h1_thresh: self.last_rejection_reason = f"Breakout: H1 Strength too low ({h1_strength:.2f})"
-             else: self.last_rejection_reason = "Breakout: MTF/Dir Mismatch"
-        else:
-             self.last_rejection_reason = "Breakout: Price inside range"
+        if swept_high and closed_inside_from_high and bearish_rejection:
+            # Regime Filter: If trending hard upward, sweeping the high is a runaway rally. Block it.
+            if is_trending and m15_trend == 1:
+                self.last_rejection_reason = "Sweep: Blocked by Bullish Macro Trend"
+                return None
+                
+            conf = min(0.98, 0.82 + session_mult["conf_boost"] + (0.05 if vol_climax else 0))
+            if conf >= conf_floor:
+                self._last_signal_bar = len(m5)
+                sig = TradeSignal(direction="SELL", price=price, confidence=conf)
+                sig.reasons.append("MECHANIC:SWEEP")
+                sig.reasons.append(f"TARGET:{r_low}") 
+                sig.reasons.append(f"PROTECT:{last.high}")
+                return sig
+
+        # Detailed rejection tracking for logs
+        if swept_low and not bullish_rejection: self.last_rejection_reason = f"Sweep Low: Weak Hook ({close_from_low_ratio:.2f})"
+        elif swept_high and not bearish_rejection: self.last_rejection_reason = f"Sweep High: Weak Hook ({close_from_high_ratio:.2f})"
+        elif last.close > r_high or last.close < r_low: self.last_rejection_reason = "Breakout occurred (Ignored)"
+        else: self.last_rejection_reason = "Inside Range (No Sweep)"
 
         return None
 
+    # ==================================================================
+    # DYNAMIC SL/TP ENGINE (Built for Traps)
+    # ==================================================================
+    def get_stop_loss(self, signal: TradeSignal, market_data: MarketData) -> float:
+        m15_atr = self._get_m15_atr(market_data)
+        
+        protect_str = [r for r in signal.reasons if r.startswith("PROTECT:")]
+        if protect_str:
+            structural_extreme = float(protect_str[0].split(":")[1])
+            # Structural placement just outside the sweep wick + 0.3 ATR buffer
+            buffer = m15_atr * 0.3
+            max_sl_dist = m15_atr * 1.5 # Cap the risk if the sweep wick was absolutely massive
+            
+            if signal.direction == "BUY":
+                ideal_sl = structural_extreme - buffer
+                max_sl = market_data.current_price - max_sl_dist
+                return max(ideal_sl, max_sl) # Take the tighter one mathematically
+            else:
+                ideal_sl = structural_extreme + buffer
+                max_sl = market_data.current_price + max_sl_dist
+                return min(ideal_sl, max_sl)
+                
+        # Safe fallback
+        return market_data.current_price - (m15_atr * 1.5) if signal.direction == "BUY" else market_data.current_price + (m15_atr * 1.5)
+
+    def get_take_profit(self, signal: TradeSignal, market_data: MarketData) -> float:
+        m15_atr = self._get_m15_atr(market_data)
+        
+        target_str = [r for r in signal.reasons if r.startswith("TARGET:")]
+        if target_str:
+            target_edge = float(target_str[0].split(":")[1])
+            min_tp_dist = m15_atr * 1.5 # Guarantee a baseline 1.5:1 R:R floor minimum
+            
+            if signal.direction == "BUY":
+                min_tp = market_data.current_price + min_tp_dist
+                return max(target_edge, min_tp) # Target the far edge, or the minimum distance
+            else:
+                min_tp = market_data.current_price - min_tp_dist
+                return min(target_edge, min_tp)
+                
+        # Safe fallback
+        return market_data.current_price + (m15_atr * 1.5) if signal.direction == "BUY" else market_data.current_price - (m15_atr * 1.5)
+
+    # ==================================================================
+    # Dashboard Metrics
+    # ==================================================================
     def get_metrics(self, market_data: MarketData) -> Dict[str, Any]:
         if not market_data.htf_candles or len(market_data.htf_candles) < 22:
             return {}
             
-        h1 = market_data.htf_candles[-1]
+        adx_vals = market_data.m15_candles.get_indicator("adx_14")
+        adx = adx_vals[-1] if len(adx_vals) > 0 and not np.isnan(adx_vals[-1]) else 0.0
+        regime = "TREND" if adx >= self.adx_trend_threshold else "RANGE"
+        
+        m15_trend = self.get_ema_trend(market_data.m15_candles)
+        trend_label = {1: "BULL", -1: "BEAR", 0: "FLAT"}.get(m15_trend, "?")
+        
         m5 = market_data.m5_candles
-        price = market_data.current_price
-        
-        h1_candle_range = h1.high - h1.low
-        h1_body = abs(h1.close - h1.open)
-        h1_strength = (h1_body / h1_candle_range) if h1_candle_range > 0 else 0
-        
-        h1_v = market_data.htf_candles.v
-        h1_vol_sma = np.mean(h1_v[-21:-1])
-        minutes_into_hour = market_data.timestamp.minute
-        completion_pct = max(0.05, (minutes_into_hour + 1) / 60.0)
-        dynamic_threshold = h1_vol_sma * completion_pct
-        
-        if len(m5) < self.lookback + 1:
-            return {"Min Conf": 0.0, "H1 Body": h1_strength, "Volume": h1.tick_volume}
-
-        prev_range = m5[-self.lookback-1:-1]
-        r_high = np.max(prev_range.high)
-        r_low = np.min(prev_range.low)
-        last = m5[-1]
-        m5_range = last.high - last.low
-        m5_strength = (abs(last.close - last.open) / m5_range) if m5_range > 0 else 0
-        
-        price_state = "Inside Range"
-        if price > r_high: price_state = "Break High"
-        elif price < r_low: price_state = "Break Low"
+        last = m5[-1] if len(m5) > 0 else None
+        cr = 0
+        if last and (last.high - last.low) > 0:
+            cr = (last.close - last.low) / (last.high - last.low)
         
         return {
-            "Min Conf": market_data.preprocessed.get("confidence") if market_data.preprocessed else 0.0,
-            "H1 Body": h1_strength,
-            "M5 Body": m5_strength,
-            "Volume": h1.tick_volume / dynamic_threshold if dynamic_threshold > 0 else 0.0,
-            "Range": price_state
+            "Regime": f"{regime} ({adx:.1f})",
+            "M15 Trend": trend_label,
+            "M15 ATR": f"{self._get_m15_atr(market_data):.1f}", 
+            "M5 Hook": f"{cr:.2f}"
         }
 
     def get_thresholds(self) -> Dict[str, Any]:
         return {
-            "Min Conf": f"> {self.min_confidence:.2f}",
-            "H1 Body": f"> {self.h1_strength_thresh:.2f}",
-            "M5 Body": f"> {self.body_thresh:.2f}",
-            "Volume": "> 1.0x",
-            "Range": "Breakout"
+            "Regime": f"ADX <> {self.adx_trend_threshold}",
+            "M15 Trend": "Filter",
+            "M15 ATR": "Vol Tracker",
+            "M5 Hook": f"> {self.rejection_thresh:.2f}"
         }
-    def get_stop_loss(self, signal: TradeSignal, market_data: MarketData) -> float:
-        last = market_data.m5_candles[-1]
-        atr_vals = market_data.m5_candles.atr(14)
-        atr = atr_vals[-1] if len(atr_vals) > 0 and not np.isnan(atr_vals[-1]) else 1.0
-        scaler = self.get_regime_scaler(market_data)
-        
-        if signal.direction == "BUY":
-            return min(last.low, market_data.current_price - (atr * self.sl_atr * scaler))
-        return max(last.high, market_data.current_price + (atr * self.sl_atr * scaler))
-
-    def get_take_profit(self, signal: TradeSignal, market_data: MarketData) -> float:
-        atr_vals = market_data.m5_candles.atr(14)
-        atr = atr_vals[-1] if len(atr_vals) > 0 and not np.isnan(atr_vals[-1]) else 1.0
-        scaler = self.get_regime_scaler(market_data)
-        target_dist = atr * self.tp_atr * scaler
-        
-        if signal.direction == "BUY":
-            return market_data.current_price + target_dist
-        return market_data.current_price - target_dist

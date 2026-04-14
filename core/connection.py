@@ -204,13 +204,22 @@ class MT5Connection:
         """Update cached account information."""
         # Derive server time from MT5's actual server timestamp
         try:
+            tz = self._get_broker_tz()
+            loc = self._get_broker_location()
+            
             server_ts = getattr(info, 'server_time', None)
             if server_ts:
-                dt = datetime.fromtimestamp(server_ts, tz=timezone.utc)
+                dt = datetime.fromtimestamp(server_ts, tz=tz)
             else:
-                dt = datetime.now(timezone.utc)
-                
-            loc = self._get_broker_location()
+                dt = datetime.now(tz)
+            
+            # Compute ordinal suffix for day (1st, 2nd, 3rd, etc.)
+            day = dt.day
+            if 11 <= day <= 13:
+                suffix = "th"
+            else:
+                suffix = {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+            
             server_time = dt.strftime(f"{day}{suffix} %B %Y - %I:%M%p ({tz.tzname(None)}) {loc}")
             
         except Exception:

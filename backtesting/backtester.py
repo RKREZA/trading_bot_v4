@@ -67,6 +67,7 @@ from core.recovery.checkpoint_manager import CheckpointManager
 from core.execution.order_manager import OrderManager
 from core.base_strategy import MarketData
 from core.indicator_engine import IndicatorEngine
+from core.common.exceptions import CriticalRiskViolationError
 
 # Phase 5: Institutional Grade-A+ Imports
 from core.common.types import (
@@ -579,6 +580,19 @@ class PortfolioBacktester:
                 if i % 100 == 0 and not self.config.get("backtest", {}).get("disable_checkpoint", False):
                     self.checkpoint_manager.save_checkpoint(self.get_state())
 
+            except CriticalRiskViolationError as crve:
+                # INSTITUTIONAL: Graceful handling of lot size violations
+                # raised by the execution pipeline. Log forensic trail and halt cleanly.
+                logger.critical(f"BACKTEST HALTED: {crve.detail}")
+                crash_file = os.path.join("logs", "crash_report.log")
+                os.makedirs("logs", exist_ok=True)
+                with open(crash_file, "a") as f:
+                    import json as _json
+                    f.write(f"\n--- BACKTEST CRITICAL RISK VIOLATION: {datetime.now()} ---\n")
+                    f.write(_json.dumps(crve.forensic_dict(), indent=2))
+                    f.write("\n")
+                break  # Graceful halt vs. raw crash
+
             except Exception as e:
                 import traceback
                 crash_file = os.path.join("logs", "crash_report.log")
@@ -725,24 +739,88 @@ class PortfolioBacktester:
             logger.critical(f"DATA ALIGNMENT ERROR: M1 data ({m1.time[-1]}) expires before M5 ({m5.time[-1]})")
             raise ValueError("CRITICAL_SYSTEM_ERROR: Data inconsistency.")
 
-    def _get_tf_idx(self, tf_data, target_time, side: str = "right") -> int:
-        """Returns the current index of a higher timeframe candle relative to target_time."""
+    # --- TIMEFRAME INDEX RESOLUTION CONSTANTS ---
+    _TF_INTERVALS = {"M1": 60, "M5": 300, "M15": 900, "M30": 1800, "H1": 3600, "H4": 14400, "D1": 86400}
+
+    def _get_tf_idx(self, tf_data, target_time, side: str = "right", tf_str: str = None) -> int:
+        """
+        Returns the current index of a higher timeframe candle relative to target_time.
+        
+        INSTITUTIONAL HARDENING: After searchsorted, we verify:
+        1. The found candle's timestamp does NOT exceed target_time (anti-lookahead)
+        2. The gap between the found candle and target_time is within expected bounds
+           (detects missing candles/data gaps)
+        
+        Args:
+            tf_str: Explicit timeframe string (e.g. "M15", "H1"). Falls back to
+                    tf_data.timeframe attribute if not provided.
+        """
         if len(tf_data.time) == 0: return 0
         idx = np.searchsorted(tf_data.time, target_time, side=side)
-        return max(0, idx)
+        idx = max(0, min(idx, len(tf_data.time) - 1))
+        
+        # STRICT ANTI-LOOKAHEAD: Ensure the candle at idx does not start AFTER target_time
+        # If it does, step back by one to guarantee we only use past data.
+        if tf_data.time[idx] > target_time and idx > 0:
+            idx -= 1
+        
+        # GAP DETECTION: Warn if the distance between found candle and target_time
+        # exceeds 2x the expected timeframe interval (indicates missing candles)
+        resolved_tf = tf_str or getattr(tf_data, 'timeframe', None)
+        if resolved_tf and resolved_tf in self._TF_INTERVALS:
+            expected_interval = self._TF_INTERVALS[resolved_tf]
+            gap = abs(target_time - tf_data.time[idx])
+            if gap > expected_interval * 2:
+                logger.warning(
+                    f"DATA GAP DETECTED in {resolved_tf}: Target {target_time}, Found {tf_data.time[idx]}, "
+                    f"Gap {gap}s > {expected_interval * 2}s (2x interval)"
+                )
+        
+        return idx
 
     def _get_m1_for_m5(self, m1, target_time):
-        """Returns M1 candles within the target timeframe bar window."""
+        """
+        Returns M1 candles within the target timeframe bar window.
+        
+        INSTITUTIONAL HARDENING:
+        1. Derives next_bar_time dynamically from config timeframe instead of hardcoded +300
+        2. Validates M1 slice completeness (warns if missing candles)
+        3. Asserts monotonicity: first M1 candle >= target_time (no past leakage)
+        """
         if len(m1) == 0:
             from core.common.types import CandleArray
             return CandleArray.from_dicts([])
 
+        # Dynamic timeframe interval (defaults to M5=300s if not configured)
+        tf_str = self.config.get("backtest", {}).get("timeframe", "M5")
+        tf_seconds = self._TF_INTERVALS.get(tf_str, 300)
+
         idx_start = np.searchsorted(m1.time, target_time, side='left')
-        next_bar_time = target_time + 300 
+        next_bar_time = target_time + tf_seconds
         idx_end = np.searchsorted(m1.time, next_bar_time, side='left')
+        
         if idx_end <= idx_start:
-            idx_end = min(idx_start + 5, len(m1.time))
-        return m1[idx_start:idx_end]
+            idx_end = min(idx_start + (tf_seconds // 60), len(m1.time))
+        
+        # COMPLETENESS CHECK: Expected M1 count = tf_seconds / 60
+        expected_m1_count = tf_seconds // 60
+        actual_m1_count = idx_end - idx_start
+        if 0 < actual_m1_count < expected_m1_count:
+            logger.debug(
+                f"M1 SLICE INCOMPLETE: Expected {expected_m1_count} candles for {tf_str}, "
+                f"got {actual_m1_count} at time {target_time}"
+            )
+        
+        result = m1[idx_start:idx_end]
+        
+        # MONOTONICITY ASSERTION: First M1 candle should not precede target_time
+        if len(result) > 0 and result.time[0] < target_time:
+            logger.warning(
+                f"M1 MONOTONICITY WARNING: First M1 candle {result.time[0]} < target {target_time}. "
+                f"Possible past data leakage."
+            )
+        
+        return result
 
     def _force_close_at_end(self, m5_data, point, tick_value, comm_per_lot, strategies):
         if not self.open_trades: return
