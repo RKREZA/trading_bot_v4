@@ -28,30 +28,41 @@ class TradingDashboard:
         self.metric_engine = MetricEngine()
         
         # Initialize Layout structure
+        # All functional tiers are set to exact content-height (fitting)
+        # The 'vacuum' absorbing everything else to ensure top-pinning
         self.layout.split_column(
-            Layout(name="header", size=3),
-            Layout(name="body"),
-            Layout(name="footer", size=8)
+            Layout(name="header", size=4),
+            Layout(name="body", size=24),
+            Layout(name="footer", size=15),
+            Layout(name="vacuum", ratio=1)
         )
-        self.layout["body"].split_row(
-            Layout(name="left", ratio=3),
-            Layout(name="right", ratio=2)
+        
+        # Footer Synchronization: Row-based horizontal split
+        self.layout["footer"].split_row(
+            Layout(name="footer_analysis", ratio=2),
+            Layout(name="footer_logs", ratio=3),
+            Layout(name="footer_calendar", ratio=3)
         )
-        self.layout["left"].split_column(
-            Layout(name="environment", ratio=2),
-            Layout(name="risk", ratio=3)
+        
+        # Body Refactor: Tiered Architecture (Precision Vertical Fitting)
+        # Top Row: Fixed height (fitted)
+        # Setups Row: Fixed height (fitted)
+        self.layout["body"].split_column(
+            Layout(name="body_top", size=9),
+            Layout(name="setups", size=15)
         )
-        self.layout["right"].split_column(
-            Layout(name="exposure", ratio=2),
-            Layout(name="setups", ratio=3)
+        self.layout["body_top"].split_row(
+            Layout(name="environment", ratio=5),
+            Layout(name="risk", ratio=6),
+            Layout(name="exposure", ratio=6)
         )
 
     def _get_formatted_time(self) -> str:
         now = datetime.now().astimezone()
+        tz_name = now.tzname() or "Local"
         offset = now.strftime("%z")
-        hours = int(offset[:3])
-        tz_str = f"(UTC +{hours}) Dhaka" if hours == 6 else f"(UTC {offset[:3]})"
-        return now.strftime(f"%d-%b-%Y %H:%M:%S {tz_str}")
+        # Format: 14-Apr-2026 07:54:30 (UTC+0600) BST
+        return now.strftime(f"%d-%b-%Y %H:%M:%S (UTC{offset}) {tz_name}")
 
     def _make_header(self, state: dict) -> Panel:
         conn = state.get("connection", {}) or {}
@@ -88,10 +99,10 @@ class TradingDashboard:
         heartbeat = "●" if self.pulse_toggle else "○"
         self.pulse_toggle = not self.pulse_toggle
         
-        table = Table.grid(padding=1)
+        table = Table.grid(padding=0)
         table.add_column(style="bold magenta")
         table.add_column()
-        table.add_row("SYMBOL", f"[bold yellow]{symbol}[/]")
+        table.add_row("SYMBOL  ", f"[bold yellow]{symbol}[/]")
         table.add_row("PRICE", f"[{price_color}]{ask:,.{digits}f} (ask)[/]")
         table.add_row("SPREAD", f"[cyan]{spread:,.1f} pts ({pips:,.1f} pips)[/]")
         table.add_row("ALIVE", heartbeat)
@@ -114,7 +125,7 @@ class TradingDashboard:
         
         pnl_color = "bold green" if profit >= 0 else "bold red"
         
-        table = Table.grid(padding=1)
+        table = Table.grid(padding=0)
         table.add_column(style="bold white")
         table.add_column(justify="right")
         table.add_row("Balance", f"${balance:,.2f}")
@@ -144,48 +155,139 @@ class TradingDashboard:
             
         return Panel(table, title="Exposure Heatmap", border_style="cyan")
 
+    def _format_dict_styled(self, d: Dict[str, Any], color_scheme: str = "cyan") -> Text:
+        if not d: return Text("N/A", style="dim")
+        text = Text()
+        entries = list(d.items())
+        # Show all entries as requested by institutional users
+        for i, (k, v) in enumerate(entries):
+            if str(k).startswith("_"): continue
+            
+            # Key styling: Clean labels with consistent padding
+            clean_k = k.replace("_", " ").title()
+            text.append(f" {clean_k:<12} ", style=f"dim {color_scheme}")
+            
+            # Value styling
+            if isinstance(v, float):
+                val_str = f"{v:.2f}"
+            elif isinstance(v, list):
+                val_str = ", ".join([str(x) for x in v[:3]])
+                if len(v) > 3: val_str += "..."
+            elif isinstance(v, dict):
+                sub_keys = [sk for sk in v.keys() if not str(sk).startswith("_")]
+                val_str = ", ".join([str(sk).title() for sk in sub_keys[:1]])
+                if len(sub_keys) > 1: val_str += "..."
+            else:
+                val_str = str(v)
+            
+            if len(val_str) > 20: val_str = val_str[:17] + "..."
+            
+            # Values are emphasized
+            text.append(f"{val_str}\n", style="bold white")
+            
+        return text
+
     def _make_setups(self, state: dict) -> Panel:
         setups = state.get("setups", {}) or {}
-        table = Table(box=None, show_header=True, header_style="bold yellow")
-        table.add_column("Strategy", ratio=2)
-        table.add_column("Bias", ratio=1)
-        table.add_column("Grade", ratio=1)
+        # Maximize width with expand=True and tight padding
+        table = Table(box=None, show_header=True, header_style="bold yellow", expand=True, padding=(0, 2))
+        table.add_column("STRATEGY", width=25, style="bold cyan", no_wrap=True)
+        table.add_column("REQUIREMENTS [dim](Targets)[/]", ratio=1)
+        table.add_column("ANALYSIS [dim](Live)[/]", ratio=1)
+        table.add_column("BIAS", width=12, justify="center")
+        table.add_column("GRADE", width=10, justify="right")
         
         for sid, s_info in setups.items():
             signal = s_info.get("signal", "NONE")
             sig_dir = signal.direction if hasattr(signal, "direction") else str(signal)
-            dfs = s_info.get("fidelity", 1.0)
             
-            color = "green" if sig_dir != "NONE" else "white"
+            # Use confidence as fidelity if not explicitly provided
+            dfs = s_info.get("fidelity")
+            if dfs is None:
+                dfs = signal.confidence if hasattr(signal, "confidence") else 1.0
+            
+            thresholds = s_info.get("thresholds", {})
+            metrics = s_info.get("metrics", {})
+            
+            req_text = Text()
+            analysis_text = Text()
+            
+            # Synchronized Row-by-Row Aligment
+            # We iterate through keys in thresholds to ensure vertical alignment
+            all_keys = list(thresholds.keys())
+            # Also add metrics keys that might not be in thresholds (extra telemetry)
+            for mk in metrics.keys():
+                if mk not in all_keys and not str(mk).startswith("_"):
+                    all_keys.append(mk)
+            
+            for k in all_keys:
+                target_val = thresholds.get(k, "---")
+                live_val = metrics.get(k, "N/A")
+                
+                # Requirements Column
+                req_text.append(f" {k:<12} ", style="dim magenta")
+                req_text.append(f"{target_val}\n", style="bold white")
+                
+                # Analysis Column
+                if isinstance(live_val, float):
+                    live_str = f"{live_val:.2f}"
+                else:
+                    live_str = str(live_val)
+                    
+                analysis_text.append(f" {k:<12} ", style="dim green")
+                # Highlight if value is N/A or empty
+                style = "bold white" if live_str != "N/A" else "dim red"
+                analysis_text.append(f"{live_str}\n", style=style)
+            
+            # Bias Color logic
+            bias_color = "bold green" if "BUY" in sig_dir.upper() else "bold red" if "SELL" in sig_dir.upper() else "dim white"
+            
             clean_name = sid.replace("_v5", "").replace("_", " ").title()
-            table.add_row(clean_name, f"[{color}]{sig_dir}[/]", f"{dfs*100:.0f}%")
+            table.add_row(
+                clean_name, 
+                req_text, 
+                analysis_text, 
+                Text(sig_dir, style=bias_color),
+                f"[bold white]{dfs*100:.0f}%[/]"
+            )
             
-        return Panel(table, title="Institutional Setups", border_style="yellow")
+        return Panel(table, title="Institutional Setups (HFT-Fidelity)", border_style="yellow", padding=0)
 
     def _make_footer(self, state: dict) -> Any:
-        logs = state.get("logs", [])
+        analysis_logs = state.get("analysis_logs", [])
+        system_logs = state.get("system_logs", [])
         news = state.get("news_list", [])
         
         grid = Table.grid(expand=True)
-        grid.add_column(ratio=2) # Logs
-        grid.add_column(ratio=1) # News
+        grid.add_column(ratio=1.0) # Analysis
+        grid.add_column(ratio=1.5) # Live Logs
+        grid.add_column(ratio=1.5) # Economic Calendar
         
-        # Logs sub-panel
-        log_text = Text()
-        for log in logs[-5:]:
-            color = "cyan" if "[ANALYSIS]" in log else "green" if "[TRADE]" in log else "red" if "[ERROR]" in log else "white"
-            log_text.append(f"> {log}\n", style=color)
+        # 1. ANALYSIS LOGS (Strategy heartbeats)
+        analysis_text = Text()
+        for log in analysis_logs[-5:]:
+            analysis_text.append(f"> {log}\n", style="cyan")
             
-        # News sub-panel
+        # 2. SYSTEM LOGS (Trades, Errors, Environment)
+        system_text = Text()
+        for log in system_logs[-5:]:
+            color = "green" if "[TRADE]" in log else "red" if "[ERROR]" in log or "[FATAL]" in log else "white"
+            system_text.append(f"> {log}\n", style=color)
+            
+        # 3. ECONOMIC CALENDAR
         news_text = Text()
-        for ev in news[:3]:
-            news_text.append(f"[{ev.get('time', 'N/A')}] {ev.get('title', 'Event')}\n", style="magenta")
+        if not news:
+            news_text.append("No high-impact news\nin next 24 hours.", style="dim italic")
+        else:
+            for ev in news[:4]:
+                ev_time = ev.get('time', 'N/A')
+                news_text.append(f"[{ev_time}] {ev.get('title')}\n", style="magenta")
 
-        grid.add_row(
-            Panel(log_text, title="Live Analysis", border_style="dim"),
+        return (
+            Panel(analysis_text, title="Live Analysis", border_style="dim"),
+            Panel(system_text, title="Live Logs", border_style="blue"),
             Panel(news_text, title="Economic Calendar", border_style="magenta")
         )
-        return grid
 
     def update(self, state: dict) -> Layout:
         """Update Layout with fresh state objects."""
@@ -194,7 +296,14 @@ class TradingDashboard:
         self.layout["risk"].update(self._make_risk(state))
         self.layout["exposure"].update(self._make_exposure(state))
         self.layout["setups"].update(self._make_setups(state))
-        self.layout["footer"].update(self._make_footer(state))
+        
+        # Footer Synchronization
+        f_analysis, f_logs, f_calendar = self._make_footer(state)
+        self.layout["footer_analysis"].update(f_analysis)
+        self.layout["footer_logs"].update(f_logs)
+        self.layout["footer_calendar"].update(f_calendar)
+        
+        self.layout["vacuum"].update("")
         return self.layout
 
 def start_dashboard(layout):

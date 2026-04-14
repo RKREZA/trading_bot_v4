@@ -23,6 +23,9 @@ class AIModeWrapper:
 
     def load(self) -> bool:
         """Loads serialized joblib model weights."""
+        if self.is_ready and self.model is not None:
+            return True
+
         if not RandomForestClassifier:
             logger.error("Scikit-learn not installed. AI Layer disabled.")
             return False

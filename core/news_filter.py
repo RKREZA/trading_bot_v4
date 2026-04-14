@@ -117,14 +117,17 @@ class InstitutionalNewsFilter:
                     if event.get("impact") in self.impact_levels:
                         try:
                             # 1. Institutional Timezone Normalization (Audit Bug #1 Fixed)
-                            # ForexFactory dates are US/Eastern. We parse and convert to UTC.
-                            naive_dt = datetime.fromisoformat(event["date"])
+                            dt = datetime.fromisoformat(event["date"])
                             
-                            import pytz
-                            est_tz = pytz.timezone("US/Eastern")
-                            # FF dates are already in EST/EDT (Source local). We just localize.
-                            localized_dt = est_tz.localize(naive_dt)
-                            utc_ts = localized_dt.timestamp()
+                            # If it's already aware (standard in newer FF API responses), just convert to UTC
+                            if dt.tzinfo is not None:
+                                utc_ts = dt.timestamp()
+                            else:
+                                # Fallback for naive dates: assume US/Eastern as per FF legacy
+                                import pytz
+                                est_tz = pytz.timezone("US/Eastern")
+                                localized_dt = est_tz.localize(dt)
+                                utc_ts = localized_dt.timestamp()
                             
                             filtered_events.append({
                                 "title": event.get("title"),
@@ -222,13 +225,17 @@ class InstitutionalNewsFilter:
             })
         return normalized
 
-    def is_blocked(self, symbol: str, current_time: float) -> Optional[str]:
+    def is_blocked(self, symbol: str, current_time: float = None) -> Optional[str]:
         """
         Checks if trading is blocked for a specific symbol.
         Returns the event name if blocked, else None.
         """
         if not self.enabled:
             return None
+
+        # Anchor to system clock if current_time (broker clock) is drifted
+        if current_time is None:
+            current_time = time.time()
 
         # Institutional Safe-Gate: Check for Stale Data (Step 23)
         if self._is_data_stale():
@@ -265,8 +272,11 @@ class InstitutionalNewsFilter:
                     
         return None
 
-    def get_upcoming_events(self, current_time: float, window_hours: int = 24) -> List[Dict[str, Any]]:
+    def get_upcoming_events(self, current_time: float = None, window_hours: int = 24) -> List[Dict[str, Any]]:
         """Returns events happening in the next X hours."""
+        if current_time is None:
+            current_time = time.time()
+            
         window_sec = window_hours * 3600
         upcoming = [
             e for e in self.events 

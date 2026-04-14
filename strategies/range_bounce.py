@@ -251,9 +251,16 @@ class RangeBounceStrategy(BaseStrategy):
         bb_position = (market_data.current_price - bb_lower) / bb_range if bb_range > 0 else 0.5
         
         return {
-            "rsi": rsi,
-            "bb_upper": bb_upper,
-            "bb_lower": bb_lower,
-            "bb_position": bb_position,
-            "price": market_data.current_price
+            "Min Conf": market_data.preprocessed.get("confidence") if market_data.preprocessed else 0.0,
+            "RSI": rsi,
+            "BB Position": bb_position,
+            "Price": market_data.current_price
+        }
+
+    def get_thresholds(self) -> Dict[str, Any]:
+        return {
+            "Min Conf": f"> {self.min_confidence:.2f}",
+            "RSI": f"{self.rsi_oversold}/{self.rsi_overbought}",
+            "BB Position": "< 0.15 or > 0.85",
+            "Price": "Reversion"
         }

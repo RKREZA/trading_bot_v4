@@ -39,7 +39,7 @@ class DataEngine:
         self._thread: Optional[threading.Thread] = None
         
         # Throttling to prevent MT5 lock contention
-        self.update_interval = config.get("performance", {}).get("data_engine_interval", 1.0)
+        self.update_interval = config.get("performance", {}).get("data_engine_interval", 2.0)
         self.symbols = list(config.get("symbols_config", {}).keys())
         if "XAUUSDm" not in self.symbols:
             self.symbols.append("XAUUSDm")
@@ -113,6 +113,7 @@ class DataEngine:
             
             with self._lock:
                 self.states[symbol] = new_state
+                logger.info(f"DataEngine: Successful state commitment for {symbol} ({len(m5_candles)} M5 bars).")
                 
         except Exception as e:
             logger.debug(f"Process update failed for {symbol}: {e}")

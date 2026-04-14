@@ -38,6 +38,7 @@ class StrategyOrchestrator:
         self.news_filter = news_filter
         
         self.portfolio_manager = PortfolioManager(self.config)
+        self.ai_predictor = AIPredictor(self.config)
         self.last_cycle_time: Optional[datetime] = None
         self.last_analysis: Dict[str, Any] = {}
         self._analysis_lock = threading.Lock() 
@@ -71,7 +72,7 @@ class StrategyOrchestrator:
         blocking_event = self.news_filter.is_blocked(symbol, ts)
         
         # Pulse Telemetry Initialization
-        upcoming_obj = self.news_filter.get_upcoming_events(ts, 4)
+        upcoming_obj = self.news_filter.get_upcoming_events(ts, 24)
         for ev in upcoming_obj:
             # Shift from UTC to Local System Time for Unified UI alignment
             ev['time'] = datetime.fromtimestamp(ev['timestamp'], tz=timezone.utc).astimezone().strftime("%I:%M %p")
@@ -83,7 +84,7 @@ class StrategyOrchestrator:
             "news_blocked": blocking_event,
             "upcoming_news": [e["title"] for e in upcoming_obj],
             "upcoming_news_obj": upcoming_obj,
-            "timestamp": datetime.now().strftime("%H:%M:%S"),
+            "timestamp": market_data.timestamp.astimezone().strftime("%H:%M:%S"),
             "open_tickets": list(self._open_tickets) # Dashboard visibility
         }
         
@@ -123,13 +124,12 @@ class StrategyOrchestrator:
         
         # 4. GENERATE SIGNALS (Institutional Parallel Execution)
         raw_signals = {}
-        ai_layer = AIPredictor(self.config)
         import concurrent.futures
         
         def _execute_runtime(runtime):
             sid = runtime.strategy_id
             sig = runtime.execute_cycle(market_data)
-            metrics = runtime.strategy.get_metrics(market_data) if sig else {}
+            metrics = runtime.strategy.get_metrics(market_data)
             thresholds = runtime.strategy.get_thresholds()
             
             if sig and sig.direction != "NONE":
@@ -137,7 +137,7 @@ class StrategyOrchestrator:
                 sig.stop_loss = sl
                 
                 # ML LAYER: Immutable DTO Priority 1 Evaluation (Statistical + Macro Reasoning)
-                filtered_sig = ai_layer.filter_signal(
+                filtered_sig = self.ai_predictor.filter_signal(
                     sig, 
                     market_data, 
                     abs(sig.fill_price - sl) if hasattr(sig, 'fill_price') else sl,
@@ -163,7 +163,8 @@ class StrategyOrchestrator:
                         pulse_report["strategies"][sid] = {
                             "signal": sig if sig else "NONE",
                             "metrics": metrics,
-                            "thresholds": thresholds
+                            "thresholds": thresholds,
+                            "fidelity": sig.confidence if hasattr(sig, "confidence") else 1.0
                         }
                         if sig and sig.direction != "NONE":
                             raw_signals[sid] = sig

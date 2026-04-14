@@ -187,7 +187,7 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
         dynamic_threshold = h1_vol_sma * completion_pct
         
         if len(m5) < self.lookback + 1:
-            return {"H1 Strength": h1_strength, "H1 Volume": h1.tick_volume}
+            return {"Min Conf": 0.0, "H1 Body": h1_strength, "Volume": h1.tick_volume}
 
         prev_range = m5[-self.lookback-1:-1]
         r_high = np.max(prev_range.high)
@@ -201,14 +201,16 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
         elif price < r_low: price_state = "Break Low"
         
         return {
+            "Min Conf": market_data.preprocessed.get("confidence") if market_data.preprocessed else 0.0,
             "H1 Body": h1_strength,
             "M5 Body": m5_strength,
-            "Volume": h1.tick_volume / dynamic_threshold if dynamic_threshold > 0 else 0,
+            "Volume": h1.tick_volume / dynamic_threshold if dynamic_threshold > 0 else 0.0,
             "Range": price_state
         }
 
     def get_thresholds(self) -> Dict[str, Any]:
         return {
+            "Min Conf": f"> {self.min_confidence:.2f}",
             "H1 Body": f"> {self.h1_strength_thresh:.2f}",
             "M5 Body": f"> {self.body_thresh:.2f}",
             "Volume": "> 1.0x",

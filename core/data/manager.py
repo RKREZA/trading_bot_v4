@@ -59,7 +59,7 @@ class DataManager:
             if array is None or len(array) == 0: break
             
             # Phase A: Coverage Audit (Fidelity Check)
-            tf_secs = {"M1": 60, "M5": 300, "M15": 900, "H1": 3600}.get(timeframe, 300)
+            tf_secs = {"M1": 60, "M5": 300, "M15": 900, "H1": 3600, "D1": 86400}.get(timeframe, 300)
             days_requested = (now_ts - start_ts) / 86400
             expected_bars = (days_requested * 86400 / tf_secs) * 0.7 
             

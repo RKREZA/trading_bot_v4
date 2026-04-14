@@ -57,7 +57,8 @@ class LiveOrchestrator:
         self.symbol = symbol
         self.connection = MT5Connection()
         self.pos_manager = PositionManager(self.connection)
-        self.logs = []
+        self.analysis_logs = []
+        self.system_logs = []
         self.equity_history = [] 
         self.mismatch_count = 0
         self.is_paused = False
@@ -172,8 +173,8 @@ class LiveOrchestrator:
             logger.warning(f"CLOCK DRIFT CRITICAL: {drift:.1f}s. Pausing for re-sync.")
             self.is_paused = True
             time.sleep(2)
-        elif drift > 2.0:
-            logger.warning(f"CLOCK DRIFT WARNING: {drift:.1f}s skew detected.")
+        elif drift > 5.0:
+            logger.warning(f"CLOCK DRIFT WARNING: {drift:.1f}s skew detected (Operational Tolerance: 10s).")
             self.is_paused = False
         else:
             self.is_paused = False
@@ -268,7 +269,7 @@ class LiveOrchestrator:
             ==========================================================
             """
             print(banner)
-            self.logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] SHADOW RUN CALIBRATION ACTIVE.")
+            self.system_logs.append(f"[{datetime.now().astimezone().strftime('%H:%M:%S')}] SHADOW RUN CALIBRATION ACTIVE.")
             
             # TRADE PROTOCOL ENFORCEMENT (Rule 5.1 Hard Block)
             max_p1_lot = 0.05
@@ -282,7 +283,7 @@ class LiveOrchestrator:
                 # However, the user specifically asked to block if EXCEEDED.
                 # We will add a runtime check inside the loop for every signal too.
             
-            self.logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] System Initialized. Trading {self.symbol}.")
+            self.system_logs.append(f"[{datetime.now().astimezone().strftime('%H:%M:%S')}] System Initialized. Trading {self.symbol}.")
             
             # 0. Forced Initial Update: Clears "INITIALIZING" static state immediately
             self._update_ui(live, dashboard)
@@ -291,7 +292,7 @@ class LiveOrchestrator:
             open_pos = self.pos_manager.get_open_positions()
             for p in open_pos:
                 self.orchestrator._open_tickets.add(p.ticket)
-                self.logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] Reconstructed active ticket {p.ticket} for {p.symbol}")
+                self.system_logs.append(f"[{datetime.now().astimezone().strftime('%H:%M:%S')}] Reconstructed active ticket {p.ticket} for {p.symbol}")
             
             while True:
                 try:
@@ -307,7 +308,7 @@ class LiveOrchestrator:
                             
                             self.config.update(new_config)
                             self.config_stat = current_stat
-                            self.logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] CONFIG HOT-RELOADED (Schema Validated).")
+                            self.system_logs.append(f"[{datetime.now().astimezone().strftime('%H:%M:%S')}] CONFIG HOT-RELOADED (Schema Validated).")
                             logging.info("Configuration hot-reloaded successfully.")
                     except Exception as e:
                         logging.error(f"Failed to hot-reload config: {e}")
@@ -321,7 +322,7 @@ class LiveOrchestrator:
                         current_balance = self.connection.account_info.get('balance', 0)
                         self.orchestrator.reset_daily(current_balance)
                         last_reset_date = today
-                        self.logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] Daily reset triggered. Balance synced: ${current_balance:,.2f}")
+                        self.system_logs.append(f"[{datetime.now().astimezone().strftime('%H:%M:%S')}] Daily reset triggered. Balance synced: ${current_balance:,.2f}")
                     
                     # Sync with Broker Server Time (Every Cycle) - FIX (Sync Pillar)
                     dt_server = self.connection.get_broker_time(self.symbol)
@@ -329,7 +330,7 @@ class LiveOrchestrator:
                     if dt_server is None:
                         # Clock sync failed, wait and retry to avoid NoneType crashes
                         msg = "Waiting for Broker Clock synchronization..."
-                        self.logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+                        self.system_logs.append(f"[{datetime.now().astimezone().strftime('%H:%M:%S')}] {msg}")
                         logging.info(f"Handshake: {msg}")
                         self._update_ui(live, dashboard)
                         time.sleep(2)
@@ -362,7 +363,7 @@ class LiveOrchestrator:
                     
                     if state is None or state.m5 is None:
                         msg = "Awaiting initial DataEngine calculation..."
-                        self.logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+                        self.system_logs.append(f"[{datetime.now().astimezone().strftime('%H:%M:%S')}] {msg}")
                         self._update_ui(live, dashboard, status="CALCULATING...", tick=tick)
                         time.sleep(1)
                         continue
@@ -436,11 +437,12 @@ class LiveOrchestrator:
                     strat_biases = " | ".join([f"{sid[:5]}: {s_info['signal'].direction if hasattr(s_info['signal'], 'direction') else s_info['signal']}" for sid, s_info in pulse_report.get("strategies", {}).items()])
                     analysis_msg = f"[ANALYSIS] {self.symbol} ADX:{reg.adx:.1f} ({reg.market_type.value}) | {strat_biases}"
                     
-                    self.logs.append(f"[{pulse_report.get('timestamp')}] {analysis_msg}")
+                    self.analysis_logs.append(f"[{pulse_report.get('timestamp')}] {analysis_msg}")
+                    logging.info(analysis_msg)
                     
                     # Record Executions
                     for exec_res in pulse_report.get("execution", []):
-                        self.logs.append(f"[{pulse_report.get('timestamp')}] [TRADE] ENTERED {exec_res.get('direction')} @ {exec_res.get('fill_price')}")
+                        self.system_logs.append(f"[{pulse_report.get('timestamp')}] [TRADE] ENTERED {exec_res.get('direction')} @ {exec_res.get('fill_price')}")
                         self.health_server.record_trade(exec_res.get('direction', 'UNKNOWN'))
                     
                     # Record Metrics
@@ -458,7 +460,8 @@ class LiveOrchestrator:
                             total_history=self.equity_history
                         )
 
-                    if len(self.logs) > 50: self.logs = self.logs[-50:]
+                    if len(self.analysis_logs) > 50: self.analysis_logs = self.analysis_logs[-50:]
+                    if len(self.system_logs) > 50: self.system_logs = self.system_logs[-50:]
 
                     # Final Cycle Update (Pass Live Tick)
                     self._update_ui(live, dashboard, md=md, reg=reg, pulse_report=pulse_report, tick=tick)
@@ -488,11 +491,11 @@ class LiveOrchestrator:
                     except Exception as log_err:
                         print(f"FAILED TO WRITE CRASH LOG: {log_err}")
 
-                    self.logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] [ERROR] {err_msg[:50]} ({consecutive_errors}/{max_consecutive_errors})")
+                    self.system_logs.append(f"[{datetime.now().astimezone().strftime('%H:%M:%S')}] [ERROR] {err_msg[:50]} ({consecutive_errors}/{max_consecutive_errors})")
                     print(f"ERROR: {err_msg}") # Direct terminal feedback
                     
                     if consecutive_errors >= max_consecutive_errors:
-                        self.logs.append(f"[{datetime.now().strftime('%H:%M:%S')}] [FATAL] Critical failure threshold reached.")
+                        self.system_logs.append(f"[{datetime.now().astimezone().strftime('%H:%M:%S')}] [FATAL] Critical failure threshold reached.")
                         break
                     
                     time.sleep(5)
@@ -569,7 +572,8 @@ class LiveOrchestrator:
             "symbol": self.symbol,
             "digits": digits,
             "tick_lag": tick_lag,
-            "logs": self.logs[-15:],
+            "analysis_logs": self.analysis_logs[-15:],
+            "system_logs": self.system_logs[-15:],
             "local_time": datetime.now().astimezone().strftime("%d-%b-%Y %I:%M:%S %p %z"),
             "server_time": datetime.now().astimezone().strftime("%d-%b-%Y %I:%M:%S %p %z"),
             "price": price_now,

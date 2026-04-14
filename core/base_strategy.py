@@ -125,8 +125,25 @@ class BaseStrategy(ABC):
         ...
 
     def get_thresholds(self) -> Dict[str, Any]:
-        """Returns target thresholds from strategy configuration."""
-        return self.config
+        """Returns curated target thresholds from strategy configuration for the dashboard."""
+        strat_cfg = self.get_strat_config()
+        targets = {}
+        
+        # 1. Base Institutional Targets
+        targets["min_conf"] = self.min_confidence
+        targets["min_rr"] = self.min_rr
+        
+        # 2. Dynamic Discovery: Find parameters ending in _oversold, _threshold, _mult, etc.
+        dashboard_keywords = [
+            "oversold", "overbought", "threshold", "std", "period", "atr", 
+            "max_vol", "max_slope", "ratio", "sessions"
+        ]
+        
+        for k, v in strat_cfg.items():
+            if any(key in k.lower() for key in dashboard_keywords):
+                targets[k] = v
+                
+        return targets
 
     def on_trade_closed(self, trade_record: dict) -> None:
         pass
