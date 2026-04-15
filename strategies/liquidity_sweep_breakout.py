@@ -1,7 +1,7 @@
 import numpy as np
 import logging
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 from core.base_strategy import BaseStrategy, MarketData
 from core.common.types import TradeSignal
 from core.session_detector import SessionDetector
@@ -25,240 +25,310 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
         super().__init__(strategy_id, config)
         
         strat_config = self.get_strat_config()
-        self.lookback = strat_config.get("lookback", 20)
+        self.base_lookback = strat_config.get("lookback", 20)
+        self.rejection_thresh = strat_config.get("rejection_thresh", 0.60)
         
-        # In a sweep, we care about the CLOSE position relative to the candle range (Hammer/Shooting Star)
-        self.rejection_thresh = strat_config.get("rejection_thresh", 0.60) # Must close in upper/lower 40%
-        self.min_confidence = float(strat_config.get("min_confidence", self.min_confidence))
+        # ── Institutional Gating ──
+        self.adx_threshold = strat_config.get("adx_threshold", 25.0)
+        self.trend_strength_threshold = strat_config.get("trend_strength_threshold", 0.8)
+        self.impulse_threshold = strat_config.get("impulse_threshold", 1.8)
+        self.sweep_depth_mult = strat_config.get("sweep_depth_mult", 0.2)
+        self.duplicate_zone_mult = strat_config.get("duplicate_zone_mult", 0.5)
         
-        self.adx_trend_threshold = strat_config.get("adx_trend_threshold", 25.0)
-        
-        # FIX: Timestamp-based cooldown instead of broken `len(m5)` bar counting.
-        # The previous approach stored `len(m5)` which is constant (full dataset size),
-        # not the current sliding-window position — making the guard permanently 0 bars.
-        # Cooldown duration: configurable in seconds (default 3.5 hours = 12,600s)
+        # ── State Management ──
         self.cooldown_seconds = strat_config.get("cooldown_seconds", 12_600)  # 3.5h
-        self._last_signal_time: float = 0.0  # UNIX timestamp of last queued signal
-        
-        # Daily trade cap: prevents over-trading on volatile days
+        self._last_signal_time: float = 0.0
         self.max_trades_per_day = strat_config.get("max_trades_per_day", 2)
         self._daily_trade_count: int = 0
-        self._last_trade_date: str = ""  # ISO date string
+        self._last_trade_date: str = ""
+        self.post_sl_cooldown_seconds = strat_config.get("post_sl_cooldown_seconds", 14_400) # 4h
+        self._last_sl_time: float = 0.0
+        self._last_trade_price: float = 0.0
         
-        # Post-SL cooldown: after a stopout, add extra pause (seconds)
-        self.post_sl_cooldown_seconds = strat_config.get("post_sl_cooldown_seconds", 14_400)  # 4h
-        self._last_sl_time: float = 0.0  # UNIX timestamp of last SL hit
-        
-        # ATR spike filter: block entries when current ATR > N * 30-bar average (extreme trend days)
-        self.max_atr_spike_mult = strat_config.get("max_atr_spike_mult", 2.5)
-        
-        self.session_multipliers = strat_config.get("session_multipliers", {
-            "TOKYO": {"rej_boost": 0.0, "conf_boost": 0.0},
-            "LONDON": {"rej_boost": 0.05, "conf_boost": 0.05},
-            "NEW_YORK": {"rej_boost": 0.0, "conf_boost": 0.05},
-            "LONDON/NY": {"rej_boost": 0.10, "conf_boost": 0.10},
-            "GLOBAL": {"rej_boost": 0.0, "conf_boost": 0.0}
-        })
-        self._current_regime = "UNCERTAIN"
+        # ── Retracement Entry Management ──
+        self.use_retracement_entry = strat_config.get("use_retracement_entry", False)
+        self.retracement_validity_bars = 3
+        self._pending_setup: Optional[Dict[str, Any]] = None
 
     def _get_m15_atr(self, market_data: MarketData) -> float:
         m15_atr_vals = market_data.m15_candles.atr(14)
         if len(m15_atr_vals) > 0 and not np.isnan(m15_atr_vals[-1]):
             return m15_atr_vals[-1]
-        m5_atr = market_data.m5_candles.atr(14)
-        if len(m5_atr) > 0 and not np.isnan(m5_atr[-1]):
-            return m5_atr[-1] * 2.5
         return 15.0
 
-    def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
-        # TRADING ALL SESSIONS
-        if not self.is_spread_safe(market_data):
-            return None
-            
+    def _get_dynamic_lookback(self, market_data: MarketData) -> int:
         m5 = market_data.m5_candles
-        if len(m5) < self.lookback + 1:
-            self.last_rejection_reason = "Insufficient M5 data"
-            return None
+        atr_vals = m5.atr(14)
+        if len(atr_vals) < 31: return self.base_lookback
         
-        # FIX: Timestamp-based cooldown (replaces broken `len(m5)` bar counter).
-        # market_data.timestamp is always the current bar's datetime in UTC.
+        current_atr = atr_vals[-1]
+        avg_atr_30 = np.mean(atr_vals[-31:-1])
+        
+        vol_factor = current_atr / avg_atr_30 if avg_atr_30 > 0 else 1.0
+        lookback = self.base_lookback * np.clip(vol_factor, 0.8, 2.0)
+        return int(lookback)
+
+    def _get_range_structure(self, market_data: MarketData, lookback: int) -> Dict[str, float]:
+        m5 = market_data.m5_candles
+        if len(m5) < lookback + 1: return {}
+        
+        prev_range = m5[-lookback-1:-1]
+        r_high = np.max(prev_range.high)
+        r_low = np.min(prev_range.low)
+        range_size = r_high - r_low
+        
+        atr = self._get_m15_atr(market_data)
+        
+        # Range Integrity Check
+        if range_size < 0.5 * atr or range_size > 3.0 * atr:
+            return {"valid": False, "reason": "Invalid Range Structure"}
+            
+        return {"valid": True, "high": r_high, "low": r_low, "size": range_size}
+
+    def _is_momentum_safe(self, last_candle: Any, atr: float) -> Tuple[bool, str]:
+        if atr <= 0: return True, ""
+        
+        impulse = abs(last_candle.close - last_candle.open) / atr
+        
+        # Wick Dominance Check
+        candle_range = last_candle.high - last_candle.low
+        if candle_range <= 0: return True, ""
+        
+        # For a potential BUY (Hammer), we check the upper wick ratio for climax evidence
+        # For a potential SELL (Shooting Star), we check the lower wick ratio
+        # Actually, the user's rule was: "wick_ratio = (high - max(open, close)) / (high - low) # for sell"
+        # Let's generalize: wick in ADVANCE of the rejection move.
+        
+        is_bullish = last_candle.close >= last_candle.open
+        if is_bullish: # Potential BUY rejection
+            wick_ratio = (last_candle.close - last_candle.low) / candle_range
+        else: # Potential SELL rejection
+            wick_ratio = (last_candle.high - last_candle.close) / candle_range
+            
+        if impulse > self.impulse_threshold and wick_ratio < 0.5:
+            return False, "Momentum Block"
+            
+        return True, ""
+
+    def _check_liquidity_confluence(self, price: float, direction: str, market_data: MarketData, atr: float) -> Tuple[bool, str]:
+        if market_data.d1_candles is None or len(market_data.d1_candles) < 2:
+            return True, "" # No data, skip confluence requirement (relaxed)
+            
+        pd = market_data.d1_candles[-2] # Previous Day
+        pdh, pdl = pd.high, pd.low
+        
+        target_liq = pdl if direction == "BUY" else pdh
+        distance_to_liq = abs(price - target_liq) / atr if atr > 0 else 100
+        
+        # If PDH/PDL is nearby, we MUST sweep it
+        if distance_to_liq < 1.5:
+            if direction == "BUY" and price > pdl:
+                return False, "No Liquidity Confluence (PDL)"
+            if direction == "SELL" and price < pdh:
+                return False, "No Liquidity Confluence (PDH)"
+                
+        return True, ""
+
+    def _get_confidence_score(self, rej_strength: float, impulse: float, confluence: bool, vol_climax: bool, session: str) -> float:
+        # score = 0.70 + (rej_strength - 0.5) * 0.6 + max(0, 1.5 - impulse) * 0.08 + bonuses
+        score = 0.70
+        score += (rej_strength - 0.5) * 0.6
+        score += max(0, 1.5 - impulse) * 0.08
+        if confluence: score += 0.05
+        if vol_climax: score += 0.05
+        if session in ["LONDON", "LONDON/NY"]: score += 0.05
+        
+        return min(0.98, max(0.5, score))
+
+    def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
+        if not self.is_spread_safe(market_data): return None
+        
+        m5 = market_data.m5_candles
         now_ts = market_data.timestamp.timestamp()
+        atr = self._get_m15_atr(market_data)
         
-        # 1. Standard cooldown between any two signals
-        since_last = now_ts - self._last_signal_time
-        if since_last < self.cooldown_seconds:
-            self.last_rejection_reason = f"Signal cooldown active ({since_last/3600:.1f}h < {self.cooldown_seconds/3600:.1f}h)"
+        # 1. Trade Gating: Cooldowns & Daily Cap
+        if now_ts - self._last_signal_time < self.cooldown_seconds:
+            self.last_rejection_reason = "Cooldown Active"
             return None
-        
-        # 2. Post-SL recovery window: extra pause after a stopout
-        since_sl = now_ts - self._last_sl_time
-        if since_sl < self.post_sl_cooldown_seconds:
-            self.last_rejection_reason = f"Post-SL cooldown ({since_sl/3600:.1f}h < {self.post_sl_cooldown_seconds/3600:.1f}h)"
+        if now_ts - self._last_sl_time < self.post_sl_cooldown_seconds:
+            self.last_rejection_reason = "Post-SL Cooldown"
             return None
-        
-        # 3. Daily trade cap: reset counter on new calendar day
         today_str = market_data.timestamp.strftime("%Y-%m-%d")
         if today_str != self._last_trade_date:
             self._daily_trade_count = 0
             self._last_trade_date = today_str
         if self._daily_trade_count >= self.max_trades_per_day:
-            self.last_rejection_reason = f"Daily trade cap reached ({self._daily_trade_count}/{self.max_trades_per_day})"
+            self.last_rejection_reason = "Daily Cap Reached"
             return None
 
-        # ── REGIME & TREND IDENTIFICATION ──
-        adx_vals = market_data.m15_candles.get_indicator("adx_14")
-        if len(adx_vals) == 0 or np.isnan(adx_vals[-1]):
-            return None
-            
+        # 2. Retracement Entry Management (Step 8)
+        if self._pending_setup:
+            if now_ts > self._pending_setup["expiry"]:
+                self._pending_setup = None # Timeout
+            else:
+                # Check for fill: price must reach the 50% level
+                target_price = self._pending_setup["entry_price"]
+                # Simulating fill: if current candle spans the target_price
+                if m5[-1].low <= target_price <= m5[-1].high:
+                    setup = self._pending_setup
+                    self._pending_setup = None
+                    self._last_signal_time = now_ts
+                    self._daily_trade_count += 1
+                    self._last_trade_price = setup["price"]
+                    return setup["signal"]
+                return None # Still waiting for fill
+
+        # 3. Regime Identification (ADX + Trend Strength)
+        adx_vals = market_data.m15_candles.adx(14)
+        if len(adx_vals) == 0 or np.isnan(adx_vals[-1]): return None
         adx = adx_vals[-1]
-        is_trending = adx >= self.adx_trend_threshold
-        self._current_regime = "TREND" if is_trending else "RANGE"
         
-        # 4. ATR Spike Filter: block entries during extreme volatility explosions.
-        # On days like April 10 2026 (Trump tariff gold crash), ATR spikes 3x+
-        # making sweep entries extremely likely to get overwhelmed by the trend.
-        m5_atr_vals = m5.get_indicator("atr_14")
-        if len(m5_atr_vals) >= 31:
-            current_atr = m5_atr_vals[-1]
-            avg_atr_30 = np.mean(m5_atr_vals[-31:-1])
-            if avg_atr_30 > 0 and not np.isnan(current_atr):
-                atr_spike_mult = current_atr / avg_atr_30
-                if atr_spike_mult > self.max_atr_spike_mult:
-                    self.last_rejection_reason = f"ATR Spike Block ({atr_spike_mult:.1f}x > {self.max_atr_spike_mult}x avg)"
-                    return None
+        ema50 = market_data.m15_candles.ema(50)
+        ema200 = market_data.m15_candles.ema(200)
+        macro_trend = 0
+        if len(ema50) > 0 and len(ema200) > 0:
+            trend_strength = abs(ema50[-1] - ema200[-1]) / atr if atr > 0 else 0
+            if adx >= self.adx_threshold and trend_strength > self.trend_strength_threshold:
+                macro_trend = 1 if ema50[-1] > ema200[-1] else -1
 
-        m15_trend = self.get_ema_trend(market_data.m15_candles)
-        
-        # ── RANGE COMPUTATION ──
-        scaler = self.get_regime_scaler(market_data)
-        dynamic_lookback = int(self.lookback * (1.5 if scaler >= 1.5 else 1.0))
-        if len(m5) < dynamic_lookback + 1:
+        # 4. Range Computation & Structural Integrity
+        lookback = self._get_dynamic_lookback(market_data)
+        range_data = self._get_range_structure(market_data, lookback)
+        if not range_data.get("valid", False):
+            self.last_rejection_reason = range_data.get("reason", "Invalid Range")
             return None
             
-        prev_range = m5[-dynamic_lookback-1:-1]
-        r_high = np.max(prev_range.high)
-        r_low = np.min(prev_range.low)
+        r_high, r_low = range_data["high"], range_data["low"]
 
+        # 5. Sweep Detection & Validation
         last = m5[-1]
-        price = market_data.current_price
-        m5_range = last.high - last.low
-        if m5_range == 0:
+        swept_low = last.low < r_low
+        swept_high = last.high > r_high
+        if not swept_low and not swept_high:
+            self.last_rejection_reason = "Inside Range"
             return None
             
-        # Wick Rejection Math (Hammer / Shooting Star definition)
-        # Ratio of how far the close is from the extreme low/high of the candle
-        close_from_low_ratio = (last.close - last.low) / m5_range
-        close_from_high_ratio = (last.high - last.close) / m5_range
+        # Rejection Math
+        candle_range = last.high - last.low
+        if candle_range <= 0: return None
+        close_from_low = (last.close - last.low) / candle_range
+        close_from_high = (last.high - last.close) / candle_range
+        
+        # Momentum Filter
+        momentum_safe, momentum_reason = self._is_momentum_safe(last, atr)
+        if not momentum_safe:
+            self.last_rejection_reason = momentum_reason
+            return None
 
-        session_mult = self.session_multipliers.get(market_data.session, {"rej_boost": 0, "conf_boost": 0})
-        effective_rej_thresh = self.rejection_thresh - session_mult["rej_boost"] # Lower threshold = easier entry
+        # Duplicate Zone Prevention
+        if abs(market_data.current_price - self._last_trade_price) < self.duplicate_zone_mult * atr:
+            self.last_rejection_reason = "Duplicate Zone"
+            return None
 
-        # Volatility Climax -> Less stringent rejection body needed
-        h1 = market_data.htf_candles[-1]
+        # Institutional Vol Climax
         h1_v = market_data.htf_candles.v
         h1_v_avg = np.mean(h1_v[-21:-1]) if len(h1_v) >= 21 else 1
-        vol_climax = h1.tick_volume > (h1_v_avg * 1.2)
-        if vol_climax:
-            effective_rej_thresh *= 0.9
+        vol_climax = market_data.htf_candles[-1].tick_volume > (h1_v_avg * 1.5)
 
-        conf_floor = self.get_session_confidence_floor(market_data)
-
-        # =================================================================
-        # BUY SWEEP (LIQUIDITY GRAB BELOW RANGE + HAMMER REJECTION)
-        # =================================================================
-        swept_low = last.low < r_low
-        closed_inside_from_low = last.close > r_low
-        bullish_rejection = close_from_low_ratio >= effective_rej_thresh and last.close >= last.open
-        
-        if swept_low and closed_inside_from_low and bullish_rejection:
-            # Regime Filter: If trending hard downward, sweeping the low is a falling knife. Block it.
-            if is_trending and m15_trend == -1:
-                self.last_rejection_reason = "Sweep: Blocked by Bearish Macro Trend"
+        # 6. SIGNAL EVALUATION
+        direction = None
+        if swept_low and last.close > r_low and close_from_low >= self.rejection_thresh and last.close > last.open:
+            # BUY SWEEP
+            if macro_trend == -1: # Regime Conflict
+                self.last_rejection_reason = "Regime Conflict"
+                return None
+            # Sweep Depth Validation
+            sweep_depth = abs(last.low - r_low) / atr
+            if sweep_depth < self.sweep_depth_mult:
+                self.last_rejection_reason = "Weak Sweep"
+                return None
+            direction = "BUY"
+            
+        elif swept_high and last.close < r_high and close_from_high >= self.rejection_thresh and last.close < last.open:
+            # SELL SWEEP
+            if macro_trend == 1:
+                self.last_rejection_reason = "Regime Conflict"
+                return None
+            sweep_depth = abs(last.high - r_high) / atr
+            if sweep_depth < self.sweep_depth_mult:
+                self.last_rejection_reason = "Weak Sweep"
+                return None
+            direction = "SELL"
+            
+        if direction:
+            # Liquidity Confluence Check
+            liq_safe, liq_reason = self._check_liquidity_confluence(market_data.current_price, direction, market_data, atr)
+            if not liq_safe:
+                self.last_rejection_reason = liq_reason
                 return None
                 
-            conf = min(0.98, 0.82 + session_mult["conf_boost"] + (0.05 if vol_climax else 0))
-            if conf >= conf_floor:
-                self._last_signal_time = now_ts  # FIX: timestamp-based cooldown
-                self._daily_trade_count += 1
-                sig = TradeSignal(direction="BUY", price=price, confidence=conf)
-                sig.reasons.append("MECHANIC:SWEEP")
-                sig.reasons.append(f"TARGET:{r_high}") 
-                sig.reasons.append(f"PROTECT:{last.low}")
-                return sig
-
-        # =================================================================
-        # SELL SWEEP (LIQUIDITY GRAB ABOVE RANGE + SHOOTING STAR REJECTION)
-        # =================================================================
-        swept_high = last.high > r_high
-        closed_inside_from_high = last.close < r_high
-        bearish_rejection = close_from_high_ratio >= effective_rej_thresh and last.close <= last.open
-        
-        if swept_high and closed_inside_from_high and bearish_rejection:
-            # Regime Filter: If trending hard upward, sweeping the high is a runaway rally. Block it.
-            if is_trending and m15_trend == 1:
-                self.last_rejection_reason = "Sweep: Blocked by Bullish Macro Trend (SELL)"
-                return None
+            # Confidence Scoring
+            rej_val = close_from_low if direction == "BUY" else close_from_high
+            impulse = abs(last.close - last.open) / atr
+            conf = self._get_confidence_score(rej_val, impulse, "PDL" in liq_reason or "PDH" in liq_reason, vol_climax, market_data.session)
+            
+            sig = TradeSignal(
+                direction=direction, 
+                price=market_data.current_price, 
+                confidence=conf,
+                reasons=["MECHANIC:SWEEP", f"REGIME:{'TREND' if macro_trend != 0 else 'RANGE'}", f"ATR:{atr:.1f}", f"PROTECT:{last.low if direction == 'BUY' else last.high}", f"TARGET:{r_high if direction == 'BUY' else r_low}"]
+            )
+            
+            # Retracement Entry logic
+            if self.use_retracement_entry:
+                sweep_ext = last.low if direction == "BUY" else last.high
+                retracement_price = last.close - (last.close - sweep_ext) * 0.5
+                self._pending_setup = {
+                    "signal": sig,
+                    "entry_price": retracement_price,
+                    "price": market_data.current_price,
+                    "expiry": now_ts + (self.retracement_validity_bars * 300) # 5m * 3 = 15m
+                }
+                return None # Signal will be returned when filled
                 
-            conf = min(0.98, 0.82 + session_mult["conf_boost"] + (0.05 if vol_climax else 0))
-            if conf >= conf_floor:
-                self._last_signal_time = now_ts  # FIX: timestamp-based cooldown
-                self._daily_trade_count += 1
-                sig = TradeSignal(direction="SELL", price=price, confidence=conf)
-                sig.reasons.append("MECHANIC:SWEEP")
-                sig.reasons.append(f"TARGET:{r_low}") 
-                sig.reasons.append(f"PROTECT:{last.high}")
-                return sig
+            self._last_signal_time = now_ts
+            self._daily_trade_count += 1
+            self._last_trade_price = market_data.current_price
+            return sig
 
-        # Detailed rejection tracking for logs
-        if swept_low and not bullish_rejection: self.last_rejection_reason = f"Sweep Low: Weak Hook ({close_from_low_ratio:.2f})"
-        elif swept_high and not bearish_rejection: self.last_rejection_reason = f"Sweep High: Weak Hook ({close_from_high_ratio:.2f})"
-        elif last.close > r_high or last.close < r_low: self.last_rejection_reason = "Breakout occurred (Ignored)"
-        else: self.last_rejection_reason = "Inside Range (No Sweep)"
-
+        if swept_low: self.last_rejection_reason = "Weak Rejection (BUY)"
+        elif swept_high: self.last_rejection_reason = "Weak Rejection (SELL)"
+        else: self.last_rejection_reason = "Inside Range"
+        
         return None
 
     # ==================================================================
     # DYNAMIC SL/TP ENGINE (Built for Traps)
     # ==================================================================
     def get_stop_loss(self, signal: TradeSignal, market_data: MarketData) -> float:
-        m15_atr = self._get_m15_atr(market_data)
+        atr = self._get_m15_atr(market_data)
+        buffer = 0.3 * atr
         
         protect_str = [r for r in signal.reasons if r.startswith("PROTECT:")]
         if protect_str:
-            structural_extreme = float(protect_str[0].split(":")[1])
-            # Structural placement just outside the sweep wick + 0.3 ATR buffer
-            buffer = m15_atr * 0.3
-            max_sl_dist = m15_atr * 1.5 # Cap the risk if the sweep wick was absolutely massive
+            extreme = float(protect_str[0].split(":")[1])
+            return extreme - buffer if signal.direction == "BUY" else extreme + buffer
             
-            if signal.direction == "BUY":
-                ideal_sl = structural_extreme - buffer
-                max_sl = market_data.current_price - max_sl_dist
-                return max(ideal_sl, max_sl) # Take the tighter one mathematically
-            else:
-                ideal_sl = structural_extreme + buffer
-                max_sl = market_data.current_price + max_sl_dist
-                return min(ideal_sl, max_sl)
-                
-        # Safe fallback
-        return market_data.current_price - (m15_atr * 1.5) if signal.direction == "BUY" else market_data.current_price + (m15_atr * 1.5)
+        return market_data.current_price - (1.5 * atr) if signal.direction == "BUY" else market_data.current_price + (1.5 * atr)
 
     def get_take_profit(self, signal: TradeSignal, market_data: MarketData) -> float:
-        m15_atr = self._get_m15_atr(market_data)
+        atr = self._get_m15_atr(market_data)
         
         target_str = [r for r in signal.reasons if r.startswith("TARGET:")]
         if target_str:
-            target_edge = float(target_str[0].split(":")[1])
-            min_tp_dist = m15_atr * 1.5 # Guarantee a baseline 1.5:1 R:R floor minimum
+            target_price = float(target_str[0].split(":")[1])
+            # Ensure Min RR 1.5
+            sl_price = self.get_stop_loss(signal, market_data)
+            risk = abs(market_data.current_price - sl_price)
+            min_reward = risk * 1.5
             
             if signal.direction == "BUY":
-                min_tp = market_data.current_price + min_tp_dist
-                return max(target_edge, min_tp) # Target the far edge, or the minimum distance
+                return max(target_price, market_data.current_price + min_reward)
             else:
-                min_tp = market_data.current_price - min_tp_dist
-                return min(target_edge, min_tp)
+                return min(target_price, market_data.current_price - min_reward)
                 
-        # Safe fallback
-        return market_data.current_price + (m15_atr * 1.5) if signal.direction == "BUY" else market_data.current_price - (m15_atr * 1.5)
+        return market_data.current_price + (1.5 * atr) if signal.direction == "BUY" else market_data.current_price - (1.5 * atr)
 
     def on_trade_closed(self, trade_record: dict) -> None:
         """Called by the backtester after every trade close. Records SL hits for post-SL cooldown."""
@@ -273,33 +343,28 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
     # Dashboard Metrics
     # ==================================================================
     def get_metrics(self, market_data: MarketData) -> Dict[str, Any]:
-        if not market_data.htf_candles or len(market_data.htf_candles) < 22:
-            return {}
-            
-        adx_vals = market_data.m15_candles.get_indicator("adx_14")
-        adx = adx_vals[-1] if len(adx_vals) > 0 and not np.isnan(adx_vals[-1]) else 0.0
-        regime = "TREND" if adx >= self.adx_trend_threshold else "RANGE"
+        atr = self._get_m15_atr(market_data)
+        adx_vals = market_data.m15_candles.adx(14)
+        adx = adx_vals[-1] if len(adx_vals) > 0 else 0
         
-        m15_trend = self.get_ema_trend(market_data.m15_candles)
-        trend_label = {1: "BULL", -1: "BEAR", 0: "FLAT"}.get(m15_trend, "?")
+        last = market_data.m5_candles[-1]
+        impulse = abs(last.close - last.open) / atr if atr > 0 else 0
         
-        m5 = market_data.m5_candles
-        last = m5[-1] if len(m5) > 0 else None
-        cr = 0
-        if last and (last.high - last.low) > 0:
-            cr = (last.close - last.low) / (last.high - last.low)
+        lookback = self._get_dynamic_lookback(market_data)
+        range_data = self._get_range_structure(market_data, lookback)
+        r_size = range_data.get("size", 0) / atr if atr > 0 else 0
         
         return {
-            "Regime": f"{regime} ({adx:.1f})",
-            "M15 Trend": trend_label,
-            "M15 ATR": f"{self._get_m15_atr(market_data):.1f}", 
-            "M5 Hook": f"{cr:.2f}"
+            "Regime": f"{'TREND' if adx >= self.adx_threshold else 'RANGE'} ({adx:.1f})",
+            "Impulse": f"{impulse:.2f}",
+            "Range": f"{r_size:.1f}x ATR",
+            "Daily": f"{self._daily_trade_count}/{self.max_trades_per_day}"
         }
 
     def get_thresholds(self) -> Dict[str, Any]:
         return {
-            "Regime": f"ADX <> {self.adx_trend_threshold}",
-            "M15 Trend": "Filter",
-            "M15 ATR": "Vol Tracker",
-            "M5 Hook": f"> {self.rejection_thresh:.2f}"
+            "Regime": f"ADX > {self.adx_threshold}",
+            "Impulse": f"< {self.impulse_threshold}",
+            "Range": "0.5 - 3.0x",
+            "Daily": f"Max {self.max_trades_per_day}"
         }

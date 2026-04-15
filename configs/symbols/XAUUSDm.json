@@ -8,7 +8,7 @@
     "max_lot": 100.0,
     "lot_step": 0.01,
     "commission_per_lot": 7.0,
-    "backtest_timeframe": "M15",
+    "backtest_timeframe": "M1",
     "initial_balance_per_strategy": 10000.0
   },
   "strategies": {
