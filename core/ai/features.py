@@ -66,4 +66,19 @@ class FeatureEngineer:
         features["signal_dir"] = 1.0 if signal_direction == "BUY" else -1.0
         features["sl_pips"] = current_sl_pips
 
+        # 7. Institutional AR-3 Sequential Lags (New 10/10 Logic)
+        # We capture the state of the 3 previous candles to provide sequence context
+        for lag in range(1, 4):
+            idx = -1 - lag
+            if len(candles.close) > abs(idx):
+                o, c, h, l = candles.open[idx], candles.close[idx], candles.high[idx], candles.low[idx]
+                sz = h - l
+                features[f"body_ratio_lag_{lag}"] = abs(o - c) / sz if sz > 0 else 0
+                features[f"trend_dir_lag_{lag}"] = 1.0 if c > o else -1.0
+                features[f"size_ratio_lag_{lag}"] = sz / total_size if total_size > 0 else 1.0
+            else:
+                features[f"body_ratio_lag_{lag}"] = 0
+                features[f"trend_dir_lag_{lag}"] = 0
+                features[f"size_ratio_lag_{lag}"] = 0
+
         return features
