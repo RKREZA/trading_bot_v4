@@ -373,27 +373,41 @@ class RiskGuardian:
         self._save_health_state()
 
     def _save_health_state(self):
+        import sqlite3
+        db_path = self.health_file.replace('.json', '.db')
         try:
-            os.makedirs(os.path.dirname(self.health_file), exist_ok=True)
+            os.makedirs(os.path.dirname(db_path), exist_ok=True)
             state = {
                 "performance": {sid: list(p) for sid, p in self.strategy_performance.items()},
                 "status": self.strategy_status
             }
-            with open(self.health_file, 'w') as f:
-                json.dump(state, f, indent=2)
+            conn = sqlite3.connect(db_path, timeout=10.0)
+            cursor = conn.cursor()
+            cursor.execute('''CREATE TABLE IF NOT EXISTS risk_state (id INTEGER PRIMARY KEY, state_json TEXT)''')
+            cursor.execute('''INSERT OR REPLACE INTO risk_state (id, state_json) VALUES (1, ?)''', (json.dumps(state),))
+            conn.commit()
+            conn.close()
         except Exception as e:
             self.logger.error(f"Failed to save health state: {e}")
 
     def _load_health_state(self):
-        if os.path.exists(self.health_file):
+        import sqlite3
+        db_path = self.health_file.replace('.json', '.db')
+        if os.path.exists(db_path):
             try:
-                with open(self.health_file, 'r') as f:
-                    state = json.load(f)
+                conn = sqlite3.connect(db_path, timeout=10.0)
+                cursor = conn.cursor()
+                cursor.execute('''CREATE TABLE IF NOT EXISTS risk_state (id INTEGER PRIMARY KEY, state_json TEXT)''')
+                cursor.execute('''SELECT state_json FROM risk_state WHERE id=1''')
+                row = cursor.fetchone()
+                conn.close()
+                if row:
+                    state = json.loads(row[0])
                     self.strategy_performance = {sid: list(p) for sid, p in state.get("performance", {}).items()}
                     self.strategy_status = state.get("status", {})
-                self.logger.info("Loaded strategy health state from persistence.")
+                    self.logger.info("Loaded strategy health state from SQLite persistence.")
             except Exception as e:
-                self.logger.error(f"Failed to load health state: {e}")
+                self.logger.error(f"Failed to load SQLite health state: {e}")
 
     def record_trade_result(self, pnl: float, current_equity: float = None):
         """Updates internal risk state after trade closure."""

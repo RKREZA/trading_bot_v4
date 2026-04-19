@@ -41,13 +41,16 @@ class RegimeDetector:
         avg_atr = np.mean(atr_series[-100:]) if len(atr_series) >= 100 else atr
         vol_ratio = atr / avg_atr if avg_atr > 0 else 1.0
         
-        # Metric 1: Directional Type (ADX)
+        import math
+        # Metric 1: Directional Type (ADX) - Fuzzy Logic Sigmoid
         if adx >= 20: 
             market_type = MarketRegime.TREND
-            conf_type = min(1.0, (adx - 15) / 30)
+            # Center sigmoid at ADX=22.5, steepness=0.3
+            conf_type = 1.0 / (1.0 + math.exp(-0.3 * (adx - 22.5)))
         else:
             market_type = MarketRegime.RANGE
-            conf_type = min(1.0, (25 - adx) / 10)
+            # Center Range sigmoid at ADX=17.5, steepness=0.3
+            conf_type = 1.0 / (1.0 + math.exp(0.3 * (adx - 17.5)))
         
         # Metric 2: Volatility Status (ATR Ratio)
         vol_status = VolatilityStatus.NORMAL

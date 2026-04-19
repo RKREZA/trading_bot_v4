@@ -165,7 +165,8 @@ class OrderManager:
                         break
                         
                 if attempt < max_retries - 1:
-                    time.sleep(backoff)
+                    jitter = random.uniform(0.1, 0.4)
+                    time.sleep(backoff + jitter)
                     backoff *= 2.0
             
             # Rule 3: Forensic Reconciliation & Audit (Phase 1 Hardening)
