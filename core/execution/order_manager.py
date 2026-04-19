@@ -257,26 +257,51 @@ class OrderManager:
             "is_error": False
         }
 
-    def simulate_exit(self, ticket: int, exit_type: str, price: float, point: float, direction: str = "BUY", exit_time: float = None) -> Dict[str, Any]:
+    def simulate_exit(self, ticket: int, exit_type: str, price: float, point: float, direction: str = "BUY", volume: float = 0.01, exit_time: float = None) -> Dict[str, Any]:
         """
-        Simulates an exit event (SL/TP) with institutional realism (Pessimistic).
-        Uses a fixed slippage model aligned with kernel expectations.
+        Simulates an exit event (SL/TP) utilizing the robust StochasticKernel.
+        SLs are modeled as full market orders (impact + slippage).
+        TPs are modeled as limit orders (bypassing liquidity latency/impact spikes).
         """
-        # Exits use the same stochastic logic as entry slippage
-        # SL is a market order (sampled slippage), TP is a limit order (minimal/zero)
-        slip_pct = 1.0 if exit_type == "sl" else 0.1
-        slip_pts = self._rng.uniform(0, 2.0) * point * slip_pct
+        from core.common.types import ExecutionIntent, MarketSnapshot
         
-        if direction == "BUY": # Exit is a SELL
-             exit_price = price - slip_pts
-        else: # Exit is a BUY
-             exit_price = price + slip_pts
-             
+        sim_time = exit_time if exit_time is not None else time.time()
+        exit_dir = "SELL" if direction == "BUY" else "BUY"
+        
+        # Determine pseudo-metadata for realistic stochastic friction
+        base_slip = 1.0 if exit_type == "sl" else 0.1
+        obi_val = self._rng.uniform(-0.5, 0.5) if exit_type == "sl" else 0.0 # TPs ignore OBI friction
+        
+        intent = ExecutionIntent(
+            symbol="EXIT_SIM",
+            direction=exit_dir,
+            volume=volume,
+            stop_loss=0.0,
+            take_profit=0.0,
+            strategy_id=f"EXIT_{exit_type.upper()}",
+            setup_timestamp=sim_time
+        )
+        
+        snapshot = MarketSnapshot(
+            timestamp=sim_time,
+            bid=price,
+            ask=price,
+            spread=point * 1.0, 
+            point=point,
+            dfs=1.0,
+            volatility="HIGH" if exit_type == "sl" else "NORMAL",
+            metadata={"base_slippage_points": base_slip, "obi": obi_val}
+        )
+        
+        outcome = self.kernel.execute(intent, snapshot)
+        
         return {
             "ticket": ticket,
-            "exit_price": exit_price,
+            "exit_price": outcome.fill_price,
             "exit_type": exit_type,
-            "exit_time": exit_time if exit_time is not None else time.time()
+            "exit_time": outcome.timestamp,
+            "execution_drag": outcome.execution_drag,
+            "microstructure_loss": outcome.microstructure_loss
         }
 
 if __name__ == "__main__":

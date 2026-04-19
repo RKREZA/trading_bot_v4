@@ -117,6 +117,13 @@ class PureBreakoutOneMinuteStrategy(BaseStrategy):
     def get_thresholds(self) -> Dict[str, Any]:
         return {"Lot Size": self.fixed_lot, "Timeframe": "M5", "SL Points": self.sl_points}
 
+    def get_parameter_grid(self) -> Dict[str, Any]:
+        """Provides Walk-Forward optimization hyperparameter boundaries."""
+        return {
+            "min_body_ratio": [0.55, 0.60, 0.65],
+            "sl_points": [3000, 5000, 7000]
+        }
+
     def is_spread_safe(self, market_data: MarketData) -> bool: return True
     def is_volatility_safe(self, market_data: MarketData) -> bool: return True
     def check_mtf_consensus(self, market_data: MarketData) -> bool: return True

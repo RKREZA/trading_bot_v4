@@ -97,12 +97,23 @@ class WalkForwardValidator:
                 current_is_start += timedelta(weeks=test_weeks)
                 continue
 
-            is_strategies = [strat.__class__(strat.strategy_id, strat.config) for strat in strategies]
-            is_backtester = PortfolioBacktester(self.config)
-            is_history, _ = is_backtester.run(symbol, is_strategies, is_data["M5"], is_data.get("H1"), is_data.get("M15"), is_data.get("M5"), is_data.get("M1"))
-            is_profit = sum(t['pnl'] for t in is_history) if is_history else 0.0
+            # --- Walk-Forward Grid Search Optimizer ---
+            optimized_configs = self._optimize_is_window(symbol, strategies, is_data)
+            is_profit = sum(cfg.get("_is_profit", 0) for cfg in optimized_configs.values())
 
-            oos_strategies = [strat.__class__(strat.strategy_id, strat.config) for strat in strategies]
+            # Inject mathematical optimums into OOS Validation Phase
+            oos_strategies = []
+            for strat in strategies:
+                mod_cfg = strat.config.copy()
+                if strat.strategy_id in optimized_configs:
+                    opt_params = optimized_configs[strat.strategy_id].get("params", {})
+                    base_name = strat.strategy_id.rsplit('_v', 1)[0] if '_v' in strat.strategy_id else strat.strategy_id
+                    
+                    if "strategies" in mod_cfg and base_name in mod_cfg["strategies"]:
+                        mod_cfg["strategies"][base_name].update(opt_params)
+                    elif base_name in mod_cfg:
+                        mod_cfg[base_name].update(opt_params)
+                oos_strategies.append(strat.__class__(strat.strategy_id, mod_cfg))
             backtester = PortfolioBacktester(self.config)
             history, equity_history = backtester.run(symbol, oos_strategies, oos_data["M5"], oos_data.get("H1"), oos_data.get("M15"), oos_data.get("M5"), oos_data.get("M1"))
             
@@ -147,6 +158,60 @@ class WalkForwardValidator:
 
         self._results = oos_results
         return self._get_dict_results(oos_results)
+
+    def _optimize_is_window(self, symbol: str, strategies: list, is_data: dict) -> dict:
+        """Runs combinatorial Grid Search to find maximum IS WFO Ratio configurations."""
+        import itertools
+        from backtesting.backtester import PortfolioBacktester
+        
+        best_configs = {}
+        for strat in strategies:
+            grid = strat.get_parameter_grid()
+            if not grid:
+                bt = PortfolioBacktester(self.config)
+                hist, _ = bt.run(symbol, [strat.__class__(strat.strategy_id, strat.config)], 
+                                 is_data.get("M5"), is_data.get("H1"), is_data.get("M15"), 
+                                 is_data.get("M5"), is_data.get("M1"))
+                prof = sum(t['pnl'] for t in hist) if hist else 0.0
+                best_configs[strat.strategy_id] = {"params": {}, "_is_profit": prof}
+                continue
+                
+            keys = list(grid.keys())
+            values = list(grid.values())
+            combinations = list(itertools.product(*values))
+            
+            best_prof = -float('inf')
+            best_params = {}
+            
+            logger.info(f"[{strat.strategy_id}] Hunting {len(combinations)} parameter combos IS...")
+            
+            for combo in combinations:
+                param_dict = dict(zip(keys, combo))
+                new_cfg = strat.config.copy()
+                base_name = strat.strategy_id.rsplit('_v', 1)[0] if '_v' in strat.strategy_id else strat.strategy_id
+                
+                if "strategies" in new_cfg and base_name in new_cfg["strategies"]:
+                    new_cfg["strategies"][base_name].update(param_dict)
+                elif base_name in new_cfg:
+                    new_cfg[base_name].update(param_dict)
+                else:
+                    new_cfg[base_name] = param_dict
+                    
+                test_strat = strat.__class__(strat.strategy_id, new_cfg)
+                bt = PortfolioBacktester(self.config)
+                hist, _ = bt.run(symbol, [test_strat], is_data.get("M5"), is_data.get("H1"), 
+                                 is_data.get("M15"), is_data.get("M5"), is_data.get("M1"))
+                
+                prof = sum(t['pnl'] for t in hist) if hist else 0.0
+                
+                if prof > best_prof:
+                    best_prof = prof
+                    best_params = param_dict
+                    
+            logger.info(f"[{strat.strategy_id}] Optimal IS Params Found: {best_params} (PnL: {best_prof:.2f})")
+            best_configs[strat.strategy_id] = {"params": best_params, "_is_profit": best_prof}
+            
+        return best_configs
 
     def _assess_robustness(self, wfo_ratio: float, min_ratio: float) -> WFORobustness:
         """Assesses OOS robustness based on WFO ratio."""

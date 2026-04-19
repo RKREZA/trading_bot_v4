@@ -132,6 +132,14 @@ class BaseStrategy(ABC):
         """Returns live metrics used for strategy decision making."""
         ...
 
+    def get_parameter_grid(self) -> Dict[str, List[Any]]:
+        """
+        Returns the hyperparameter optimization boundaries for Walk-Forward Optimization.
+        Format: {'metric_name': [val1, val2, val3]}
+        Override this in children to enable Strategy Architecture WFO tuning.
+        """
+        return {}
+
     def get_thresholds(self) -> Dict[str, Any]:
         """Returns curated target thresholds from strategy configuration for the dashboard."""
         strat_cfg = self.get_strat_config()

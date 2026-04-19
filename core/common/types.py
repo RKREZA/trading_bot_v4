@@ -229,44 +229,60 @@ class CandleArray:
 
     def _calc_ema(self, data: np.ndarray, period: int) -> np.ndarray:
         if len(data) < period: return np.full_like(data, np.nan)
-        alpha = 2 / (period + 1)
-        ema = np.full_like(data, np.nan)
-        ema[period-1] = np.mean(data[:period])
-        for i in range(period, len(data)):
-            ema[i] = (data[i] - ema[i-1]) * alpha + ema[i-1]
-        return ema
+        import pandas as pd
+        s = pd.Series(data)
+        out = s.copy()
+        out.iloc[:period-1] = np.nan
+        out.iloc[period-1] = s.iloc[:period].mean()
+        return out.ewm(span=period, adjust=False).mean().values
 
     def _calc_rsi(self, data: np.ndarray, period: int) -> np.ndarray:
         if len(data) < period + 1: return np.full_like(data, np.nan)
+        import pandas as pd
         delta = np.diff(data)
         gain = (delta > 0) * delta
         loss = (delta < 0) * -delta
-        avg_gain = np.full_like(data, np.nan)
-        avg_loss = np.full_like(data, np.nan)
-        avg_gain[period] = np.mean(gain[:period])
-        avg_loss[period] = np.mean(loss[:period])
+        
         alpha = 1 / period
-        for i in range(period + 1, len(data)):
-            avg_gain[i] = (gain[i-1] - avg_gain[i-1]) * alpha + avg_gain[i-1]
-            avg_loss[i] = (loss[i-1] - avg_loss[i-1]) * alpha + avg_loss[i-1]
-        # FIXED: Guard against zero loss to prevent ZeroDivisionError
+        g_s = pd.Series(gain)
+        l_s = pd.Series(loss)
+        
+        g_mod = g_s.copy()
+        g_mod.iloc[:period-1] = np.nan
+        g_mod.iloc[period-1] = g_s.iloc[:period].mean()
+        
+        l_mod = l_s.copy()
+        l_mod.iloc[:period-1] = np.nan
+        l_mod.iloc[period-1] = l_s.iloc[:period].mean()
+        
+        avg_gain = g_mod.ewm(alpha=alpha, adjust=False).mean().values
+        avg_loss = l_mod.ewm(alpha=alpha, adjust=False).mean().values
+
         with np.errstate(divide='ignore', invalid='ignore'):
             rs = avg_gain / avg_loss
             rsi = 100 - (100 / (1 + rs))
-        return np.nan_to_num(rsi, nan=50.0) # Fallback to neutral 50
+            
+        rsi = np.nan_to_num(rsi, nan=50.0)
+        out_rsi = np.full_like(data, np.nan)
+        out_rsi[1:] = rsi
+        return out_rsi
 
     def _calc_atr(self, period: int) -> np.ndarray:
         if self.limit < period + 1: return np.full(self.limit, np.nan)
-        # Institutional Standard: True Range needs |high - prev_close|
-        # h, l are from candle[1:], cp (prev_close) is candle[:-1]
+        import pandas as pd
         h, l, cp = self.h[1:], self.l[1:], self.c[:-1]
         tr = np.maximum(h - l, np.maximum(np.abs(h - cp), np.abs(l - cp)))
-        atr = np.full(self.limit, np.nan)
-        atr[period] = np.mean(tr[:period])
-        alpha = 1.0 / period
-        for i in range(period + 1, self.limit):
-            atr[i] = (tr[i-1] - atr[i-1]) * alpha + atr[i-1]
-        return atr
+        
+        tr_s = pd.Series(tr)
+        tr_mod = tr_s.copy()
+        tr_mod.iloc[:period-1] = np.nan
+        tr_mod.iloc[period-1] = tr_s.iloc[:period].mean()
+        
+        atr = tr_mod.ewm(alpha=1.0/period, adjust=False).mean().values
+        
+        out_atr = np.full(self.limit, np.nan)
+        out_atr[1:] = atr
+        return out_atr
 
     def _calc_adx(self, period: int) -> np.ndarray:
         if self.limit < period * 2: return np.full(self.limit, np.nan)
@@ -282,12 +298,13 @@ class CandleArray:
         
         alpha = 1.0 / period
         
-        def wilders_smooth(data):
-            smooth = np.full_like(data, np.nan)
-            smooth[period-1] = np.mean(data[:period])
-            for i in range(period, len(data)):
-                smooth[i] = (data[i] - smooth[i-1]) * alpha + smooth[i-1]
-            return smooth
+        import pandas as pd
+        def wilders_smooth(data_arr):
+            s = pd.Series(data_arr)
+            mod = s.copy()
+            mod.iloc[:period-1] = np.nan
+            mod.iloc[period-1] = s.iloc[:period].mean()
+            return mod.ewm(alpha=alpha, adjust=False).mean().values
 
         str_tr = wilders_smooth(tr)
         str_pdm = wilders_smooth(pos_dm)

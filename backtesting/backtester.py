@@ -694,7 +694,15 @@ class PortfolioBacktester:
                 
                 if exit_price:
                     exit_time = m1_candles.time[m]
-                    exit_res = self.order_manager.simulate_exit(trade["ticket"], event, exit_price, point, direction, exit_time=exit_time)
+                    exit_res = self.order_manager.simulate_exit(
+                        ticket=trade["ticket"], 
+                        exit_type=event, 
+                        price=exit_price, 
+                        point=point, 
+                        direction=direction, 
+                        volume=trade["lots"],
+                        exit_time=exit_time
+                    )
                     final_exit = exit_res["exit_price"]
                     exit_slip = abs(final_exit - exit_price)
                     
