@@ -57,13 +57,10 @@
     "phase1_close_pct": 50,
     "move_to_be_at_partial": true
   },
-"portfolio_allocations": {
-    "TrendFollowing": 0.10,
-    "LiquiditySweepBreakout": 0.30,
-    "SmartMeanReversion": 0.20,
-    "RangeBounce": 0.10,
-    "PureBreakoutOneMinute": 0.20,
-    "LiquiditySession": 0.10
+  "portfolio_allocations": {
+    "TrendFollowing": 0.35,
+    "LiquiditySweepBreakout": 0.35,
+    "SmartMeanReversion": 0.30
   },
   "backtest": {
     "initial_balance_per_strategy": 10000.0,
@@ -139,56 +136,6 @@
       "LONDON",
       "NEW_YORK",
       "LONDON/NY"
-    ]
-  },
-  "RangeBounce": {
-    "enabled": true,
-    "max_spread_points": 1000,
-    "min_confidence": 0.65,
-    "bb_period": 20,
-    "bb_std": 2.0,
-    "rsi_period": 14,
-    "rsi_oversold": 35,
-    "rsi_overbought": 65,
-    "rsi_extreme_oversold": 25,
-    "rsi_extreme_overbought": 75,
-    "sl_atr": 2.0,
-    "tp_atr": 4.0,
-    "adx_threshold": 25,
-    "trend_ema_fast": 50,
-    "trend_ema_slow": 200,
-    "max_vol_ratio": 3.5,
-    "max_adx_slope": 7.0,
-    "min_bars_between_signals": 10,
-    "allowed_sessions": [
-      "LONDON",
-      "NEW_YORK",
-      "LONDON/NY"
-    ]
-  },
-  "PureBreakoutOneMinute": {
-    "enabled": true,
-    "max_spread_points": 1000,
-    "min_confidence": 0.30,
-    "min_body_ratio": 0.30,
-    "sl_points": 3000,
-    "tp_mult": 1.5,
-    "lookback": 3
-  },
-  "LiquiditySession": {
-    "enabled": true,
-    "max_spread_points": 1000,
-    "min_confidence": 0.65,
-    "range_maturity_limit": 3.0,
-    "vol_trigger_mult": 0.4,
-    "sl_atr": 1.5,
-    "tp_atr": 4.0,
-    "lookback_bars": 60,
-    "min_range_bars": 20,
-    "allowed_sessions": [
-      "LONDON",
-      "LONDON/NY",
-      "NEW_YORK"
     ]
   },
   "news_filter": {

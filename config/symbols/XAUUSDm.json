@@ -60,28 +60,6 @@
         "GLOBAL",
         "TOKYO"
       ]
-    },
-    "LiquiditySession": {
-      "enabled": false,
-      "allowed_sessions": [
-        "LONDON",
-        "NEW_YORK",
-        "LONDON/NY",
-        "GLOBAL"
-      ],
-      "range_maturity_limit": 2.0,
-      "vol_trigger_mult": 0.3,
-      "sl_atr": 2.2,
-      "tp_atr": 5.2,
-      "lookback_bars": 60,
-      "min_range_bars": 20,
-      "min_confidence": 0.2
-    },
-    "SMASampleStrategy": {
-      "enabled": false,
-      "fast_sma_period": 20,
-      "slow_sma_period": 50,
-      "min_confidence": 0.7
     }
   },
   "backtest": {
