@@ -56,7 +56,6 @@ class DatasetFingerprinter:
 from core.base_strategy import MarketData
 from core.regime_detector import RegimeDetector
 from core.volatility_detector import VolatilityDetector, VolatilityLevel
-from strategies.adaptive_manager import AdaptiveStrategyManager
 from core.risk.risk_guardian import RiskGuardian
 from core.session_detector import SessionDetector
 from core.portfolio_manager import PortfolioManager
@@ -142,6 +141,7 @@ class PortfolioBacktester:
             self.equities[sid] = bal
             self.peak_equity[sid] = bal
             self.max_drawdowns[sid] = 0.0
+            allocated_sum += bal
             
             # Audit Trail
             print(f"[ALLOCATION_AUDIT] {sid}: ${bal:,.2f} (DYNAMIC CONFIG)")
@@ -217,11 +217,8 @@ class PortfolioBacktester:
             
         sid_list = [s.strategy_id for s in active_strategies]
         
-        # Initialize Adaptive Strategy Manager
-        use_adaptive = self.config.get("backtest", {}).get("adaptive_strategy", True)
-        if use_adaptive and len(active_strategies) > 1:
-            adaptive_manager = AdaptiveStrategyManager(active_strategies, self.config)
-            logger.info(f"Adaptive Strategy Manager initialized with {len(active_strategies)} strategies")
+        # Portfolio Mode: Run all active strategies in parallel
+        logger.info(f"Portfolio Mode initialized with {len(active_strategies)} institutional engines")
         
         if not resume:
             self.reset(active_strategies)
@@ -437,14 +434,8 @@ class PortfolioBacktester:
                     timestamp=dt
                 )
                 
-                # 3. Micro-service Strategy Replay (Adaptive Selection)
-                if use_adaptive and len(active_strategies) > 1:
-                    # Adaptive: Select best strategy based on regime
-                    selected_strat = adaptive_manager.select_strategy(regime_info, market_data)
-                    strategies_to_try = [selected_strat] if selected_strat else []
-                else:
-                    # Legacy: Run all strategies
-                    strategies_to_try = active_strategies
+                # Run all active strategies (Parallel Portfolio Execution)
+                strategies_to_try = active_strategies
                 
                 for strat in strategies_to_try:
                     sid = strat.strategy_id

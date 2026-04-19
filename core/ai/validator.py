@@ -2,7 +2,7 @@ import logging
 import os
 import numpy as np
 import pandas as pd
-from core.ai.model import AIModeWrapper
+from core.ai.model import AIModelWrapper
 from core.ai.features import FeatureEngineer
 from core.common.types import CandleArray
 from core.indicator_engine import IndicatorEngine
@@ -126,7 +126,7 @@ class AIValidator:
                 logger.warning("Insufficient real data samples. Training failed.")
                 return False
                 
-            engine = AIModeWrapper()
+            engine = AIModelWrapper()
             engine.train(X, y)
             
             # Final integrity check on calibration

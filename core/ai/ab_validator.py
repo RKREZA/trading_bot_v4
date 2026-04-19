@@ -1,7 +1,7 @@
 import logging
 import pandas as pd
 from core.ai.validator import AIValidator
-from core.ai.model import AIModeWrapper
+from core.ai.model import AIModelWrapper
 
 logger = logging.getLogger("trading_bot.ai.ab_validator")
 
@@ -22,7 +22,7 @@ class ABPerformanceValidator:
         X, y = AIValidator.generate_synthetic_training_data(2000)
         
         # Train baseline Calibrated Model implicitly
-        engine = AIModeWrapper()
+        engine = AIModelWrapper()
         engine.train(X, y)
         
         if not engine.is_ready:

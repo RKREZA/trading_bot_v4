@@ -26,7 +26,8 @@
       "poc_window": 100,
       "displacement_threshold": 1.2,
       "volume_spike_factor": 1.2,
-      "min_confidence": 0.55
+      "min_confidence": 0.55,
+      "adx_min_threshold": 22
     },
     "LiquiditySweepBreakout": {
       "enabled": true,
@@ -49,7 +50,7 @@
     "SmartMeanReversion": {
       "enabled": true,
       "va_lookback": 100,
-      "adx_max_threshold": 30,
+      "adx_max_threshold": 22,
       "vol_climax_ratio": 1.15,
       "min_bars_between_signals": 10,
       "min_confidence": 0.65,

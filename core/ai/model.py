@@ -23,7 +23,7 @@ logger = logging.getLogger("trading_bot.ai.model")
 _DEFAULT_MAX_MODEL_AGE_DAYS = 30
 
 
-class AIModeWrapper:
+class AIModelWrapper:
     """
     V7 Institutional Ensemble AI Model.
 

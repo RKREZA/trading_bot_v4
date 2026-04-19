@@ -1,6 +1,6 @@
 import logging
 from core.ai.features import FeatureEngineer
-from core.ai.model import AIModeWrapper
+from core.ai.model import AIModelWrapper
 from core.common.types import TradeSignal, CandleArray, FilteredSignal
 from core.ai.drift import DriftDetector
 from core.ai.sentiment import SentimentVetter
@@ -16,7 +16,7 @@ class AIPredictor:
         self.config = config.get("ai_layer", {})
         self.enabled = self.config.get("enabled", False)
         self.threshold = self.config.get("confidence_threshold", 0.65)
-        self.engine = AIModeWrapper()
+        self.engine = AIModelWrapper()
         self.drift_layer = DriftDetector()
         self.sentiment_vetter = SentimentVetter(config)
 

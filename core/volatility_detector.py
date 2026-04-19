@@ -132,14 +132,30 @@ class VolatilityDetector:
     
     def _calculate_daily_range_pct(self, m5_candles) -> float:
         """Calculate average daily range as percentage of price."""
-        if len(m5_candles) < 288:
+        limit = len(m5_candles)
+        if limit < 288:
             return 0.0
         
+        # Use institutional view properties (.h, .l, .c) to obey anti-lookahead limit
+        highs = m5_candles.h
+        lows = m5_candles.l
+        closes = m5_candles.c
+        
         daily_ranges = []
-        for i in range(288, len(m5_candles), 288):
-            day_start = m5_candles.close[i-288]
-            day_high = np.max(m5_candles.high[i-288:i])
-            day_low = np.min(m5_candles.low[i-288:i])
+        # Calculate daily range for each 24h window available in the history
+        # i is the end-boundary of the 24h window
+        for i in range(288, limit + 1, 288):
+            slice_h = highs[i-288:i]
+            slice_l = lows[i-288:i]
+            
+            # Robustness guard: Ensure slices are non-empty
+            if len(slice_h) == 0 or len(slice_l) == 0:
+                continue
+                
+            day_high = np.max(slice_h)
+            day_low = np.min(slice_l)
+            day_start = closes[i-288]
+            
             if day_start > 0:
                 daily_range = (day_high - day_low) / day_start * 100
                 daily_ranges.append(daily_range)

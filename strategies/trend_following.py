@@ -33,6 +33,7 @@ class TrendFollowingStrategy(BaseStrategy):
         self.volume_spike_factor = float(strat_config.get("volume_spike_factor", 1.5))
         
         self.min_confidence = float(strat_config.get("min_confidence", 0.65))
+        self.adx_min_threshold = float(strat_config.get("adx_min_threshold", 25.0))
         self._last_signal_bar = 0
 
     def get_parameter_grid(self) -> Dict[str, List[Any]]:
@@ -86,8 +87,10 @@ class TrendFollowingStrategy(BaseStrategy):
         if m15 is None or len(m15) < max(self.poc_window, 50):
             return None
 
-        # Cooldown
-        if len(m15) - self._last_signal_bar < 5:
+        # 1.5 Trend Strength Gating (ADX)
+        adx_14 = market_data.m15_candles.get_indicator("adx_14")
+        if len(adx_14) > 0 and adx_14[-1] < self.adx_min_threshold:
+            self.last_rejection_reason = f"Trend Weak (ADX {adx_14[-1]:.1f} < {self.adx_min_threshold})"
             return None
 
         # Data extraction
@@ -221,13 +224,7 @@ class TrendFollowingStrategy(BaseStrategy):
         )
         return ts
 
-    def get_stop_loss(self, signal: TradeSignal, market_data: MarketData) -> float:
-        # Pre-calculated in generate_signal and passed via TradeSignal object in the ecosystem
-        # Providing a fallback just in case
-        return signal.stop_loss if signal.stop_loss > 0 else (market_data.current_price * 0.99)
 
-    def get_take_profit(self, signal: TradeSignal, market_data: MarketData) -> float:
-        return signal.take_profit if signal.take_profit > 0 else (market_data.current_price * 1.01)
 
     def get_metrics(self, market_data: MarketData) -> Dict[str, Any]:
         m15 = market_data.m15_candles

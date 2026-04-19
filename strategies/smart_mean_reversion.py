@@ -38,6 +38,7 @@ class SmartMeanReversionStrategy(BaseStrategy):
         # ── State Tracking ──
         self._last_signal_bar = 0
         self.min_bars_between_signals = strat_config.get("min_bars_between_signals", 15)
+        self.max_ema_slope = strat_config.get("max_ema_slope", 5.0) # Pips per bar on H1 (Safety Gate)
 
 
     def _calculate_value_area(self, prices: np.ndarray, volumes: np.ndarray, bins: int = 50) -> Dict[str, float]:
@@ -102,11 +103,25 @@ class SmartMeanReversionStrategy(BaseStrategy):
                 
         return m5.v[-1] > (current_vol_sma * self.vol_climax_ratio)
 
-    def get_stop_loss(self, signal: TradeSignal, market_data: MarketData) -> float:
-        return signal.stop_loss if signal.stop_loss > 0 else market_data.current_price * 1.01
-
-    def get_take_profit(self, signal: TradeSignal, market_data: MarketData) -> float:
-        return signal.take_profit if signal.take_profit > 0 else market_data.current_price * 0.99
+    def _is_trend_too_strong(self, market_data: MarketData) -> bool:
+        """
+        Institutional 'Runaway Train' Filter.
+        Calculates the slope of H1 EMA(200). If the trend is too parabolic, 
+        mean reversion is statistically suicidal.
+        """
+        h1 = market_data.htf_candles
+        ema_200 = h1.get_indicator("ema_200")
+        
+        if len(ema_200) < 6: return False
+        
+        # Calculate slope over last 5 bars (H1)
+        slope = (ema_200[-1] - ema_200[-6]) / 5.0
+        
+        # Convert to pips (Gold: 0.01 = 1 pip usually, but let's be safe with point)
+        point = 0.01 # Standard for XAUUSDm
+        pips_per_bar = abs(slope) / point
+        
+        return pips_per_bar > self.max_ema_slope
 
 
     def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
@@ -119,10 +134,16 @@ class SmartMeanReversionStrategy(BaseStrategy):
         if len(m5) - self._last_signal_bar < self.min_bars_between_signals:
             return None
         
-        # 2. Institutional Gating (ADX Regime)
+        # 2. Institutional Gating (ADX & EMA Slope)
+        htf = market_data.htf_candles
         adx_14 = market_data.m15_candles.get_indicator("adx_14")
+        
         if len(adx_14) > 0 and adx_14[-1] > self.adx_max_threshold:
-            self.last_rejection_reason = "Trend Strength High (Breakout Risk)"
+            self.last_rejection_reason = "Trend Strength High (ADX > Threshold)"
+            return None
+            
+        if self._is_trend_too_strong(market_data):
+            self.last_rejection_reason = "Parabolic Trend Detected (EMA Slope High)"
             return None
             
         # 3. Value Area Calculation (VBP)
@@ -174,29 +195,18 @@ class SmartMeanReversionStrategy(BaseStrategy):
                     tp2_price=va["vah"]
                 )
 
-        self.last_rejection_reason = "Price within value or no exhaustion"
-        return None
-
-
-        return None
-
     def get_metrics(self, market_data: MarketData) -> Dict[str, Any]:
+        """Returns live Value Area metrics for the institutional dashboard."""
         m5 = market_data.m5_candles
-        if m5 is None or len(m5) < self.rsi_period + 1: return {}
-        rsi = self._calculate_rsi(m5.c[-(self.rsi_period+1):], self.rsi_period)
-        return {"RSI": rsi}
+        if len(m5) < self.va_lookback: return {}
+        
+        recent_c = m5.c[-self.va_lookback:]
+        recent_v = m5.v[-self.va_lookback:]
+        va = self._calculate_value_area(recent_c, recent_v)
+        
+        return {
+            "VBP_VAH": round(va["vah"], 2),
+            "VBP_VAL": round(va["val"], 2),
+            "VBP_POC": round(va["poc"], 2)
+        }
 
-    def get_thresholds(self) -> Dict[str, Any]:
-        return {"RSI Limit": f">{self.rsi_overbought} or <{self.rsi_oversold}"}
-
-    def get_stop_loss(self, signal: TradeSignal, market_data: MarketData) -> float:
-        atr_vals = market_data.m5_candles.atr(14)
-        atr = atr_vals[-1] if len(atr_vals) > 0 else 1.0
-        dist = atr * self.sl_atr
-        return market_data.current_price - dist if signal.direction == "BUY" else market_data.current_price + dist
-
-    def get_take_profit(self, signal: TradeSignal, market_data: MarketData) -> float:
-        atr_vals = market_data.m5_candles.atr(14)
-        atr = atr_vals[-1] if len(atr_vals) > 0 else 1.0
-        dist = atr * self.tp_atr
-        return market_data.current_price + dist if signal.direction == "BUY" else market_data.current_price - dist

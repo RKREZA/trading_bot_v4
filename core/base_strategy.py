@@ -117,15 +117,18 @@ class BaseStrategy(ABC):
         """
         ...
 
-    @abstractmethod
     def get_stop_loss(self, signal: TradeSignal, market_data: MarketData) -> float:
-        """Calculate the absolute price for Stop Loss."""
-        ...
+        """
+        Default SL implementation: Returns value from the Signal.
+        Override if complex dynamic adjustments are needed post-signal.
+        """
+        return signal.stop_loss
 
-    @abstractmethod
     def get_take_profit(self, signal: TradeSignal, market_data: MarketData) -> float:
-        """Calculate the absolute price for Take Profit."""
-        ...
+        """
+        Default TP implementation: Returns value from the Signal.
+        """
+        return signal.take_profit
 
     @abstractmethod
     def get_metrics(self, market_data: MarketData) -> Dict[str, Any]:

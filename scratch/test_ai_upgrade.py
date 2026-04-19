@@ -8,7 +8,7 @@ from datetime import datetime
 sys.path.append(os.getcwd())
 
 from core.ai.features import FeatureEngineer
-from core.ai.model import AIModeWrapper
+from core.ai.model import AIModelWrapper
 from core.common.types import CandleArray
 
 def test_ai_upgrade():
@@ -55,7 +55,7 @@ def test_ai_upgrade():
 
     # 3. Test Model Training (Dummy Data)
     print("\nTesting Model Training (HGB)...")
-    wrapper = AIModeWrapper(model_dir="scratch/ai_test_weights")
+    wrapper = AIModelWrapper(model_dir="scratch/ai_test_weights")
     
     # Create dummy training data
     X = pd.DataFrame([features] * 10)

@@ -58,9 +58,9 @@
     "move_to_be_at_partial": true
   },
   "portfolio_allocations": {
-    "TrendFollowing": 0.35,
+    "TrendFollowing": 0.50,
     "LiquiditySweepBreakout": 0.35,
-    "SmartMeanReversion": 0.30
+    "SmartMeanReversion": 0.15
   },
   "backtest": {
     "initial_balance_per_strategy": 10000.0,
@@ -120,7 +120,7 @@
   "SmartMeanReversion": {
     "enabled": true,
     "max_spread_points": 1000,
-    "min_confidence": 0.55,
+    "min_confidence": 0.65,
     "bb_period": 20,
     "bb_std": 2.0,
     "rsi_period": 14,
@@ -128,10 +128,11 @@
     "rsi_oversold": 25,
     "sl_atr": 1.5,
     "tp_atr": 4.5,
-    "adx_max_threshold": 45.0,
+    "adx_max_threshold": 25.0,
+    "max_ema_slope": 3.0,
     "vol_mult_threshold": 1.25,
     "min_wick_ratio": 0.10,
-    "min_bars_between_signals": 15,
+    "min_bars_between_signals": 30,
     "allowed_sessions": [
       "LONDON",
       "NEW_YORK",
