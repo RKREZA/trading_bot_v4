@@ -16,8 +16,6 @@ from tqdm import tqdm
 from datetime import datetime, timezone, timedelta
 import numpy as np
 from typing import List, Dict, Any, Optional, Tuple
-import subprocess
-import sys
 
 ENGINE_VERSION = "v5.0_LOCKED"
 
@@ -65,7 +63,6 @@ from core.portfolio_manager import PortfolioManager
 from core.regime_gater import RegimeGater
 from core.recovery.checkpoint_manager import CheckpointManager
 from core.execution.order_manager import OrderManager
-from core.base_strategy import MarketData
 from core.indicator_engine import IndicatorEngine
 from core.common.exceptions import CriticalRiskViolationError
 
@@ -572,12 +569,24 @@ class PortfolioBacktester:
                             # TP Hit is most probable
                             self._close_trade(trade, target_tf_data.h[i] if trade["direction"] == "BUY" else target_tf_data.l[i], "tp", t, point, tick_value, comm_per_lot)
                 
-                # 5. Equity Sampling & Drawdown Track (Rule 6.1: math.fsum)
+                # 5. Equity Sampling & Drawdown Track (Rule 6.1)
+                # Correct mark-to-market equity: balance + floating PnL of any open trade.
+                # Previously this was `math.fsum([balance, 0.0])` which was a no-op.
                 for sid in self.balances:
+                    if sid in self.open_trades:
+                        trade = self.open_trades[sid]
+                        direction = trade["direction"]
+                        # Use the last available M5 close as the current price proxy.
+                        current_mark = float(target_tf_data.close[i - 1]) if i > 0 else float(target_tf_data.open[0])
+                        raw_diff = (current_mark - trade["fill_price"]) if direction == "BUY" else (trade["fill_price"] - current_mark)
+                        floating_pnl = math.fsum([(raw_diff / point) * tick_value * trade["lots"]])
+                        self.equities[sid] = math.fsum([self.balances[sid], floating_pnl])
+                    else:
+                        # No open trade — equity equals settled balance
+                        self.equities[sid] = self.balances[sid]
+
                     self.peak_equity[sid] = max(self.peak_equity[sid], self.equities[sid])
-                    # Precision Equity update
-                    self.equities[sid] = math.fsum([self.balances[sid], 0.0]) # Simplified update
-                    dd = (self.peak_equity[sid] - self.equities[sid]) / self.peak_equity[sid] * 100
+                    dd = (self.peak_equity[sid] - self.equities[sid]) / self.peak_equity[sid] * 100 if self.peak_equity[sid] > 0 else 0.0
                     self.max_drawdowns[sid] = max(self.max_drawdowns[sid], dd)
                     self.equity_history.append({"time": t, "strategy_id": sid, "equity": self.equities[sid]})
 

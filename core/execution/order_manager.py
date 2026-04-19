@@ -29,6 +29,10 @@ class OrderManager:
         self.deterministic = config.get("backtest", {}).get("deterministic", False)
         self.seed = config.get("backtest", {}).get("random_seed", 42)
         self._rng = random.Random(self.seed if self.deterministic else None)
+        # Seed numpy's global RNG when running in deterministic mode so ALL
+        # numpy random calls across the execution pipeline are reproducible.
+        if self.deterministic:
+            np.random.seed(self.seed)
         
         self.logger = logging.getLogger("trading_bot.execution")
         
@@ -40,6 +44,12 @@ class OrderManager:
         self.latency_diffs = []
         self.recent_spreads = deque(maxlen=100) # For Z-Score
         self.degradation_factor = 1.0 # 1.0 = Normal, 0.5 = Reduced
+        # P95 slippage drift threshold (in pips). Configurable per symbol.
+        # Default is 0.5 pips — suitable for gold (XAUUSDm). Override in config
+        # under execution.shadow_drift_p95_threshold for tighter FX pairs.
+        self._drift_p95_threshold = float(
+            exe_cfg.get("shadow_drift_p95_threshold", 0.5)
+        )
         
         # Rule 1.1: Unified Execution Kernel
         self.kernel = StochasticKernel(global_seed=self.seed)
@@ -195,18 +205,22 @@ class OrderManager:
                 self.slippage_diffs.append(absolute_drift)
                 if len(self.slippage_diffs) > 50: self.slippage_diffs.pop(0)
                 
-                # Rule 3.2: Auto-Degradation Trigger (Threshold: 0.2 pip drift on P95)
+                # Rule 3.2: Auto-Degradation Trigger — threshold is now configurable
                 p95_drift = np.percentile(self.slippage_diffs, 95) if self.slippage_diffs else 0
-                if p95_drift > 0.2:
+                if p95_drift > self._drift_p95_threshold:
                     self.degradation_factor = 0.5
-                    self.logger.warning(f"[SHADOW] High Slippage Drift Detected ({p95_drift:.2f} pips). AUTO-DEGRADING.")
+                    self.logger.warning(f"[SHADOW] High Slippage Drift Detected ({p95_drift:.2f} pips > threshold {self._drift_p95_threshold:.2f}). AUTO-DEGRADING.")
                 else:
                     self.degradation_factor = 1.0
 
                 # 3.4: Log Forensic Data (Phase 1 Mandatory Fields)
+                import hashlib as _hashlib
+                snapshot_hash = _hashlib.sha256(
+                    str(snapshot.snapshot_id).encode()
+                ).hexdigest()[:16]
                 with open(self.audit_log, "a") as f:
                     f.write(f"{time.time()},{symbol},{intent.strategy_id},{intent.intent_hash},"
-                            f"{snapshot.snapshot_id},{snapshot.snapshot_id},{snapshot.bid},{snapshot.ask},"
+                            f"{snapshot.snapshot_id},{snapshot_hash},{snapshot.bid},{snapshot.ask},"
                             f"{current_spread:.2f},{spread_z:.2f},{regime},{sim_outcome.fill_price},"
                             f"{actual_fill},{signed_drift:.4f},{absolute_drift:.4f},"
                             f"{sim_outcome.actual_latency_ms:.1f},{latency:.1f},SUCCESS\n")

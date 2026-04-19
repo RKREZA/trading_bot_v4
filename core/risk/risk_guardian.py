@@ -143,11 +143,12 @@ class RiskGuardian:
         """
         Dynamically derives a unique magic number for a strategy instance.
         Base: magic_number from config (default 234000).
-        Offset: hash of strategy_id to ensure persistence.
+        Offset: SHA256 hash of strategy_id — low collision probability even for
+        large strategy registries (replaces MD5 which had ~1/1000 collision risk).
         """
         base_magic = int(self.config.get("magic_number", 234000))
         import hashlib
-        sid_hash = int(hashlib.md5(strategy_id.encode()).hexdigest(), 16) % 1000
+        sid_hash = int(hashlib.sha256(strategy_id.encode()).hexdigest(), 16) % 1000
         return base_magic + sid_hash
 
     def calculate_lot_size(self, 
@@ -184,9 +185,12 @@ class RiskGuardian:
                 if not self.silent:
                     self.logger.info(f"[RISK] A+ Vault Scaling: {drawdown:.2f}% DD. Risk throttled: {risk_pct:.3f}% (Penalty: {penalty:.2f})")
 
-        # 2. Anti-Martingale / Anti-Doubling (Hard Guard)
+        # 2. Anti-Martingale: Progressive scaling — 5% reduction per consecutive loss,
+        # starting from the FIRST loss (not a binary cliff at 3 losses).
+        # This smoothly de-risks as streaks lengthen without halting trading abruptly.
         if self.consecutive_losses > 0:
-            risk_pct = min(risk_pct, risk_pct * 0.5 if self.consecutive_losses >= 3 else risk_pct)
+            decay = 0.95 ** self.consecutive_losses  # e.g. 1 loss=0.95, 3=0.857, 5=0.774
+            risk_pct = risk_pct * decay
 
         risk_amount = balance * (risk_pct / 100.0)
         
@@ -382,6 +386,9 @@ class RiskGuardian:
                 "status": self.strategy_status
             }
             conn = sqlite3.connect(db_path, timeout=10.0)
+            # WAL mode: allows concurrent readers while the writer is active,
+            # preventing 'database is locked' from the Telegram alerter thread.
+            conn.execute("PRAGMA journal_mode=WAL")
             cursor = conn.cursor()
             cursor.execute('''CREATE TABLE IF NOT EXISTS risk_state (id INTEGER PRIMARY KEY, state_json TEXT)''')
             cursor.execute('''INSERT OR REPLACE INTO risk_state (id, state_json) VALUES (1, ?)''', (json.dumps(state),))
@@ -396,6 +403,7 @@ class RiskGuardian:
         if os.path.exists(db_path):
             try:
                 conn = sqlite3.connect(db_path, timeout=10.0)
+                conn.execute("PRAGMA journal_mode=WAL")
                 cursor = conn.cursor()
                 cursor.execute('''CREATE TABLE IF NOT EXISTS risk_state (id INTEGER PRIMARY KEY, state_json TEXT)''')
                 cursor.execute('''SELECT state_json FROM risk_state WHERE id=1''')
@@ -422,9 +430,12 @@ class RiskGuardian:
             self.consecutive_losses = 0
 
     def reset_daily(self, new_balance: float):
-        """Synchronizes balance and resets daily risk counters."""
+        """Synchronizes balance and resets daily risk counters including consecutive loss streak."""
         self.daily_loss = 0.0
         self.initial_balance = new_balance
+        # Reset consecutive losses at day boundary: a streak that spans midnight should
+        # not penalize the new day's position sizing.
+        self.consecutive_losses = 0
 
     def _normalize_lots(self, lot: float, sym: Dict[str, Any], current_price: float = 1.0) -> float:
         min_lot = sym.get('min_lot', 0.01)

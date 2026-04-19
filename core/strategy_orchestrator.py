@@ -47,10 +47,66 @@ class StrategyOrchestrator:
         self._open_tickets = set()
         self._scaled_tickets = set() # Track tickets that have already taken partial profits
         self._tickets_lock = threading.Lock()
+        # original_sl registry: {ticket: original_sl_price} — used by manage_partials for
+        # correct initial risk calculation even after SL has been moved to break-even.
+        self._original_sl: Dict[int, float] = {}
+
+        # Phase 1 Safety Ceiling: maximum lot size allowed during live deployment.
+        # This is an institutional hard-cap, NOT a replacement for risk-based sizing.
+        self._phase1_lot_ceiling = float(
+            self.config.get("execution", {}).get("phase1_lot_ceiling", 0.05)
+        )
+
+        # Singleton RegimeDetector — avoids re-instantiating on every cycle.
+        from core.regime_detector import RegimeDetector
+        self._regime_detector = RegimeDetector()
+
+        # ── LIVE WFO GATE ────────────────────────────────────────────────
+        # On startup, check each strategy's last WFO outcome.
+        # Any strategy whose most recent window was REJECTED is suspended
+        # immediately via its risk guardian's kill-switch + CRITICAL alert.
+        # This prevents a strategy that failed walk-forward from trading live.
+        self._apply_wfo_gate()
 
         # Asynchronous Trailing Stop Management (Rule 3.1)
         self._stop_thread = threading.Thread(target=self._trailing_stop_loop, daemon=True)
         self._stop_thread.start()
+
+    def _apply_wfo_gate(self):
+        """
+        Queries the WFO gate database and suspends any strategy whose
+        most recent WFO window was classified as REJECTED.
+        Runs once at startup before the first trading cycle.
+        """
+        from backtesting.walk_forward import WalkForwardValidator
+        suspended = []
+        for runtime in self.runtimes:
+            sid = runtime.strategy.strategy_id
+            robustness = WalkForwardValidator.get_last_wfo_robustness(sid, self.config)
+            if robustness == "REJECTED":
+                # Activate kill-switch on this strategy's risk guardian
+                runtime.risk_guardian.kill_switch_active = True
+                suspended.append(sid)
+                logger.critical(
+                    f"[WFO GATE] Strategy '{sid}' SUSPENDED: last WFO window was REJECTED. "
+                    f"Re-run WFO to clear. Trading disabled for this strategy."
+                )
+                try:
+                    self.notification_manager.send_risk_alert(
+                        reason="WFO Gate: Strategy Suspended",
+                        details=f"{sid} failed last walk-forward window (REJECTED). Trading disabled."
+                    )
+                except Exception:
+                    pass  # Never block startup on notification failure
+            elif robustness in ("MARGINAL",):
+                logger.warning(
+                    f"[WFO GATE] Strategy '{sid}' last WFO window was MARGINAL. "
+                    f"Reduce position sizing."
+                )
+        if suspended:
+            logger.critical(f"[WFO GATE] {len(suspended)} strateg(ies) suspended: {suspended}")
+        else:
+            logger.info(f"[WFO GATE] All {len(self.runtimes)} strategies passed WFO gate check.")
 
     def execute_cycle(self, symbol: str, market_data: MarketData, account_snapshot: dict, is_news_blocked: bool = False) -> Dict[str, Any]:
         """
@@ -63,9 +119,8 @@ class StrategyOrchestrator:
 
         # 1. LOAD: Handled via market_data arrival
         
-        # 2. DETECT REGIME
-        from core.regime_detector import RegimeDetector
-        regime_info = RegimeDetector().detect(market_data.m5_candles)
+        # 2. DETECT REGIME (use cached singleton — no per-cycle instantiation)
+        regime_info = self._regime_detector.detect(market_data.m5_candles)
         market_type = regime_info.market_type
         volatility = regime_info.volatility
         
@@ -107,7 +162,7 @@ class StrategyOrchestrator:
         news_events = self.news_filter.get_upcoming_events(market_data.timestamp.timestamp(), window_hours=24)
         
         # 3. ACTIVATE RELEVANT STRATEGIES (Regime Gating)
-        from core.regime_gater import RegimeGater
+        from core.regime_gater import RegimeGater  # noqa: PLC0415 — kept here for lazy-import safety
         active_runtimes = []
         for r in self.runtimes:
             if not r.strategy.is_symbol_allowed(symbol):
@@ -255,14 +310,33 @@ class StrategyOrchestrator:
             # Final TP Calculation (using replace for frozen dataclass)
             tp = runtime.strategy.get_take_profit(sig, market_data)
             sig = replace(sig, take_profit=tp)
-            
-            # Fixed lot size override (0.05 = user requested max)
-            fixed_lot = 0.05
+
+            # ── INSTITUTIONAL LOT SIZING ─────────────────────────────────────
+            # Compute risk-based lot from the strategy's own risk guardian.
+            # This correctly uses risk_per_trade_pct against the current balance
+            # and stop-loss distance — never overrides with a fixed value.
+            sl_dist = abs(sig.price - sig.stop_loss) if sig.stop_loss and sig.price else 0.0
+            if sl_dist <= 0:
+                logger.warning(f"[{sid}] SL distance is zero — cannot size lot. Skipping.")
+                continue
+
+            risk_based_lot = runtime.risk_guardian.calculate_lot_size(
+                balance=current_balance,
+                stop_loss_dist=sl_dist,
+                symbol_info=symbol_info,
+                current_price=market_data.current_price,
+            )
+
+            # Apply Phase 1 Safety Ceiling (hard-cap, not a replacement for sizing)
             sym_min_lot = symbol_info.get("min_lot", 0.01) if symbol_info else 0.01
-            if fixed_lot < sym_min_lot:
-                fixed_lot = sym_min_lot
-            
-            sig = replace(sig, volume=fixed_lot)
+            final_lot = min(risk_based_lot, self._phase1_lot_ceiling)
+            final_lot = max(final_lot, sym_min_lot)  # Enforce broker minimum
+
+            if final_lot < sym_min_lot:
+                logger.warning(f"[{sid}] Risk-based lot {risk_based_lot:.4f} below min {sym_min_lot}. Skipping.")
+                continue
+
+            sig = replace(sig, volume=final_lot)
             
             if sig.volume > 0:
                 # 8. UNIFIED EXECUTION BRIDGE (Audit Bug #7 Fix)
@@ -291,13 +365,15 @@ class StrategyOrchestrator:
                         current_balance, current_equity
                     )
                     pulse_report["execution"].append(execution_result)
-                    
+
                     # Store Ticket for Awareness (Audit Bug #2 Fix)
                     ticket = execution_result.get("ticket")
                     if ticket:
                         with self._tickets_lock:
                             self._open_tickets.add(ticket)
-                            logger.info(f"[{sid}] Ticket {ticket} added to Orchestrator Registry.")
+                            # Register original SL for accurate initial-risk tracking in partials
+                            self._original_sl[ticket] = sig.stop_loss
+                            logger.info(f"[{sid}] Ticket {ticket} added to Orchestrator Registry (orig_sl={sig.stop_loss:.5f}).")
             
         return pulse_report
 
@@ -385,14 +461,14 @@ class StrategyOrchestrator:
 
             # Calculate current R:R
             entry = pos.price_open
-            current_sl = pos.sl
             direction = "BUY" if pos.type == 0 else "SELL"
             current_price = bid if direction == "BUY" else ask
-            
-            # Initial Risk (distance from entry to original SL)
-            # Note: We use pos.sl which might have been moved. 
-            # Ideally we want original_sl. For now, we estimate from entry.
-            initial_risk = abs(entry - current_sl)
+
+            # Initial Risk: prefer tracked original SL over live (possibly moved) SL.
+            # This prevents incorrect R:R after a break-even move.
+            with self._tickets_lock:
+                orig_sl = self._original_sl.get(pos.ticket, pos.sl)
+            initial_risk = abs(entry - orig_sl)
             if initial_risk == 0: continue
             
             # Current Profit in Points
@@ -474,7 +550,11 @@ class StrategyOrchestrator:
                     live_tickets = {p.ticket for p in live_pos}
                     with self._tickets_lock:
                         # Prune tickets no longer in MT5
+                        closed_tickets = self._open_tickets - live_tickets
                         self._open_tickets = self._open_tickets.intersection(live_tickets)
+                        # Evict original_sl entries for closed positions
+                        for t in closed_tickets:
+                            self._original_sl.pop(t, None)
                 except Exception as e:
                     logger.debug(f"Ticket Sync failed: {e}")
 
@@ -486,7 +566,14 @@ class StrategyOrchestrator:
                     time.sleep(0.5)
                     continue
 
+                now_ts = time.time()
                 for symbol, data in analysis_snapshot.items():
+                    # Guard: skip stale snapshots (older than 60s) to avoid trailing
+                    # positions with outdated price data during news blocks or reconnects.
+                    if now_ts - data.get("timestamp", 0) > 60:
+                        logger.debug(f"[TRAIL] Skipping {symbol}: analysis snapshot is stale (>{60}s old).")
+                        continue
+
                     # 1. Trailing Stop Management
                     self.manage_trailing_stops(
                         symbol, 

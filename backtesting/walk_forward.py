@@ -9,18 +9,40 @@ Institutional grade rolling window validation with:
 """
 
 import logging
+import os
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Tuple, Optional
 from dataclasses import dataclass
 from enum import Enum
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from backtesting.backtester import PortfolioBacktester
 from backtesting.monte_carlo import MonteCarloSimulator
 from core.performance_tracker import PerformanceTracker
 
 logger = logging.getLogger("trading_bot.wfo")
+
+
+def _wfo_worker(config: dict, symbol: str, strat_cls, strategy_id: str,
+                param_dict: dict, new_cfg: dict, is_data: dict) -> float:
+    """
+    Top-level picklable worker for ProcessPoolExecutor.
+    Runs a single IS backtest for a given parameter combination and returns PnL.
+    Must be a top-level function (not a method) for Windows multiprocessing compatibility.
+    """
+    try:
+        test_strat = strat_cls(strategy_id, new_cfg)
+        bt = PortfolioBacktester(config)
+        hist, _ = bt.run(
+            symbol, [test_strat],
+            is_data.get("M5"), is_data.get("H1"),
+            is_data.get("M15"), is_data.get("M5"), is_data.get("M1")
+        )
+        return sum(t['pnl'] for t in hist) if hist else 0.0
+    except Exception:
+        return -float('inf')
 
 class WFORobustness(Enum):
     EXCELLENT = "EXCELLENT"
@@ -118,6 +140,19 @@ class WalkForwardValidator:
             history, equity_history = backtester.run(symbol, oos_strategies, oos_data["M5"], oos_data.get("H1"), oos_data.get("M15"), oos_data.get("M5"), oos_data.get("M1"))
             
             oos_profit = sum(t['pnl'] for t in history) if history else 0.0
+            oos_trade_count = len(history) if history else 0
+
+            # Significance test: reject windows with too few trades to be meaningful.
+            # An IS with 1 trade and OOS with 0 can produce misleading 0.0 WFO ratios.
+            min_is_trades = 10
+            min_oos_trades = 5
+            if is_profit == 0 and oos_trade_count < min_oos_trades:
+                logger.warning(
+                    f"[WFO] Window {is_end.date()} skipped: OOS has only {oos_trade_count} trades "
+                    f"(min={min_oos_trades}). Insufficient for significance."
+                )
+                current_is_start += timedelta(weeks=test_weeks)
+                continue
             
             normalized_is = is_profit / window_weeks
             normalized_oos = oos_profit / test_weeks
@@ -153,64 +188,140 @@ class WalkForwardValidator:
                 mc_score=mc_score
             )
             oos_results.append(result)
-            
+
+            # LIVE WFO GATE: Persist result to SQLite so the orchestrator
+            # can query and block strategies that failed their last window.
+            for strat in strategies:
+                self._persist_wfo_result(
+                    strategy_id=strat.strategy_id,
+                    window=result.window,
+                    robustness=robustness.value,
+                    wfo_ratio=round(wfo_ratio, 2),
+                    is_profit=round(is_profit, 2),
+                    oos_profit=round(oos_profit, 2),
+                )
+
             current_is_start += timedelta(weeks=test_weeks)
 
         self._results = oos_results
         return self._get_dict_results(oos_results)
 
     def _optimize_is_window(self, symbol: str, strategies: list, is_data: dict) -> dict:
-        """Runs combinatorial Grid Search to find maximum IS WFO Ratio configurations."""
+        """
+        Bayesian IS window optimizer using Optuna TPE sampler (primary).
+        Falls back to ProcessPoolExecutor parallel grid search if optuna is unavailable.
+
+        Optuna TPE (Tree-structured Parzen Estimator) converges to high-performing
+        parameter regions 10-100x faster than grid search by learning from each trial.
+        """
         import itertools
         from backtesting.backtester import PortfolioBacktester
-        
+
+        try:
+            import optuna
+            _OPTUNA_AVAILABLE = True
+            # Suppress Optuna's verbose per-trial output in backtest runs
+            optuna.logging.set_verbosity(optuna.logging.WARNING)
+        except ImportError:
+            _OPTUNA_AVAILABLE = False
+
         best_configs = {}
         for strat in strategies:
             grid = strat.get_parameter_grid()
             if not grid:
                 bt = PortfolioBacktester(self.config)
-                hist, _ = bt.run(symbol, [strat.__class__(strat.strategy_id, strat.config)], 
-                                 is_data.get("M5"), is_data.get("H1"), is_data.get("M15"), 
+                hist, _ = bt.run(symbol, [strat.__class__(strat.strategy_id, strat.config)],
+                                 is_data.get("M5"), is_data.get("H1"), is_data.get("M15"),
                                  is_data.get("M5"), is_data.get("M1"))
                 prof = sum(t['pnl'] for t in hist) if hist else 0.0
                 best_configs[strat.strategy_id] = {"params": {}, "_is_profit": prof}
                 continue
-                
+
             keys = list(grid.keys())
             values = list(grid.values())
             combinations = list(itertools.product(*values))
-            
-            best_prof = -float('inf')
-            best_params = {}
-            
-            logger.info(f"[{strat.strategy_id}] Hunting {len(combinations)} parameter combos IS...")
-            
-            for combo in combinations:
-                param_dict = dict(zip(keys, combo))
-                new_cfg = strat.config.copy()
-                base_name = strat.strategy_id.rsplit('_v', 1)[0] if '_v' in strat.strategy_id else strat.strategy_id
-                
-                if "strategies" in new_cfg and base_name in new_cfg["strategies"]:
-                    new_cfg["strategies"][base_name].update(param_dict)
-                elif base_name in new_cfg:
-                    new_cfg[base_name].update(param_dict)
-                else:
-                    new_cfg[base_name] = param_dict
-                    
-                test_strat = strat.__class__(strat.strategy_id, new_cfg)
-                bt = PortfolioBacktester(self.config)
-                hist, _ = bt.run(symbol, [test_strat], is_data.get("M5"), is_data.get("H1"), 
-                                 is_data.get("M15"), is_data.get("M5"), is_data.get("M1"))
-                
-                prof = sum(t['pnl'] for t in hist) if hist else 0.0
-                
-                if prof > best_prof:
-                    best_prof = prof
-                    best_params = param_dict
-                    
-            logger.info(f"[{strat.strategy_id}] Optimal IS Params Found: {best_params} (PnL: {best_prof:.2f})")
+            n_trials = min(100, len(combinations))  # Budget-aware: cap at 100 trials
+
+            if _OPTUNA_AVAILABLE and len(combinations) > 5:
+                # ── PRIMARY PATH: Optuna TPE Bayesian Search ─────────────────
+                logger.info(
+                    f"[{strat.strategy_id}] Optuna TPE search: {n_trials} trials "
+                    f"from {len(combinations)}-combo space (budget-capped)."
+                )
+
+                def objective(trial):
+                    param_dict = {
+                        k: trial.suggest_categorical(k, v)
+                        for k, v in zip(keys, values)
+                    }
+                    new_cfg = strat.config.copy()
+                    base_name = strat.strategy_id.rsplit('_v', 1)[0] if '_v' in strat.strategy_id else strat.strategy_id
+                    if "strategies" in new_cfg and base_name in new_cfg["strategies"]:
+                        new_cfg["strategies"][base_name].update(param_dict)
+                    elif base_name in new_cfg:
+                        new_cfg[base_name].update(param_dict)
+                    else:
+                        new_cfg[base_name] = param_dict
+                    return _wfo_worker(self.config, symbol, strat.__class__,
+                                      strat.strategy_id, param_dict, new_cfg, is_data)
+
+                study = optuna.create_study(
+                    direction="maximize",
+                    sampler=optuna.samplers.TPESampler(seed=42),
+                )
+                study.optimize(objective, n_trials=n_trials, n_jobs=1)
+
+                best_params = study.best_params
+                best_prof = study.best_value
+                logger.info(
+                    f"[{strat.strategy_id}] Optuna best params: {best_params} "
+                    f"(PnL: {best_prof:.2f}, {len(study.trials)} trials)"
+                )
+
+            else:
+                # ── FALLBACK PATH: Parallel Grid Search ───────────────────────
+                logger.info(
+                    f"[{strat.strategy_id}] Grid search fallback: {len(combinations)} combos "
+                    f"across {os.cpu_count()} CPUs."
+                )
+                combo_args = []
+                for combo in combinations:
+                    param_dict = dict(zip(keys, combo))
+                    new_cfg = strat.config.copy()
+                    base_name = strat.strategy_id.rsplit('_v', 1)[0] if '_v' in strat.strategy_id else strat.strategy_id
+                    if "strategies" in new_cfg and base_name in new_cfg["strategies"]:
+                        new_cfg["strategies"][base_name].update(param_dict)
+                    elif base_name in new_cfg:
+                        new_cfg[base_name].update(param_dict)
+                    else:
+                        new_cfg[base_name] = param_dict
+                    combo_args.append((param_dict, new_cfg))
+
+                best_prof = -float('inf')
+                best_params = {}
+                max_workers = min(os.cpu_count() or 4, len(combo_args))
+                with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                    futures = {
+                        executor.submit(
+                            _wfo_worker, self.config, symbol, strat.__class__,
+                            strat.strategy_id, param_dict, new_cfg, is_data
+                        ): param_dict
+                        for param_dict, new_cfg in combo_args
+                    }
+                    for future in as_completed(futures):
+                        param_dict = futures[future]
+                        try:
+                            prof = future.result()
+                        except Exception as exc:
+                            logger.debug(f"[WFO Worker] {param_dict} raised: {exc}")
+                            prof = -float('inf')
+                        if prof > best_prof:
+                            best_prof = prof
+                            best_params = param_dict
+                logger.info(f"[{strat.strategy_id}] Grid search best: {best_params} (PnL: {best_prof:.2f})")
+
             best_configs[strat.strategy_id] = {"params": best_params, "_is_profit": best_prof}
-            
+
         return best_configs
 
     def _assess_robustness(self, wfo_ratio: float, min_ratio: float) -> WFORobustness:
@@ -222,6 +333,77 @@ class WalkForwardValidator:
         elif wfo_ratio >= 0.40:
             return WFORobustness.MARGINAL
         return WFORobustness.REJECTED
+
+    def _persist_wfo_result(
+        self,
+        strategy_id: str,
+        window: str,
+        robustness: str,
+        wfo_ratio: float,
+        is_profit: float,
+        oos_profit: float,
+    ):
+        """
+        Persists WFO window result to SQLite for the live WFO gate.
+        The orchestrator queries `wfo_gate` to block strategies whose
+        most recent window has REJECTED robustness.
+        Uses WAL mode to prevent locking from concurrent reader threads.
+        """
+        import sqlite3
+        db_path = self.config.get("paths", {}).get(
+            "wfo_gate_db", "config/wfo_gate.db"
+        )
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        try:
+            conn = sqlite3.connect(db_path, timeout=10.0)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS wfo_gate (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    strategy_id TEXT NOT NULL,
+                    window TEXT NOT NULL,
+                    robustness TEXT NOT NULL,
+                    wfo_ratio REAL,
+                    is_profit REAL,
+                    oos_profit REAL,
+                    recorded_at TEXT DEFAULT (datetime('now'))
+                )
+            """)
+            conn.execute(
+                "INSERT INTO wfo_gate (strategy_id, window, robustness, wfo_ratio, is_profit, oos_profit) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (strategy_id, window, robustness, wfo_ratio, is_profit, oos_profit)
+            )
+            conn.commit()
+            conn.close()
+            logger.debug(f"[WFO Gate] Persisted {strategy_id}: {robustness} ({window})")
+        except Exception as e:
+            logger.warning(f"[WFO Gate] Failed to persist result: {e}")
+
+    @staticmethod
+    def get_last_wfo_robustness(strategy_id: str, config: dict) -> str:
+        """
+        Queries the WFO gate DB for the most recent robustness classification
+        of the given strategy. Returns 'UNKNOWN' if no record exists.
+        Called by the orchestrator on startup to apply the live WFO gate.
+        """
+        import sqlite3
+        db_path = config.get("paths", {}).get("wfo_gate_db", "config/wfo_gate.db")
+        if not os.path.exists(db_path):
+            return "UNKNOWN"
+        try:
+            conn = sqlite3.connect(db_path, timeout=5.0)
+            conn.execute("PRAGMA journal_mode=WAL")
+            cursor = conn.execute(
+                "SELECT robustness FROM wfo_gate WHERE strategy_id=? "
+                "ORDER BY recorded_at DESC LIMIT 1",
+                (strategy_id,)
+            )
+            row = cursor.fetchone()
+            conn.close()
+            return row[0] if row else "UNKNOWN"
+        except Exception:
+            return "UNKNOWN"
 
     def _get_dict_results(self, results: List[WindowResult]) -> List[Dict]:
         """Converts WindowResult to dictionary format."""

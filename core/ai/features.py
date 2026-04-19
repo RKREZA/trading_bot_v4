@@ -6,6 +6,11 @@ from core.common.types import CandleArray
 class FeatureEngineer:
     """
     Extracts features from raw CandleArray and Strategy Signal state for the ML Model.
+
+    V6 additions:
+    - volume_ratio: tick volume relative to 20-bar average (strong institutional predictor)
+    - session_london / session_ny / session_asia: one-hot session encoding
+      (hour_of_day alone loses session context across DST transitions)
     """
 
     @staticmethod
@@ -62,17 +67,34 @@ class FeatureEngineer:
         features["hour_of_day"] = dt.hour
         features["day_of_week"] = dt.weekday()
 
-        # 6. Contextual
+        # 6. Session one-hot encoding (replaces relying solely on hour_of_day which
+        # loses session context across DST transitions and overlapping windows).
+        # London: 07-16 UTC | New York: 12-21 UTC | Asia: 22-06 UTC (approx)
+        h = dt.hour
+        features["session_london"] = 1.0 if 7 <= h < 16 else 0.0
+        features["session_ny"] = 1.0 if 12 <= h < 21 else 0.0
+        features["session_asia"] = 1.0 if h >= 22 or h < 7 else 0.0
+
+        # 7. Volume Ratio (tick volume vs 20-bar average)
+        # Tick volume at signal time is one of the strongest institutional predictors.
+        if hasattr(candles, "tick_volume") and len(candles.tick_volume) >= 20:
+            current_vol = float(candles.tick_volume[-1])
+            avg_vol = float(np.mean(candles.tick_volume[-20:]))
+            features["volume_ratio"] = current_vol / avg_vol if avg_vol > 0 else 1.0
+        else:
+            features["volume_ratio"] = 1.0  # neutral default when tick_volume absent
+
+        # 8. Contextual
         features["signal_dir"] = 1.0 if signal_direction == "BUY" else -1.0
         features["sl_pips"] = current_sl_pips
 
-        # 7. Institutional AR-3 Sequential Lags (New 10/10 Logic)
-        # We capture the state of the 3 previous candles to provide sequence context
+        # 9. Institutional AR-3 Sequential Lags (Sequence Context)
+        # Capture the state of the 3 previous candles to provide sequence context.
         for lag in range(1, 4):
             idx = -1 - lag
             if len(candles.close) > abs(idx):
-                o, c, h, l = candles.open[idx], candles.close[idx], candles.high[idx], candles.low[idx]
-                sz = h - l
+                o, c, h_c, l_c = candles.open[idx], candles.close[idx], candles.high[idx], candles.low[idx]
+                sz = h_c - l_c
                 features[f"body_ratio_lag_{lag}"] = abs(o - c) / sz if sz > 0 else 0
                 features[f"trend_dir_lag_{lag}"] = 1.0 if c > o else -1.0
                 features[f"size_ratio_lag_{lag}"] = sz / total_size if total_size > 0 else 1.0

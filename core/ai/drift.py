@@ -17,7 +17,8 @@ class DriftDetector:
     - Warns on first scipy ImportError instead of silent bypass
     """
     def __init__(self, model_dir: str = "core/ai/weights"):
-        self.baseline_path = os.path.join(model_dir, "v4_rf_baseline.pkl")
+        # Path matches what AIModeWrapper.train() saves as the baseline reference.
+        self.baseline_path = os.path.join(model_dir, "v4_ai_baseline.pkl")
         self.baseline = None
         self.buffer = []
         self.buffer_size = 200  # Tracks last 200 feature evaluations natively

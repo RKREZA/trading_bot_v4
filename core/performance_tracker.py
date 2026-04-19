@@ -59,12 +59,15 @@ class PerformanceTracker:
         avg_ret = returns.mean() if not returns.empty else 0
         std_ret = returns.std() if len(returns) > 1 else 0
         
-        ann_factor = np.sqrt(252)
-        sharpe = (avg_ret / std_ret * ann_factor) if std_ret > 0 else 0
+        # FX/Gold trades 5d/week including overnight ≈ 260 annual trading days.
+        # Using 252 (equity market convention) understates annualised volatility for FX pairs.
+        ann_factor = 260.0
+        ann_sqrt = np.sqrt(ann_factor)
+        sharpe = (avg_ret / std_ret * ann_sqrt) if std_ret > 0 else 0
         
         downside_returns = returns[returns < 0]
         downside_std = downside_returns.std() if len(downside_returns) > 1 else 0
-        sortino = (avg_ret / downside_std * ann_factor) if downside_std > 0 else 0
+        sortino = (avg_ret / downside_std * ann_sqrt) if downside_std > 0 else 0
         
         # SQN: Expectancy / Std(PnL) * sqrt(trades)
         avg_win = wins['pnl'].mean() if not wins.empty else 0
@@ -77,6 +80,24 @@ class PerformanceTracker:
         loss_sum = abs(losses['pnl'].sum())
         profit_factor = wins['pnl'].sum() / loss_sum if loss_sum > 0 else float('inf')
         rr_ratio = (avg_win / abs(avg_loss)) if avg_loss != 0 else 0
+
+        # ── CAGR & Calmar Ratio ──
+        # CAGR = (final_balance / initial_balance) ^ (365 / holding_days) - 1
+        cagr = 0.0
+        calmar = 0.0
+        try:
+            if 'timestamp' in df.columns and len(df) >= 2:
+                t_start = df['timestamp'].min()
+                t_end = df['timestamp'].max()
+                holding_days = (t_end - t_start) / 86400.0
+                if holding_days > 0:
+                    final_balance = initial_balance + net_profit
+                    ratio = final_balance / initial_balance if initial_balance > 0 else 1.0
+                    cagr = (ratio ** (365.0 / holding_days) - 1.0) * 100  # as %
+                    # Calmar = CAGR / Max Drawdown%  (higher is better)
+                    calmar = (cagr / max_drawdown) if max_drawdown > 0 else 0.0
+        except Exception:
+            pass  # Non-fatal; timestamps may be missing in synthetic/test data
 
         return {
             "initial_balance": round(float(initial_balance), 2),
@@ -92,6 +113,8 @@ class PerformanceTracker:
             "expectancy": round(float(expectancy), 2),
             "rr_ratio": round(float(rr_ratio), 2),
             "sqn": round(float(sqn), 2),
+            "cagr": f"{cagr:.2f}%",
+            "calmar_ratio": round(float(calmar), 2),
             "total_trades": int(len(df)),
             "monthly_stats": monthly_stats
         }
