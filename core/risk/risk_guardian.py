@@ -155,25 +155,29 @@ class RiskGuardian:
                            balance: float, 
                            stop_loss_dist: float, 
                            symbol_info: Dict[str, Any],
-                           current_price: float = 1.0) -> float:
+                           current_price: float = 1.0,
+                           volatility_status: Optional[VolatilityStatus] = None) -> float:
         """
         Institutional Position Sizing: risk_amount / stop_loss_dist
-        A+ HARDENING: Dynamic De-scaling based on Drawdown.
+        Includes Volatility Scaling and Drawdown-Aware De-scaling.
         """
         # [ Calibration Hardening ]: Force minimum SL distance (10 ticks) to avoid zero-lot math
         point = symbol_info.get('point', 0.01)
         stop_loss_dist = max(stop_loss_dist, point * 10)
 
         if self.kill_switch_active:
-            return 0.0
-
-        # 1. Base Risk Calculation
+            return 0.0        # 1. Base Risk Calculation
         risk_pct = self.risk_per_trade_pct
         
-        # A+ VAULT: Equity Drawdown De-scaling (INSTITUTIONAL ENFORCEMENT)
+        # 1a. REGIME VOLATILITY SCALING (Centralized from Gater/Orchestrator)
+        if volatility_status == VolatilityStatus.HIGH:
+            risk_pct = risk_pct * 0.5
+            if not self.silent:
+                self.logger.info("[RISK] Volatility Scaling: HIGH volatility detected. Risk halved.")
+
+        # 1b. Equity Drawdown De-scaling (INSTITUTIONAL ENFORCEMENT)
         # Smoothly ramps down position sizing as drawdown increases past 4%,
-        # reaching zero risk at max_drawdown_halt_pct. This prevents cliff-edge
-        # behavior where the system trades at full size right up to the kill-switch.
+        # reaching zero risk at max_drawdown_halt_pct.
         eval_equity = self.current_portfolio_equity if self.current_portfolio_equity > 0 else balance
         if self.max_equity > eval_equity:
             drawdown = ((self.max_equity - eval_equity) / self.max_equity) * 100
@@ -185,11 +189,9 @@ class RiskGuardian:
                 if not self.silent:
                     self.logger.info(f"[RISK] A+ Vault Scaling: {drawdown:.2f}% DD. Risk throttled: {risk_pct:.3f}% (Penalty: {penalty:.2f})")
 
-        # 2. Anti-Martingale: Progressive scaling — 5% reduction per consecutive loss,
-        # starting from the FIRST loss (not a binary cliff at 3 losses).
-        # This smoothly de-risks as streaks lengthen without halting trading abruptly.
+        # 1c. Anti-Martingale: Progressive scaling — 5% reduction per consecutive loss
         if self.consecutive_losses > 0:
-            decay = 0.95 ** self.consecutive_losses  # e.g. 1 loss=0.95, 3=0.857, 5=0.774
+            decay = 0.95 ** self.consecutive_losses
             risk_pct = risk_pct * decay
 
         risk_amount = balance * (risk_pct / 100.0)
@@ -202,6 +204,21 @@ class RiskGuardian:
         
         denominator = points_dist * tick_value
         raw_lot = (risk_amount / denominator) if denominator > 0 else 0.0
+
+        # Apply Institutional Exposure-Based Ceiling (Phase 2 Refactor)
+        # Instead of regime confidence, we use a global safety cap based on current account drawdown.
+        # Max cap is the configured _phase1_lot_ceiling, but it degrades as DD increases.
+        base_ceiling = float(self.config.get("risk_governance", {}).get("phase1_lot_ceiling", 2.0))
+        eval_equity = self.current_portfolio_equity if self.current_portfolio_equity > 0 else balance
+        if self.max_equity > eval_equity:
+            drawdown = ((self.max_equity - eval_equity) / self.max_equity) * 100
+            # Ceiling starts shrinking at 2% DD
+            if drawdown > 2.0:
+                limit = self.max_drawdown_halt_pct
+                dd_penalty = max(0.1, 1.0 - (drawdown / limit)) 
+                base_ceiling *= dd_penalty
+
+        raw_lot = min(raw_lot, base_ceiling)
 
         return self._normalize_lots(raw_lot, symbol_info, current_price)
 

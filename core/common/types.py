@@ -49,7 +49,9 @@ class CanonicalHasher:
 class MarketRegime(Enum):
     TREND           = "TRENDING"
     RANGE           = "RANGING"
-    UNCERTAIN       = "UNCERTAIN"
+    LIQUIDITY_EVENT = "LIQUIDITY_EVENT"
+    EXPANSION       = "EXPANSION"
+    TRANSITION      = "TRANSITION"
 
 class VolatilityStatus(Enum):
     HIGH            = "HIGH"

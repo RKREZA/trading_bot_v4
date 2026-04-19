@@ -12,28 +12,49 @@ class RegimeGater:
     """
 
     # Institutional Regime Contract Mapping (Priority 2)
-    # Strategies MUST exist in these buckets to execute under the specific regime flag
-    REGIME_CONTRACT: Dict[MarketRegime, list] = {
-        MarketRegime.TREND: ["TrendFollowing", "LiquiditySweepBreakout", "Diagnostic", "LiquiditySession", "PureBreakoutOneMinute"],
-        MarketRegime.RANGE: ["SmartMeanReversion", "RangeBounce", "Diagnostic", "LiquiditySession", "PureBreakoutOneMinute"],
-        MarketRegime.UNCERTAIN: ["Diagnostic", "PureBreakoutOneMinute", "LiquiditySession", "TrendFollowing", "LiquiditySweepBreakout", "SmartMeanReversion", "RangeBounce"] # Allow all in uncertain markets
+    # Strategies MUST match these class names exactly to execute under specific regimes
+    REGIME_CONTRACT: Dict[MarketRegime, set] = {
+        MarketRegime.TREND: {"TrendFollowing", "TrendFollowingStrategy", "Diagnostic", "LiquiditySession", "PureBreakoutOneMinute"},
+        MarketRegime.RANGE: {"SmartMeanReversion", "RangeBounce", "MeanReversionStrategy", "Diagnostic", "LiquiditySession"},
+        MarketRegime.LIQUIDITY_EVENT: {"LiquiditySweepBreakout", "LiquiditySweepStrategy", "Diagnostic"},
+        MarketRegime.EXPANSION: {"PureBreakoutOneMinute", "TrendFollowing", "TrendFollowingStrategy", "Diagnostic"},
+        MarketRegime.TRANSITION: {"Diagnostic"}  # Only diagnostic tools allowed during transition
     }
 
     @classmethod
-    def is_strategy_allowed(cls, strategy_name: str, market_type: MarketRegime) -> bool:
+    def is_strategy_allowed(cls, strategy_name: str, regime_info: RegimeInfo) -> bool:
         """
         Institutional Regime Deterministic Routing.
         Strictly enforces centroid assignments against active model names protecting against drift.
         """
-        allowed_list = cls.REGIME_CONTRACT.get(market_type, [])
-
-        # Robust case-insensitive search
-        for allowed in allowed_list:
-            if allowed.lower() in strategy_name.lower():
-                return True
-                
-        # If market type isn't defined or strategy misses contract -> Hard block
-        return False
+        # Hard suppression: Do not trade if overall regime confidence is weak
+        # Includes volatility-aware confidence buffer (e.g. higher req for LOW vol)
+        required_confidence = 0.55 + cls.get_confidence_buffer(regime_info.volatility)
+        if regime_info.confidence < required_confidence:
+            return False
+            
+        allowed_set = cls.REGIME_CONTRACT.get(regime_info.market_type, set())
+        
+        # Strict identity matching against registry
+        if strategy_name not in allowed_set:
+            return False
+            
+        # Archetypal Volatility Suppression
+        # Hard block MeanReversion during HIGH volatility regardless of ADX
+        is_mean_rev = "MeanReversion" in strategy_name or "SmartMeanReversion" in strategy_name
+        if is_mean_rev and regime_info.volatility == VolatilityStatus.HIGH:
+            return False
+            
+        # Hard block TrendFollowing/Breakout during LOW volatility unless it is the EXACT start of an expansion
+        is_trend_strat = "Trend" in strategy_name or "Breakout" in strategy_name
+        if is_trend_strat and regime_info.volatility == VolatilityStatus.LOW and regime_info.market_type != MarketRegime.EXPANSION:
+            return False
+            
+        # Block active strategies during TRANSITION unless they are diagnostic/specifically designed
+        if regime_info.market_type == MarketRegime.TRANSITION and "Diagnostic" not in strategy_name:
+            return False
+            
+        return True
 
     @staticmethod
     def get_risk_multiplier(volatility: VolatilityStatus) -> float:

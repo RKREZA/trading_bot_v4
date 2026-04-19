@@ -323,7 +323,13 @@ class PortfolioBacktester:
                     d1_data.set_limit(d1_idx)
                 
                 # 1. Regime Detection & Gating
-                regime_info = self.regime_detector.detect(target_tf_data)
+                # V2 Institutional Patch: RegimeDetector now expects an object exposing m5_candles and htf_candles.
+                class _RegimeDataShim: pass
+                shim = _RegimeDataShim()
+                shim.m5_candles = target_tf_data if m5_data is target_tf_data else m5_data
+                shim.htf_candles = h1_data
+                
+                regime_info = self.regime_detector.detect(shim)
                 regime = regime_info.market_type
 
                 # --- 0.7 DFS STABILITY UPDATE ---
@@ -441,7 +447,7 @@ class PortfolioBacktester:
                     sid = strat.strategy_id
                     
                     if RegimeGater.is_drawdown_gated(self.max_drawdowns.get(sid, 0)): continue
-                    if not RegimeGater.is_strategy_allowed(strat.__class__.__name__, regime): continue
+                    if not RegimeGater.is_strategy_allowed(strat.__class__.__name__, regime_info): continue
                     if sid in self.open_trades: continue
                     
                     # Apply volatility-adjusted parameters if available

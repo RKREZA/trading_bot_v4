@@ -120,7 +120,7 @@ class StrategyOrchestrator:
         # 1. LOAD: Handled via market_data arrival
         
         # 2. DETECT REGIME (use cached singleton — no per-cycle instantiation)
-        regime_info = self._regime_detector.detect(market_data.m5_candles)
+        regime_info = self._regime_detector.detect(market_data)
         market_type = regime_info.market_type
         volatility = regime_info.volatility
         
@@ -144,14 +144,17 @@ class StrategyOrchestrator:
             "open_tickets": list(self._open_tickets) # Dashboard visibility
         }
         
-        # Update cache for async services (Rule 3.1) - Thread Safe
+        # Update shared analysis state for background threads (Atomic Swap)
+        # We create a new dict reference to minimize lock duration and contention.
         with self._analysis_lock:
-            self.last_analysis[symbol] = {
-                "bid": market_data.current_price, # Simplified, should use tick if available
-                "ask": market_data.current_price + (symbol_info.get("spread", 0) * symbol_info.get("point", 0)),
-                "atr": regime_info.atr,
-                "timestamp": ts
+            new_analysis = dict(self.last_analysis)
+            new_analysis[symbol] = {
+                'bid': market_data.current_price,
+                'ask': market_data.current_price + (symbol_info.get("spread", 0) * symbol_info.get("point", 0)),
+                'atr': regime_info.atr,
+                'timestamp': time.time()
             }
+            self.last_analysis = new_analysis
 
         # Hard Block Check
         if blocking_event or is_news_blocked:
@@ -164,7 +167,12 @@ class StrategyOrchestrator:
         # 3. ACTIVATE RELEVANT STRATEGIES (Regime Gating)
         from core.regime_gater import RegimeGater  # noqa: PLC0415 — kept here for lazy-import safety
         active_runtimes = []
-        for r in self.runtimes:
+        
+        # Thread-safe snapshot of runtimes for this execution cycle
+        with self._analysis_lock: 
+            runtimes_snapshot = list(self.runtimes)
+            
+        for r in runtimes_snapshot:
             if not r.strategy.is_symbol_allowed(symbol):
                 continue
             
@@ -175,7 +183,7 @@ class StrategyOrchestrator:
                     logger.debug(f"[{symbol}] [{r.strategy_id}] Skipped: Session {market_data.session} not in {allowed_sessions}")
                 continue
 
-            if RegimeGater.is_strategy_allowed(r.strategy.__class__.__name__, market_type):
+            if RegimeGater.is_strategy_allowed(r.strategy.__class__.__name__, regime_info):
                 active_runtimes.append(r)
         
         # 4. GENERATE SIGNALS (Institutional Parallel Execution)
@@ -192,20 +200,30 @@ class StrategyOrchestrator:
                 sl = runtime.strategy.get_stop_loss(sig, market_data)
                 sig = replace(sig, stop_loss=sl)
                 
-                # ML LAYER: Immutable DTO Priority 1 Evaluation (Statistical + Macro Reasoning)
-                # Pass m5_candles instead of market_data (FeatureEngineer expects CandleArray)
-                candles_for_ai = market_data.m5_candles if market_data.m5_candles is not None else market_data.htf_candles
-                filtered_sig = self.ai_predictor.filter_signal(
-                    sig, 
-                    candles_for_ai, 
-                    abs(sig.price - sl) if hasattr(sig, 'price') else sl,
-                    news_events=news_events
-                )
-                
-                if filtered_sig.approved:
-                    return sid, sig, metrics, thresholds
-                else:
-                    return sid, None, metrics, thresholds
+                # Phase 5: AI-Driven Vetting (Final Gate)
+                if self.config.get("ai_vetting", {}).get("enabled", False):
+                    try:
+                        # Institutional Fallback Logic
+                        fallback_vote = self.config.get("ai_vetting", {}).get("failure_fallback", "APPROVE")
+                        
+                        # ML LAYER: Evaluation
+                        candles_for_ai = market_data.m5_candles if market_data.m5_candles is not None else market_data.htf_candles
+                        risk_points = abs(sig.price - sl) if sl != 0 else 0
+                        
+                        is_ok = self.ai_predictor.filter_signal(
+                            sig, 
+                            candles_for_ai, 
+                            risk_points,
+                            news_events=news_events
+                        )
+                        if not is_ok:
+                            return sid, None, metrics, thresholds
+                    except Exception as e:
+                        logger.error(f"[EXEC] AI Vetting Failed for {sid}: {e}. Fallback: {fallback_vote}")
+                        if fallback_vote != "APPROVE":
+                            return sid, None, metrics, thresholds
+                            
+                return sid, sig, metrics, thresholds
                     
             return sid, sig, metrics, thresholds
 
@@ -325,11 +343,14 @@ class StrategyOrchestrator:
                 stop_loss_dist=sl_dist,
                 symbol_info=symbol_info,
                 current_price=market_data.current_price,
+                volatility_status=regime_info.volatility
             )
 
-            # Apply Phase 1 Safety Ceiling (hard-cap, not a replacement for sizing)
+            # Institutional Integrity: All risk scaling and safety caps are now
+            # managed inside RiskGuardian to prevent non-linear compounding risk.
+            final_lot = risk_based_lot
+            
             sym_min_lot = symbol_info.get("min_lot", 0.01) if symbol_info else 0.01
-            final_lot = min(risk_based_lot, self._phase1_lot_ceiling)
             final_lot = max(final_lot, sym_min_lot)  # Enforce broker minimum
 
             if final_lot < sym_min_lot:
@@ -380,7 +401,22 @@ class StrategyOrchestrator:
     def on_trade_closed(self, trade_record: dict):
         """Propagates trade closure to the relevant strategy runtime."""
         sid = trade_record.get("strategy_id")
-        for runtime in self.runtimes:
+        ticket = trade_record.get("ticket")
+        
+        # 1. Cleanup Risk Registry (Phase 1 Stability)
+        if ticket:
+            with self._tickets_lock:
+                removed_sl = self._original_sl.pop(ticket, None)
+                if removed_sl:
+                    logger.debug(f"[REGISTRY] Cleared orig_sl for {ticket} on closure.")
+                if ticket in self._scaled_tickets:
+                    self._scaled_tickets.remove(ticket)
+
+        # 2. Propagate to strategies
+        with self._analysis_lock:
+            runtimes_snapshot = list(self.runtimes)
+            
+        for runtime in runtimes_snapshot:
             if runtime.strategy_id == sid:
                 # Record strategy-specific performance for Circuit Breakers
                 pnl = trade_record.get("net_pnl", 0.0)
@@ -558,20 +594,21 @@ class StrategyOrchestrator:
                 except Exception as e:
                     logger.debug(f"Ticket Sync failed: {e}")
 
-                # Use a snapshot of the analysis dictionary to avoid ConcurrentModificationException
-                with self._analysis_lock:
-                    analysis_snapshot = dict(self.last_analysis)
+                # Concurrent Optimization: Atomic reference read avoids holding lock
+                # during the iteration processing.
+                analysis_snapshot = self.last_analysis 
 
                 if not analysis_snapshot:
                     time.sleep(0.5)
                     continue
 
                 now_ts = time.time()
-                for symbol, data in analysis_snapshot.items():
-                    # Guard: skip stale snapshots (older than 60s) to avoid trailing
-                    # positions with outdated price data during news blocks or reconnects.
-                    if now_ts - data.get("timestamp", 0) > 60:
-                        logger.debug(f"[TRAIL] Skipping {symbol}: analysis snapshot is stale (>{60}s old).")
+                for symbol, data in list(analysis_snapshot.items()):
+                    # Guard: skip stale snapshots.
+                    # Increased to 600s to support M5/M15 charting windows in backtesting
+                    # without starving the trailing stop thread.
+                    if now_ts - data.get("timestamp", 0) > 600:
+                        logger.debug(f"[TRAIL] Skipping {symbol}: analysis snapshot is stale (>{600}s old).")
                         continue
 
                     # 1. Trailing Stop Management
