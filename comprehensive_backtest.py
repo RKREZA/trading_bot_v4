@@ -162,11 +162,11 @@ class ComprehensiveBacktestSuite:
             return None
         
         # Generate data
-        # Priority: Institutional Real Market History (A+ Expansion: 6 Months)
-        m5_raw = self.load_real_data(symbol=symbol, timeframe="M5", n_bars=35000)
-        m15_raw = self.load_real_data(symbol=symbol, timeframe="M15", n_bars=12000)
-        h1_raw = self.load_real_data(symbol=symbol, timeframe="H1", n_bars=3000)
-        m1_raw = self.load_real_data(symbol=symbol, timeframe="M1", n_bars=500000)
+        # Priority: Institutional Real Market History (1 Year dataset)
+        m5_raw = self.load_real_data(symbol=symbol, timeframe="M5", n_bars=75000)
+        m15_raw = self.load_real_data(symbol=symbol, timeframe="M15", n_bars=25000)
+        h1_raw = self.load_real_data(symbol=symbol, timeframe="H1", n_bars=6500)
+        m1_raw = self.load_real_data(symbol=symbol, timeframe="M1", n_bars=350000)
         
         # [ Backtest Alignment Override ]: Relax liquidity Gates for historical Parquet data
         if "risk_governance" not in config: config["risk_governance"] = {}
@@ -216,11 +216,11 @@ class ComprehensiveBacktestSuite:
             return None
         
         # Generate data
-        # Priority: Institutional Real Market History (A+ Expansion: 6 Months)
-        m5_raw = self.load_real_data(symbol=symbol, timeframe="M5", n_bars=35000)
-        m15_raw = self.load_real_data(symbol=symbol, timeframe="M15", n_bars=12000)
-        h1_raw = self.load_real_data(symbol=symbol, timeframe="H1", n_bars=3000)
-        m1_raw = self.load_real_data(symbol=symbol, timeframe="M1", n_bars=500000)
+        # Priority: Institutional Real Market History (1 Year dataset)
+        m5_raw = self.load_real_data(symbol=symbol, timeframe="M5", n_bars=75000)
+        m15_raw = self.load_real_data(symbol=symbol, timeframe="M15", n_bars=25000)
+        h1_raw = self.load_real_data(symbol=symbol, timeframe="H1", n_bars=6500)
+        m1_raw = self.load_real_data(symbol=symbol, timeframe="M1", n_bars=350000)
         
         # [ Backtest Alignment Override ]: Relax liquidity Gates for historical Parquet data
         if "risk_governance" not in config: config["risk_governance"] = {}
@@ -273,12 +273,12 @@ class ComprehensiveBacktestSuite:
             return None
         
         # Generate multi-market data
-        # Priority: Institutional Real Market History (A+ Expansion: 6 Months)
+        # Priority: Institutional Real Market History (1 Year dataset)
         data = {
-            "M5": self.load_real_data(symbol=symbol, timeframe="M5", n_bars=35000),
-            "M15": self.load_real_data(symbol=symbol, timeframe="M15", n_bars=12000),
-            "H1": self.load_real_data(symbol=symbol, timeframe="H1", n_bars=3000),
-            "M1": self.load_real_data(symbol=symbol, timeframe="M1", n_bars=100000)
+            "M5": self.load_real_data(symbol=symbol, timeframe="M5", n_bars=75000),
+            "M15": self.load_real_data(symbol=symbol, timeframe="M15", n_bars=25000),
+            "H1": self.load_real_data(symbol=symbol, timeframe="H1", n_bars=6500),
+            "M1": self.load_real_data(symbol=symbol, timeframe="M1", n_bars=350000)
         }
         
         wfo = WalkForwardValidator(config)

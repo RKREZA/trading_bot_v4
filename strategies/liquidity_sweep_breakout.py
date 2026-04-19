@@ -30,20 +30,20 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
         
         # ── Institutional Gating ──
         self.adx_threshold = strat_config.get("adx_threshold", 25.0)
-        self.trend_strength_threshold = strat_config.get("trend_strength_threshold", 0.8)
-        self.impulse_threshold = strat_config.get("impulse_threshold", 1.8)
-        self.sweep_depth_mult = strat_config.get("sweep_depth_mult", 0.2)
-        self.duplicate_zone_mult = strat_config.get("duplicate_zone_mult", 0.5)
+        self.sweep_depth_mult = strat_config.get("sweep_depth_mult", 0.15)
+        self.min_displacement_ratio = strat_config.get("displacement_ratio", 1.2) # Body vs ATR
         
         # ── State Management ──
-        self.cooldown_seconds = strat_config.get("cooldown_seconds", 12_600)  # 3.5h
+        self.allowed_sessions = ["TOKYO", "LONDON", "NEW_YORK", "LONDON/NY", "GLOBAL", "ROLLOVER"]
         self._last_signal_time: float = 0.0
-        self.max_trades_per_day = strat_config.get("max_trades_per_day", 2)
         self._daily_trade_count: int = 0
         self._last_trade_date: str = ""
-        self.post_sl_cooldown_seconds = strat_config.get("post_sl_cooldown_seconds", 14_400) # 4h
-        self._last_sl_time: float = 0.0
         self._last_trade_price: float = 0.0
+        
+        # ── AMD / MSS State Tracking ──
+        self._sweep_data: Optional[Dict[str, Any]] = None 
+        # Stores: {type: 'BUY/SELL', extreme: price, liquidity_pool: 'PDH/TOKYO_H', timestamp: float}
+
         
         # ── Retracement Entry Management ──
         self.use_retracement_entry = strat_config.get("use_retracement_entry", False)
@@ -110,192 +110,158 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
             
         return True, ""
 
-    def _check_liquidity_confluence(self, price: float, direction: str, market_data: MarketData, atr: float) -> Tuple[bool, str]:
-        if market_data.d1_candles is None or len(market_data.d1_candles) < 2:
-            return True, "" # No data, skip confluence requirement (relaxed)
+    def _get_liquidity_pools(self, market_data: MarketData) -> Dict[str, float]:
+        """Identifies active institutional liquidity pools (PDH/PDL and Session Highs/Lows)."""
+        pools = {}
+        
+        # 1. Previous Day High / Low
+        if market_data.d1_candles is not None and len(market_data.d1_candles) >= 2:
+            pd = market_data.d1_candles[-2]
+            pools["PDH"] = pd.high
+            pools["PDL"] = pd.low
             
-        pd = market_data.d1_candles[-2] # Previous Day
-        pdh, pdl = pd.high, pd.low
-        
-        target_liq = pdl if direction == "BUY" else pdh
-        distance_to_liq = abs(price - target_liq) / atr if atr > 0 else 100
-        
-        # If PDH/PDL is nearby, we MUST sweep it
-        if distance_to_liq < 1.5:
-            if direction == "BUY" and price > pdl:
-                return False, "No Liquidity Confluence (PDL)"
-            if direction == "SELL" and price < pdh:
-                return False, "No Liquidity Confluence (PDH)"
-                
-        return True, ""
+        # 2. Session Highs / Lows (Extracted from M15 to ensure structural stability)
+        m15 = market_data.m15_candles
+        if m15 is not None and len(m15) > 50:
+            # We look back ~24 hours of M15 bars (96 bars) to find session extremes
+            # In a real engine, we'd use a dedicated SessionManager to track these per-session.
+            # Here we proxy by finding the highest/lowest within the last 100 bars.
+            pools["STRUCT_H"] = np.max(m15.h[-100:])
+            pools["STRUCT_L"] = np.min(m15.l[-100:])
+            
+        return pools
 
-    def _get_confidence_score(self, rej_strength: float, impulse: float, confluence: bool, vol_climax: bool, session: str) -> float:
-        # score = 0.70 + (rej_strength - 0.5) * 0.6 + max(0, 1.5 - impulse) * 0.08 + bonuses
-        score = 0.70
-        score += (rej_strength - 0.5) * 0.6
-        score += max(0, 1.5 - impulse) * 0.08
-        if confluence: score += 0.05
-        if vol_climax: score += 0.05
-        if session in ["LONDON", "LONDON/NY"]: score += 0.05
+    def _detect_mss(self, m5: Any, direction: str, sweep_extreme: float) -> Tuple[bool, Optional[float]]:
+        """
+        Detects Market Structure Shift (MSS) on M5 after a sweep.
+        Requires:
+        1. Impulse (Displacement) candle.
+        2. Break of internal swing high/low.
+        """
+        if len(m5) < 10: return False, None
         
-        return min(0.98, max(0.5, score))
+        # Find local swing high/low before the sweep extreme
+        if direction == "BUY": # We swept a Low, now looking for MSS High
+            # Look for recent internal swing high on M5
+            for i in range(len(m5)-2, len(m5)-8, -1):
+                if m5.h[i] > m5.h[i-1] and m5.h[i] > m5.h[i+1]:
+                    internal_high = m5.h[i]
+                    if m5.close[-1] > internal_high:
+                        return True, internal_high
+            return False, None
+        else: # We swept a High, now looking for MSS Low
+            for i in range(len(m5)-2, len(m5)-8, -1):
+                if m5.l[i] < m5.l[i-1] and m5.l[i] < m5.l[i+1]:
+                    internal_low = m5.l[i]
+                    if m5.close[-1] < internal_low:
+                        return True, internal_low
+            return False, None
+
+    def _get_fvg_entry(self, m5: Any, direction: str) -> Optional[float]:
+        """Finds the most recent Fair Value Gap (FVG) for entry."""
+        if len(m5) < 5: return None
+        
+        # Check last 3 candles for an unfilled FVG
+        for i in range(len(m5)-1, len(m5)-4, -1):
+            if direction == "BUY": # Bullish FVG
+                if m5.l[i] > m5.h[i-2]:
+                    # Gap between i-2 High and i Low
+                    return (m5.l[i] + m5.h[i-2]) / 2
+            else: # Bearish FVG
+                if m5.h[i] < m5.l[i-2]:
+                    return (m5.h[i] + m5.l[i-2]) / 2
+        return None
+
+    def _get_confidence_score(self, sweep_depth: float, mss_confirm: bool, vol_spike: bool) -> float:
+        score = 0.70
+        if sweep_depth > 0.5: score += 0.1
+        if mss_confirm: score += 0.1
+        if vol_spike: score += 0.05
+        return min(0.95, score)
 
     def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
         if not self.is_spread_safe(market_data): return None
         
+        # 1. Kill Zone Filter
+        if not SessionDetector.is_session_active(market_data.timestamp, allowed_sessions=self.allowed_sessions):
+            self.last_rejection_reason = "Out of Kill Zone"
+            return None
+
         m5 = market_data.m5_candles
-        now_ts = market_data.timestamp.timestamp()
-        atr = self._get_m15_atr(market_data)
+        if m5 is None or len(m5) < 50: return None
         
-        # 1. Trade Gating: Cooldowns & Daily Cap
-        if now_ts - self._last_signal_time < self.cooldown_seconds:
-            self.last_rejection_reason = "Cooldown Active"
-            return None
-        if now_ts - self._last_sl_time < self.post_sl_cooldown_seconds:
-            self.last_rejection_reason = "Post-SL Cooldown"
-            return None
+        atr = self._get_m15_atr(market_data)
+        now_ts = market_data.timestamp.timestamp()
+        
+        # 2. Daily Cap & Cooldown
         today_str = market_data.timestamp.strftime("%Y-%m-%d")
         if today_str != self._last_trade_date:
             self._daily_trade_count = 0
             self._last_trade_date = today_str
-        if self._daily_trade_count >= self.max_trades_per_day:
-            self.last_rejection_reason = "Daily Cap Reached"
-            return None
-
-        # 2. Retracement Entry Management (Step 8)
-        if self._pending_setup:
-            if now_ts > self._pending_setup["expiry"]:
-                self._pending_setup = None # Timeout
-            else:
-                # Check for fill: price must reach the 50% level
-                target_price = self._pending_setup["entry_price"]
-                # Simulating fill: if current candle spans the target_price
-                if m5[-1].low <= target_price <= m5[-1].high:
-                    setup = self._pending_setup
-                    self._pending_setup = None
-                    self._last_signal_time = now_ts
-                    self._daily_trade_count += 1
-                    self._last_trade_price = setup["price"]
-                    return setup["signal"]
-                return None # Still waiting for fill
-
-        # 3. Regime Identification (ADX + Trend Strength)
-        adx_vals = market_data.m15_candles.adx(14)
-        if len(adx_vals) == 0 or np.isnan(adx_vals[-1]): return None
-        adx = adx_vals[-1]
         
-        ema50 = market_data.m15_candles.ema(50)
-        ema200 = market_data.m15_candles.ema(200)
-        macro_trend = 0
-        if len(ema50) > 0 and len(ema200) > 0:
-            trend_strength = abs(ema50[-1] - ema200[-1]) / atr if atr > 0 else 0
-            if adx >= self.adx_threshold and trend_strength > self.trend_strength_threshold:
-                macro_trend = 1 if ema50[-1] > ema200[-1] else -1
-
-        # 4. Range Computation & Structural Integrity
-        lookback = self._get_dynamic_lookback(market_data)
-        range_data = self._get_range_structure(market_data, lookback)
-        if not range_data.get("valid", False):
-            self.last_rejection_reason = range_data.get("reason", "Invalid Range")
-            return None
-            
-        r_high, r_low = range_data["high"], range_data["low"]
-
-        # 5. Sweep Detection & Validation
-        last = m5[-1]
-        swept_low = last.low < r_low
-        swept_high = last.high > r_high
-        if not swept_low and not swept_high:
-            self.last_rejection_reason = "Inside Range"
-            return None
-            
-        # Rejection Math
-        candle_range = last.high - last.low
-        if candle_range <= 0: return None
-        close_from_low = (last.close - last.low) / candle_range
-        close_from_high = (last.high - last.close) / candle_range
+        # 3. Identify Liquidity Pools & Active Sweeps
+        pools = self._get_liquidity_pools(market_data)
+        last_candle = m5[-1]
         
-        # Momentum Filter
-        momentum_safe, momentum_reason = self._is_momentum_safe(last, atr)
-        if not momentum_safe:
-            self.last_rejection_reason = momentum_reason
-            return None
-
-        # Duplicate Zone Prevention
-        if abs(market_data.current_price - self._last_trade_price) < self.duplicate_zone_mult * atr:
-            self.last_rejection_reason = "Duplicate Zone"
-            return None
-
-        # Institutional Vol Climax
-        h1_v = market_data.htf_candles.v
-        h1_v_avg = np.mean(h1_v[-21:-1]) if len(h1_v) >= 21 else 1
-        vol_climax = market_data.htf_candles[-1].tick_volume > (h1_v_avg * 1.5)
-
-        # 6. SIGNAL EVALUATION
-        direction = None
-        if swept_low and last.close > r_low and close_from_low >= self.rejection_thresh and last.close > last.open:
-            # BUY SWEEP
-            if macro_trend == -1: # Regime Conflict
-                self.last_rejection_reason = "Regime Conflict"
-                return None
-            # Sweep Depth Validation
-            sweep_depth = abs(last.low - r_low) / atr
-            if sweep_depth < self.sweep_depth_mult:
-                self.last_rejection_reason = "Weak Sweep"
-                return None
-            direction = "BUY"
-            
-        elif swept_high and last.close < r_high and close_from_high >= self.rejection_thresh and last.close < last.open:
-            # SELL SWEEP
-            if macro_trend == 1:
-                self.last_rejection_reason = "Regime Conflict"
-                return None
-            sweep_depth = abs(last.high - r_high) / atr
-            if sweep_depth < self.sweep_depth_mult:
-                self.last_rejection_reason = "Weak Sweep"
-                return None
-            direction = "SELL"
-            
-        if direction:
-            # Liquidity Confluence Check
-            liq_safe, liq_reason = self._check_liquidity_confluence(market_data.current_price, direction, market_data, atr)
-            if not liq_safe:
-                self.last_rejection_reason = liq_reason
+        # State Machine: Check if a sweep just happened
+        if self._sweep_data is None:
+            # Scan for new sweeps
+            for pool_name, level in pools.items():
+                if pool_name.endswith("L") and last_candle.low < level:
+                    self._sweep_data = {"type": "BUY", "extreme": last_candle.low, "pool": pool_name, "level": level, "ts": now_ts}
+                    break
+                elif pool_name.endswith("H") and last_candle.high > level:
+                    self._sweep_data = {"type": "SELL", "extreme": last_candle.high, "pool": pool_name, "level": level, "ts": now_ts}
+                    break
+        
+        if self._sweep_data:
+            # Expiry: If sweep happened > 2 hours ago, discard
+            if now_ts - self._sweep_data["ts"] > 7200:
+                self._sweep_data = None
                 return None
                 
-            # Confidence Scoring
-            rej_val = close_from_low if direction == "BUY" else close_from_high
-            impulse = abs(last.close - last.open) / atr
-            conf = self._get_confidence_score(rej_val, impulse, "PDL" in liq_reason or "PDH" in liq_reason, vol_climax, market_data.session)
+            sweep_type = self._sweep_data["type"]
+            extreme = self._sweep_data["extreme"]
             
-            sig = TradeSignal(
-                direction=direction, 
-                price=market_data.current_price, 
-                confidence=conf,
-                reasons=["MECHANIC:SWEEP", f"REGIME:{'TREND' if macro_trend != 0 else 'RANGE'}", f"ATR:{atr:.1f}", f"PROTECT:{last.low if direction == 'BUY' else last.high}", f"TARGET:{r_high if direction == 'BUY' else r_low}"]
-            )
-            
-            # Retracement Entry logic
-            if self.use_retracement_entry:
-                sweep_ext = last.low if direction == "BUY" else last.high
-                retracement_price = last.close - (last.close - sweep_ext) * 0.5
-                self._pending_setup = {
-                    "signal": sig,
-                    "entry_price": retracement_price,
-                    "price": market_data.current_price,
-                    "expiry": now_ts + (self.retracement_validity_bars * 300) # 5m * 3 = 15m
-                }
-                return None # Signal will be returned when filled
-                
-            self._last_signal_time = now_ts
-            self._daily_trade_count += 1
-            self._last_trade_price = market_data.current_price
-            return sig
+            # Step 1: Wait for price to close back INSIDE the pool level (Rejection)
+            if sweep_type == "BUY" and last_candle.close > self._sweep_data["level"]:
+                # Step 2: Confirm M5 Market Structure Shift (MSS)
+                mss_confirmed, mss_level = self._detect_mss(m5, "BUY", extreme)
+                if mss_confirmed:
+                    # Step 3: Find Fair Value Gap entry
+                    entry_price = self._get_fvg_entry(m5, "BUY")
+                    if entry_price:
+                        # Success: Trigger Orderflow Signal
+                        sweep_depth = abs(extreme - self._sweep_data["level"]) / atr
+                        conf = self._get_confidence_score(sweep_depth, True, True)
+                        
+                        self._sweep_data = None # Reset state
+                        self._daily_trade_count += 1
+                        return TradeSignal(
+                            direction="BUY",
+                            price=entry_price,
+                            confidence=conf,
+                            reasons=["AMD:MANIPULATION_COMPLETE", "MSS:CONFIRMED", f"POOL:{self._sweep_data['pool'] if self._sweep_data else 'EXTREME'}", f"PROTECT:{extreme}"]
+                        )
+                        
+            elif sweep_type == "SELL" and last_candle.close < self._sweep_data["level"]:
+                mss_confirmed, mss_level = self._detect_mss(m5, "SELL", extreme)
+                if mss_confirmed:
+                    entry_price = self._get_fvg_entry(m5, "SELL")
+                    if entry_price:
+                        sweep_depth = abs(extreme - self._sweep_data["level"]) / atr
+                        conf = self._get_confidence_score(sweep_depth, True, True)
+                        
+                        self._sweep_data = None
+                        self._daily_trade_count += 1
+                        return TradeSignal(
+                            direction="SELL",
+                            price=entry_price,
+                            confidence=conf,
+                            reasons=["AMD:MANIPULATION_COMPLETE", "MSS:CONFIRMED", f"POOL:{self._sweep_data['pool'] if self._sweep_data else 'EXTREME'}", f"PROTECT:{extreme}"]
+                        )
 
-        if swept_low: self.last_rejection_reason = "Weak Rejection (BUY)"
-        elif swept_high: self.last_rejection_reason = "Weak Rejection (SELL)"
-        else: self.last_rejection_reason = "Inside Range"
-        
+        self.last_rejection_reason = "No AMD Setup found"
         return None
 
     # ==================================================================

@@ -1,20 +1,21 @@
 import numpy as np
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Tuple
 from core.base_strategy import BaseStrategy, MarketData
 from core.common.types import TradeSignal
 from core.session_detector import SessionDetector
 
-logger = logging.getLogger("trading_bot.strategy.trend_v5")
+logger = logging.getLogger("trading_bot.strategy.trend_smc")
 
 class TrendFollowingStrategy(BaseStrategy):
     """
-    V5-MODERN Institutional Trend Following.
-    Logic: 
-    1. Triple EMA Cloud Alignment (50 > 100 > 200 for Long).
-    2. SuperTrend Confirmation.
-    3. ADX Momentum Gating (> 25).
-    4. ATR Trailing Stop (Chandelier Exit) management.
+    V5-SMC Institutional Trend Following (Orderflow Edition).
+    Pipeline:
+    1. Session Kill Zone Filter
+    2. Value Alignment (VWAP + Rolling POC)
+    3. Structural & Liquidity Gating
+    4. Displacement & Validated FVG Detection
+    5. Mitigation Entry
     """
 
     def __init__(self, strategy_id: str, config: dict):
@@ -22,148 +23,226 @@ class TrendFollowingStrategy(BaseStrategy):
         
         strat_config = self.get_strat_config()
         
-        # Trend Parameters
-        self.ema_fast_period = 50
-        self.ema_mid_period = 100
-        self.ema_slow_period = 200
+        # Kill Zones
+        self.allowed_sessions = strat_config.get("allowed_sessions", ["LONDON", "NEW_YORK"])
         
-        self.adx_threshold = strat_config.get("adx_threshold", 25)
+        # SMC / WFO Exposed Parameters
+        self.fvg_min_size_atr = float(strat_config.get("fvg_min_size", 0.5))
+        self.poc_window = int(strat_config.get("poc_window", 100))
+        self.displacement_threshold = float(strat_config.get("displacement_threshold", 1.5))
+        self.volume_spike_factor = float(strat_config.get("volume_spike_factor", 1.5))
+        
         self.min_confidence = float(strat_config.get("min_confidence", 0.65))
-        
-        # Trailing Stop Parameters
-        self.sl_atr_mult = strat_config.get("sl_atr", 3.0) # Standard Chandelier
-        self.tp_atr_mult = strat_config.get("tp_atr", 6.0) # "Blue Sky" Target
-        
-        self.min_bars_between_signals = strat_config.get("min_bars_between_signals", 20)
         self._last_signal_bar = 0
 
-        # Session-Specific Parameter Overrides (NY Alpha Optimization)
-        self.session_adjustments = {
-            "LONDON": {"adx_offset": 0, "sl_mult": 0, "conf_floor": 0.65},
-            "NEW_YORK": {"adx_offset": -5, "sl_mult": 0.7, "conf_floor": 0.60},
-            "LONDON/NY": {"adx_offset": -2, "sl_mult": 0.3, "conf_floor": 0.62}
+    def get_parameter_grid(self) -> Dict[str, List[Any]]:
+        return {
+            "fvg_min_size": [0.3, 0.5, 1.0],
+            "poc_window": [50, 100, 150],
+            "displacement_threshold": [1.2, 1.5, 2.0],
+            "volume_spike_factor": [1.2, 1.5, 2.0]
         }
 
-    def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
-        strat_config = self.get_strat_config()
-        allowed_sessions = strat_config.get("allowed_sessions", ["LONDON", "NEW_YORK", "LONDON/NY"])
+    def _get_swings(self, highs: np.ndarray, lows: np.ndarray, window: int = 5) -> Tuple[List[float], List[float]]:
+        swing_highs = []
+        swing_lows = []
+        if len(highs) < window * 2 + 1:
+            return swing_highs, swing_lows
+            
+        for i in range(window, len(highs) - window):
+            # Swing High
+            if all(highs[i] > highs[i-window:i]) and all(highs[i] > highs[i+1:i+window+1]):
+                swing_highs.append(highs[i])
+            # Swing Low
+            if all(lows[i] < lows[i-window:i]) and all(lows[i] < lows[i+1:i+window+1]):
+                swing_lows.append(lows[i])
+                
+        return swing_highs, swing_lows
+
+    def _calculate_poc(self, data: np.ndarray, vols: np.ndarray, bins: int = 50) -> float:
+        if len(data) == 0: return 0.0
+        min_p, max_p = np.min(data), np.max(data)
+        if min_p == max_p: return min_p
         
-        # 1. Session Gating
-        if not SessionDetector.is_session_active(market_data.timestamp, allowed_sessions=allowed_sessions):
-            self.last_rejection_reason = f"Out of Session ({market_data.session})"
+        step = (max_p - min_p) / bins
+        profile = np.zeros(bins)
+        
+        for i in range(len(data)):
+            idx = int((data[i] - min_p) / step)
+            if idx >= bins: idx = bins - 1
+            if idx < 0: idx = 0
+            profile[idx] += vols[i]
+            
+        poc_idx = np.argmax(profile)
+        return min_p + (poc_idx * step) + (step / 2)
+
+    def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
+        # 1. Session Kill Zone Filter
+        if not SessionDetector.is_session_active(market_data.timestamp, allowed_sessions=self.allowed_sessions):
+            self.last_rejection_reason = f"Out of Kill Zone ({market_data.session})"
             return None
 
         m15 = market_data.m15_candles
-        if m15 is None or len(m15) < 200: # Need enough for EMA 200 warmup
-            return None
-        
-        # 2. Cooldown Gating
-        bars_since_last = len(m15) - self._last_signal_bar
-        if bars_since_last < self.min_bars_between_signals:
-            self.last_rejection_reason = "Signal cooldown active"
+        if m15 is None or len(m15) < max(self.poc_window, 50):
             return None
 
-        # 3. Spread & Liquidity Gates
-        if not self.is_spread_safe(market_data):
+        # Cooldown
+        if len(m15) - self._last_signal_bar < 5:
             return None
+
+        # Data extraction
+        current_price = market_data.current_price
+        o = m15.o
+        c = m15.c
+        h = m15.h
+        l = m15.l
+        v = m15.v
+        
+        atr_14 = m15.atr(14)
+        if len(atr_14) == 0 or np.isnan(atr_14[-1]): return None
+        current_atr = atr_14[-1]
+
+        # 2. Value Alignment (Rolling VWAP & POC)
+        window = self.poc_window
+        recent_c, recent_h, recent_l, recent_v = c[-window:], h[-window:], l[-window:], v[-window:]
+        typical_price = (recent_h + recent_l + recent_c) / 3.0
+        
+        vwap = np.sum(typical_price * recent_v) / (np.sum(recent_v) + 1e-9)
+        poc = self._calculate_poc(typical_price, recent_v, bins=50)
+
+        # Macro Bias Setup (Relaxed for Pullback Entry)
+        # We check if VWAP is pointing up or Price is generally above VWAP.
+        # Strict dual-alignment (VWAP + POC) often gates valid deep pullbacks.
+        is_bullish_macro = current_price > vwap 
+        is_bearish_macro = current_price < vwap 
+
+        if not is_bullish_macro and not is_bearish_macro:
+            self.last_rejection_reason = "No Value Alignment (Price inside VWAP)"
+            return None
+
+        # 3. Institutional Imbalance Candle (IC) Detection
+        # Instead of strict missing wicks, we search for Massive Body Displacement.
+        ic_lookback = 15
+        if len(c) < ic_lookback + 2: return None
+        
+        valid_ic_idx = -1
+        ic_type = 0 # 1 Bullish, -1 Bearish
+        target_discount_low = 0.0
+        target_discount_high = 0.0
+        
+        for i in range(len(c) - ic_lookback, len(c) - 1): # i is the displacement candle
+            body_size = abs(o[i] - c[i])
+            candle_size = h[i] - l[i]
+            avg_vol = np.mean(v[i-10:i]) if i >= 10 else np.mean(v[:i])
             
-        # 4. Triple EMA Cloud Alignment
-        ema50 = m15.get_indicator("ema_50")
-        ema100 = m15.get_indicator("ema_100")
-        ema200 = m15.get_indicator("ema_200")
-        
-        if len(ema200) < 5: return None
-        
-        is_long_cloud = ema50[-1] > ema100[-1] > ema200[-1]
-        is_short_cloud = ema50[-1] < ema100[-1] < ema200[-1]
-        
-        # 5. SuperTrend Detection
-        st_val = m15.get_indicator("supertrend_val")
-        st_dir = m15.get_indicator("supertrend_dir")
-        
-        if len(st_dir) < 5: return None
-        
-        # 6. Session Adjustment Resolution
-        adj = self.session_adjustments.get(market_data.session, {"adx_offset": 0, "sl_mult": 0, "conf_floor": self.min_confidence})
-        effective_adx_threshold = self.adx_threshold + adj["adx_offset"]
-        
-        # 7. ADX Momentum Filter
-        adx_vals = m15.get_indicator("adx_14")
-        adx = adx_vals[-1]
-        adx_slope = adx - adx_vals[-5] if len(adx_vals) >= 5 else 0
-        
-        if adx < effective_adx_threshold:
-            self.last_rejection_reason = f"ADX too low ({adx:.1f} < {effective_adx_threshold})"
-            return None
-        
-        if adx_slope < -2.0: # Momentum is dying
-            self.last_rejection_reason = "ADX momentum stalling"
-            return None
-
-        # 7. Directional Synthesis
-        direction = None
-        if is_long_cloud and st_dir[-1] == 1:
-            direction = "BUY"
-        elif is_short_cloud and st_dir[-1] == -1:
-            direction = "SELL"
+            # Using configured FVG params to control Institutional displacement scale
+            is_large_body = body_size > current_atr * self.fvg_min_size_atr
+            is_large_candle = candle_size > current_atr * self.displacement_threshold
+            has_volume_spike = v[i] > avg_vol * self.volume_spike_factor
             
-        if not direction:
-            self.last_rejection_reason = "Indicators mismatch (Cloud vs ST)"
+            if is_large_body and is_large_candle and has_volume_spike:
+                # Discovered an Institutional Footprint
+                valid_ic_idx = i
+                
+                # Identify if Bullish or Bearish Displacement
+                if c[i] > o[i]:
+                    ic_type = 1
+                    # Bullish Fiber Zone (Discount overlap within the candle and slightly below origin)
+                    target_discount_low = l[i] - (current_atr * 0.2)
+                    target_discount_high = l[i] + (body_size * 0.6) # From origin up to 60% of the body
+                else:
+                    ic_type = -1
+                    # Bearish Premium Zone
+                    target_discount_low = h[i] - (body_size * 0.6)
+                    target_discount_high = h[i] + (current_atr * 0.2)
+                
+        if valid_ic_idx == -1:
+            self.last_rejection_reason = "No Institutional Displacement (IC) found"
             return None
-            
-        # 8. RSI Overextension Protection
-        rsi_vals = m15.get_indicator("rsi_14")
-        if len(rsi_vals) > 0:
-            rsi = rsi_vals[-1]
-            if direction == "BUY" and rsi > 75:
-                self.last_rejection_reason = f"Overbought (RSI {rsi:.1f})"
-                return None
-            if direction == "SELL" and rsi < 25:
-                self.last_rejection_reason = f"Oversold (RSI {rsi:.1f})"
-                return None
 
-        # 9. SIGNAL EMISSION
-        confidence = 0.70 + (min(20, (adx - 20)) / 100.0) # Boost confidence for high ADX
+        # 4. Mitigation Entry & Context Validations
+        signal = None
         
-        conf_floor = adj["conf_floor"]
-        if confidence < conf_floor:
-            self.last_rejection_reason = f"Confidence {confidence:.2f} < {conf_floor:.2f} (Session Gated)"
+        if ic_type == 1 and is_bullish_macro:
+            # We want price to pull back INTO the Discount Fiber Zone
+            if current_price >= target_discount_low and current_price <= target_discount_high:
+                signal = "BUY"
+                
+        elif ic_type == -1 and is_bearish_macro:
+            if current_price >= target_discount_low and current_price <= target_discount_high:
+                signal = "SELL"
+
+        if not signal:
+            self.last_rejection_reason = "IC exists but price not in Discount/Premium entry zone"
             return None
 
-        self._last_signal_bar = len(m15)
-        return TradeSignal(direction=direction, confidence=confidence, price=market_data.current_price)
+        # 5. Structure & Swing Extraction for TP/SL mapping
+        swing_highs, swing_lows = self._get_swings(recent_h, recent_l, window=5)
+        
+        # Stop loss logic (Below FVG Origin or Recent Swing)
+        origin_candle_low = l[valid_ic_idx]
+        origin_candle_high = h[valid_ic_idx]
+        
+        if signal == "BUY":
+            # Primary: Below displacement candle low
+            sl = origin_candle_low - (current_atr * 0.2)
+            # Secondary check: Nearest swing low
+            if swing_lows:
+                nearest_sl = min([sl for sl in swing_lows if sl < current_price], default=sl)
+                sl = min(sl, nearest_sl - (current_atr * 0.1))
+                
+            # TP: Nearest major swing high
+            tp = max([sh for sh in swing_highs if sh > current_price], default=current_price + (current_atr * 3.0))
+            
+        else:
+            sl = origin_candle_high + (current_atr * 0.2)
+            if swing_highs:
+                nearest_sh = max([sh for sh in swing_highs if sh > current_price], default=sl)
+                sl = max(sl, nearest_sh + (current_atr * 0.1))
+                
+            tp = min([sl_ for sl_ in swing_lows if sl_ < current_price], default=current_price - (current_atr * 3.0))
+
+        # Risk-to-Reward Safety Hatch
+        risk = abs(current_price - sl)
+        reward = abs(tp - current_price)
+        # Use a more tolerant R:R for high-probability SMC setups if needed, 
+        # but defaulting to BaseStrategy.min_rr (usually 2.0)
+        actual_rr = reward / risk if risk > 0 else 0
+        if risk == 0 or actual_rr < self.min_rr:
+            self.last_rejection_reason = f"Poor R:R structural mapping ({actual_rr:.2f} < {self.min_rr})"
+            return None
+
+        ts = TradeSignal(
+            direction=signal, 
+            confidence=0.85, 
+            price=current_price,
+            stop_loss=sl,
+            take_profit=tp
+        )
+        return ts
 
     def get_stop_loss(self, signal: TradeSignal, market_data: MarketData) -> float:
-        """
-        Institutional Trailing Stop: Uses the SuperTrend line or ATR offset.
-        """
-        m15 = market_data.m15_candles
-        st_val = m15.get_indicator("supertrend_val")[-1]
-        atr = m15.get_indicator("atr_14")[-1]
-        
-        adj = self.session_adjustments.get(market_data.session, {"adx_offset": 0, "sl_mult": 0, "conf_floor": self.min_confidence})
-        effective_sl_mult = self.sl_atr_mult + adj["sl_mult"]
-        
-        # Use SuperTrend as primary, fallback to ATR buffer
-        if signal.direction == "BUY":
-            return max(st_val, market_data.current_price - (atr * effective_sl_mult))
-        else:
-            return min(st_val, market_data.current_price + (atr * effective_sl_mult))
+        # Pre-calculated in generate_signal and passed via TradeSignal object in the ecosystem
+        # Providing a fallback just in case
+        return signal.stop_loss if signal.stop_loss > 0 else (market_data.current_price * 0.99)
 
     def get_take_profit(self, signal: TradeSignal, market_data: MarketData) -> float:
-        """
-        "Blue Sky" Trend Target: 6x ATR or ride the trail.
-        """
-        atr = market_data.m15_candles.get_indicator("atr_14")[-1]
-        if signal.direction == "BUY":
-            return market_data.current_price + (atr * self.tp_atr_mult)
-        else:
-            return market_data.current_price - (atr * self.tp_atr_mult)
+        return signal.take_profit if signal.take_profit > 0 else (market_data.current_price * 1.01)
 
     def get_metrics(self, market_data: MarketData) -> Dict[str, Any]:
         m15 = market_data.m15_candles
-        if m15 is None or len(m15) < 14: return {}
+        if m15 is None or len(m15) < self.poc_window: return {}
+        
+        # Re-calc for dashboard live telemetry
+        window = self.poc_window
+        recent_c, recent_h, recent_l, recent_v = m15.c[-window:], m15.h[-window:], m15.l[-window:], m15.v[-window:]
+        typical_price = (recent_h + recent_l + recent_c) / 3.0
+        
+        vwap = np.sum(typical_price * recent_v) / (np.sum(recent_v) + 1e-9)
+        poc = self._calculate_poc(typical_price, recent_v, bins=50)
+        
         return {
-            "ADX": m15.get_indicator("adx_14")[-1],
-            "ST": "Long" if m15.get_indicator("supertrend_dir")[-1] == 1 else "Short"
+            "SMC_VWAP": round(vwap, 3),
+            "SMC_POC": round(poc, 3),
+            "Bias": "Bullish" if market_data.current_price > vwap and market_data.current_price > poc else ("Bearish" if market_data.current_price < vwap and market_data.current_price < poc else "Neutral")
         }
