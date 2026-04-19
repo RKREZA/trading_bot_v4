@@ -79,8 +79,8 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
         
         atr = self._get_m15_atr(market_data)
         
-        # Range Integrity Check
-        if range_size < 0.5 * atr or range_size > 3.0 * atr:
+        # Range Integrity Check - relaxed for XAUUSD high volatility
+        if range_size < 0.3 * atr:  # Lower bound only, remove upper bound
             return {"valid": False, "reason": "Invalid Range Structure"}
             
         return {"valid": True, "high": r_high, "low": r_low, "size": range_size}

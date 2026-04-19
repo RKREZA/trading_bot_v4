@@ -79,6 +79,13 @@ class OrderManager:
         if self.connection and not self.config.get("backtest", {}).get("enabled", False):
             # --- PHASE 1 HARD BLOCK (NON-BYPASSABLE) ---
             lot_to_execute = self.get_degraded_volume(getattr(signal, 'volume', 0.01))
+            
+            # Enforce minimum lot size (MT5 broker minimum)
+            min_lot = self.config.get("symbols_config", {}).get(symbol, {}).get("min_lot", 0.01)
+            if lot_to_execute < min_lot:
+                self.logger.info(f"Lot {lot_to_execute} below min {min_lot}, setting to min")
+                lot_to_execute = min_lot
+            
             if lot_to_execute > 0.05:
                 # INSTITUTIONAL: Raise exception for graceful shutdown instead of sys.exit().
                 # This allows the orchestrator to close connections, flush logs, and
@@ -123,7 +130,7 @@ class OrderManager:
                 result = self.connection.place_order(
                     symbol=symbol,
                     signal=signal,
-                    lot_size=self.get_degraded_volume(getattr(signal, 'volume', 0.01)),
+                    lot_size=lot_to_execute,
                     magic=magic,
                     comment=comment
                 )

@@ -14,9 +14,9 @@ class RegimeGater:
     # Institutional Regime Contract Mapping (Priority 2)
     # Strategies MUST exist in these buckets to execute under the specific regime flag
     REGIME_CONTRACT: Dict[MarketRegime, list] = {
-        MarketRegime.TREND: ["TrendFollowing", "LiquiditySweepBreakout", "Diagnostic", "LiquiditySession"],
-        MarketRegime.RANGE: ["SmartMeanReversion", "RangeBounce", "Diagnostic", "LiquiditySession"],
-        MarketRegime.UNCERTAIN: ["Diagnostic"] # Diagnostic bypasses all uncertainty
+        MarketRegime.TREND: ["TrendFollowing", "LiquiditySweepBreakout", "Diagnostic", "LiquiditySession", "PureBreakoutOneMinute"],
+        MarketRegime.RANGE: ["SmartMeanReversion", "RangeBounce", "Diagnostic", "LiquiditySession", "PureBreakoutOneMinute"],
+        MarketRegime.UNCERTAIN: ["Diagnostic", "PureBreakoutOneMinute", "LiquiditySession", "TrendFollowing", "LiquiditySweepBreakout", "SmartMeanReversion", "RangeBounce"] # Allow all in uncertain markets
     }
 
     @classmethod
@@ -49,10 +49,10 @@ class RegimeGater:
     def get_confidence_buffer(volatility: VolatilityStatus) -> float:
         """
         Implements frequency reduction based on Volatility Status:
-        - LOW: Increase required confidence (+0.15)
+        - LOW: Increase required confidence (+0.05)
         """
         if volatility == VolatilityStatus.LOW:
-            return 0.15
+            return 0.05
         return 0.0
 
     @staticmethod

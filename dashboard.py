@@ -11,6 +11,8 @@ from rich.layout import Layout
 from rich.panel import Panel
 from rich.table import Table
 from rich.progress import BarColumn, Progress
+from rich import box
+from rich.columns import Columns
 
 from core.data.metrics import MetricEngine
 
@@ -49,12 +51,17 @@ class TradingDashboard:
         # Setups Row: Fixed height (fitted)
         self.layout["body"].split_column(
             Layout(name="body_top", size=9),
-            Layout(name="setups", size=15)
+            Layout(name="body_middle", size=8),
+            Layout(name="setups", size=5)
         )
         self.layout["body_top"].split_row(
             Layout(name="environment", ratio=5),
             Layout(name="risk", ratio=6),
             Layout(name="exposure", ratio=6)
+        )
+        self.layout["body_middle"].split_row(
+            Layout(name="performance", ratio=6),
+            Layout(name="trades", ratio=6)
         )
 
     def _get_formatted_time(self) -> str:
@@ -87,7 +94,7 @@ class TradingDashboard:
         ask = state.get("ask", 0)
         bid = state.get("bid", 0)
         spread = state.get("spread", 0)
-        pips = state.get("pips", 0)
+        spread_pts = spread if spread > 0 else 0
         regime = state.get("regime_type", "N/A")
         volatility = state.get("volatility", "N/A")
         session = state.get("session", "N/A")
@@ -103,8 +110,9 @@ class TradingDashboard:
         table.add_column(style="bold magenta")
         table.add_column()
         table.add_row("SYMBOL  ", f"[bold yellow]{symbol}[/]")
-        table.add_row("PRICE", f"[{price_color}]{ask:,.{digits}f} (ask)[/]")
-        table.add_row("SPREAD", f"[cyan]{spread:,.1f} pts ({pips:,.1f} pips)[/]")
+        table.add_row("PRICE", f"[{price_color}]{ask:,.{digits}f} (ask) / {bid:,.{digits}f} (bid)[/]")
+        spread_display = f"[cyan]{spread_pts:,.0f}[/]" if spread > 0 else "[cyan]0[/]"
+        table.add_row(f"SPREAD", spread_display)
         table.add_row("ALIVE", heartbeat)
         table.add_row("SESSION", f"[blue]{session}[/]")
         table.add_row("VOL", f"[yellow]{volatility}[/]")
@@ -155,6 +163,59 @@ class TradingDashboard:
             
         return Panel(table, title="Exposure Heatmap", border_style="cyan")
 
+    def _make_performance(self, state: dict) -> Panel:
+        """Create performance metrics panel with Sharpe ratio, win rate, etc."""
+        metrics = state.get("metrics", {})
+        if not metrics:
+            return Panel(Text("No metrics available", style="dim"), title="Performance Metrics", border_style="green")
+        
+        total_trades = metrics.get("total_trades", 0)
+        win_rate = metrics.get("win_rate", 0.0)
+        profit_factor = metrics.get("profit_factor", 0.0)
+        sharpe_ratio = metrics.get("sharpe_ratio", 0.0)
+        
+        pf_color = "green" if profit_factor > 1.5 else "yellow" if profit_factor > 1.0 else "red"
+        sr_color = "green" if sharpe_ratio > 1.5 else "yellow" if sharpe_ratio > 0.5 else "red"
+        wr_color = "green" if win_rate > 60 else "yellow" if win_rate > 40 else "red"
+        
+        table = Table.grid(padding=0)
+        table.add_column(style="bold white")
+        table.add_column(justify="right")
+        table.add_row("Total Trades", f"{total_trades}")
+        table.add_row("Win Rate", f"[{wr_color}]{win_rate:.1f}%[/]")
+        table.add_row("Profit Factor", f"[{pf_color}]{profit_factor:.2f}[/]")
+        table.add_row("Sharpe Ratio", f"[{sr_color}]{sharpe_ratio:.2f}[/]")
+        
+        return Panel(table, title="Performance Analytics", border_style="green")
+
+    def _make_trades(self, state: dict) -> Panel:
+        """Create trade history panel with recent trades and P&L sparkline."""
+        trade_history = state.get("trade_history", [])
+        if not trade_history:
+            return Panel(Text("No trade history", style="dim"), title="Trade History", border_style="blue")
+        
+        recent_trades = trade_history[-15:] if len(trade_history) > 15 else trade_history
+        
+        table = Table(show_header=True, header_style="bold blue", box=box.SIMPLE)
+        table.add_column("Time", width=6)
+        table.add_column("Dir", width=4)
+        table.add_column("P&L", width=8, justify="right")
+        
+        for trade in recent_trades:
+            timestamp = trade.get('timestamp', '')
+            if timestamp and len(timestamp) >= 5:
+                time_str = timestamp[-5:]
+            else:
+                time_str = "--:--"
+            
+            direction = trade.get('direction', 'N/A')[:4]
+            pnl = trade.get('profit', 0.0)
+            pnl_color = "green" if pnl > 0 else "red" if pnl < 0 else "white"
+            
+            table.add_row(time_str, direction, f"[{pnl_color}]{pnl:+.2f}[/]")
+        
+        return Panel(table, title="Trade History", border_style="blue")
+
     def _format_dict_styled(self, d: Dict[str, Any], color_scheme: str = "cyan") -> Text:
         if not d: return Text("N/A", style="dim")
         text = Text()
@@ -189,7 +250,19 @@ class TradingDashboard:
 
     def _make_setups(self, state: dict) -> Panel:
         setups = state.get("setups", {}) or {}
-        # Maximize width with expand=True and tight padding
+        
+        # Debug table for empty state
+        if not setups:
+            table = Table(box=None, show_header=True, header_style="bold yellow", expand=True, padding=(0, 2))
+            table.add_column("STRATEGY", width=25, style="bold cyan", no_wrap=True)
+            table.add_column("STATUS", width=35)
+            table.add_column("METRICS", width=25)
+            table.add_column("BIAS", width=10, justify="center")
+            rtc = state.get("debug_runimes_count", 0)
+            table.add_row("DEBUG: No setups", f"Runimes: {rtc}", "Check config", "-")
+            return Panel(table, title="Institutional Setups (HFT-Fidelity)", border_style="yellow", padding=0)
+        
+        # Table for valid setups
         table = Table(box=None, show_header=True, header_style="bold yellow", expand=True, padding=(0, 2))
         table.add_column("STRATEGY", width=25, style="bold cyan", no_wrap=True)
         table.add_column("REQUIREMENTS [dim](Targets)[/]", ratio=1)
@@ -201,7 +274,6 @@ class TradingDashboard:
             signal = s_info.get("signal", "NONE")
             sig_dir = signal.direction if hasattr(signal, "direction") else str(signal)
             
-            # Use confidence as fidelity if not explicitly provided
             dfs = s_info.get("fidelity")
             if dfs is None:
                 dfs = signal.confidence if hasattr(signal, "confidence") else 1.0
@@ -209,48 +281,24 @@ class TradingDashboard:
             thresholds = s_info.get("thresholds", {})
             metrics = s_info.get("metrics", {})
             
-            req_text = Text()
-            analysis_text = Text()
+            key_metrics = []
+            for k, v in list(metrics.items())[:3]:
+                if not str(k).startswith("_"):
+                    key_metrics.append(f"{k}:{v}")
+            req_str = ",".join([f"{k}:{v}" for k, v in list(thresholds.items())[:3]]) or "---"
+            analysis_str = " ".join(key_metrics) if key_metrics else "N/A"
             
-            # Synchronized Row-by-Row Aligment
-            # We iterate through keys in thresholds to ensure vertical alignment
-            all_keys = list(thresholds.keys())
-            # Also add metrics keys that might not be in thresholds (extra telemetry)
-            for mk in metrics.keys():
-                if mk not in all_keys and not str(mk).startswith("_"):
-                    all_keys.append(mk)
-            
-            for k in all_keys:
-                target_val = thresholds.get(k, "---")
-                live_val = metrics.get(k, "N/A")
-                
-                # Requirements Column
-                req_text.append(f" {k:<12} ", style="dim magenta")
-                req_text.append(f"{target_val}\n", style="bold white")
-                
-                # Analysis Column
-                if isinstance(live_val, float):
-                    live_str = f"{live_val:.2f}"
-                else:
-                    live_str = str(live_val)
-                    
-                analysis_text.append(f" {k:<12} ", style="dim green")
-                # Highlight if value is N/A or empty
-                style = "bold white" if live_str != "N/A" else "dim red"
-                analysis_text.append(f"{live_str}\n", style=style)
-            
-            # Bias Color logic
             bias_color = "bold green" if "BUY" in sig_dir.upper() else "bold red" if "SELL" in sig_dir.upper() else "dim white"
             
-            clean_name = sid.replace("_v5", "").replace("_", " ").title()
+            clean_name = sid.replace("_v5", "").replace("_", " ").title()[:20]
             table.add_row(
-                clean_name, 
-                req_text, 
-                analysis_text, 
-                Text(sig_dir, style=bias_color),
+                clean_name[:25], 
+                req_str[:35], 
+                analysis_str[:25], 
+                Text(sig_dir[:10], style=bias_color),
                 f"[bold white]{dfs*100:.0f}%[/]"
             )
-            
+        
         return Panel(table, title="Institutional Setups (HFT-Fidelity)", border_style="yellow", padding=0)
 
     def _make_footer(self, state: dict) -> Any:
@@ -295,6 +343,8 @@ class TradingDashboard:
         self.layout["environment"].update(self._make_environment(state))
         self.layout["risk"].update(self._make_risk(state))
         self.layout["exposure"].update(self._make_exposure(state))
+        self.layout["performance"].update(self._make_performance(state))
+        self.layout["trades"].update(self._make_trades(state))
         self.layout["setups"].update(self._make_setups(state))
         
         # Footer Synchronization

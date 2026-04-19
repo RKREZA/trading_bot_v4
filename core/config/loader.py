@@ -11,7 +11,7 @@ class ConfigLoader:
     Implements a Global -> Symbol inheritance model.
     """
     
-    def __init__(self, global_path: str = "config/config.json", symbols_dir: str = "configs/symbols"):
+    def __init__(self, global_path: str = "config/config.json", symbols_dir: str = "config/symbols"):
         self.global_path = global_path
         self.symbols_dir = symbols_dir
         self.global_config = self._load_json(global_path)

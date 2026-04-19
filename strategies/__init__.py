@@ -62,6 +62,7 @@ def create_strategy(strategy_id: str, st_type: str = None, config: dict = None):
         elif "smc" in strategy_id.lower() or "meanreversion" in strategy_id.lower(): st_type = "SMARTMEANREVERSION"
         elif "breakout" in strategy_id.lower(): st_type = "LIQUIDITYSWEEPBREAKOUT"
         elif "range" in strategy_id.lower(): st_type = "RANGEBOUNCE"
+        elif "sma" in strategy_id.lower() or "sample" in strategy_id.lower(): st_type = "SMASAMPLE"
 
         else:
             raise ValueError(f"Could not auto-resolve strategy type for ID '{strategy_id}'. Please provide it explicitly.")

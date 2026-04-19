@@ -57,7 +57,7 @@ class DatasetFingerprinter:
 
 from core.base_strategy import MarketData
 from core.regime_detector import RegimeDetector
-from core.volatility_detector import VolatilityDetector
+from core.volatility_detector import VolatilityDetector, VolatilityLevel
 from strategies.adaptive_manager import AdaptiveStrategyManager
 from core.risk.risk_guardian import RiskGuardian
 from core.session_detector import SessionDetector
@@ -266,9 +266,13 @@ class PortfolioBacktester:
 
         # V5-LOCKED: Ensure institutional warmup for HTF indicators (Step 9)
         # Reduced from 1000 to 200 to allow shorter calibration runs while maintaining EMA integrity
-        start_idx = max(200, self.current_index)
+        start_idx = max(10, self.current_index)
         if start_idx >= len(target_tf_data.time):
             start_idx = min(10, len(target_tf_data.time) // 2) if len(target_tf_data.time) > 10 else 0
+        
+        if len(active_strategies) == 0:
+            logger.warning(f"NO STRATEGIES LOADED - cannot run backtest")
+            return [], []
             
         last_date = None
         pbar = tqdm(total=len(target_tf_data.time), initial=start_idx)
@@ -426,6 +430,7 @@ class PortfolioBacktester:
                     m15_candles=m15_data,
                     m5_candles=m5_data,
                     d1_candles=d1_data,
+                    m1_candles=m1_data,
                     current_price=current_bid,
                     bid=current_bid,
                     ask=current_ask,

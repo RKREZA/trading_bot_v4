@@ -4,16 +4,60 @@ import time
 import os
 import requests
 from datetime import datetime, timezone, timedelta
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Set
+from enum import Enum
+from collections import defaultdict
+from dataclasses import dataclass, field
 
 logger = logging.getLogger("trading_bot.news")
 
+class ImpactLevel(Enum):
+    LOW = 1
+    MEDIUM = 2
+    HIGH = 3
+    CRITICAL = 4
+
+class NewsResilience(Enum):
+    HEALTHY = "HEALTHY"
+    DEGRADED = "DEGRADED"
+    STALE = "STALE"
+    LOCKOUT = "LOCKOUT"
+
+@dataclass
+class NewsEvent:
+    title: str
+    country: str
+    impact: str
+    timestamp: float
+    currency: str = ""
+    category: str = ""
+    actual: Optional[float] = None
+    forecast: Optional[float] = None
+    previous: Optional[float] = None
+    is_actual: bool = False
+
 class InstitutionalNewsFilter:
     """
-    V5-INSIGNIA Institutional News Protection System.
-    Dynamically fetches high-impact economic events and enforces trading blocks.
+    V6-INSIGNIA Institutional News Protection System.
+    Enhanced with:
+    - Multi-source fallbacks with health scoring
+    - Symbol-specific filtering
+    - Impact categorization
+    - Proactive position flattening
+    - Historical event analysis
     """
     
+    _CURRENCY_MAP = {
+        "EUR": ["EUR", "USD", "GBP", "JPY", "CHF"],
+        "USD": ["USD", "EUR", "GBP", "JPY", "CAD", "AUD"],
+        "GBP": ["GBP", "EUR", "USD", "JPY"],
+        "JPY": ["JPY", "USD", "EUR", "GBP"],
+        "CHF": ["CHF", "EUR", "USD"],
+        "AUD": ["AUD", "USD", "NZD", "JPY"],
+        "CAD": ["CAD", "USD"],
+        "NZD": ["NZD", "USD", "AUD"],
+    }
+
     def __init__(self, config: dict):
         self.config = config
         self.news_cfg = config.get("news_filter", {})
@@ -23,7 +67,7 @@ class InstitutionalNewsFilter:
         self.impact_levels = self.news_cfg.get("impact_levels", ["High"])
         self.buffer_before = self.news_cfg.get("buffer_before_min", 30)
         self.buffer_after = self.news_cfg.get("buffer_after_min", 15)
-        self.resilience_mode = "HEALTHY" # HEALTHY | DEGRADED | STALE
+        self.resilience_mode = NewsResilience.HEALTHY
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
@@ -38,6 +82,10 @@ class InstitutionalNewsFilter:
         })
         
         self.events: List[Dict[str, Any]] = []
+        self._history: Dict[str, List[float]] = defaultdict(list)
+        self._last_fetch = 0.0
+        self._refresh_count = 0
+        self._error_count = 0
         self._load_events()
 
     def _load_events(self):
@@ -157,7 +205,7 @@ class InstitutionalNewsFilter:
                     logger.warning(f"News: Source {url} failed: {last_error}")
         
         logger.error(f"News: All automated sources failed. System using 'Persistence Mode' (Stale cache).")
-        self.resilience_mode = "DEGRADED"
+        self.resilience_mode = NewsResilience.DEGRADED
 
     def fetch_from_dailyfx(self) -> bool:
         """Fetches high-impact news from the DailyFX API (Stable Institutional Source)."""
@@ -239,13 +287,13 @@ class InstitutionalNewsFilter:
 
         # Institutional Safe-Gate: Check for Stale Data (Step 23)
         if self._is_data_stale():
-            self.resilience_mode = "STALE"
+            self.resilience_mode = NewsResilience.STALE
             logger.critical("NEWS ALERT: Data is STALE (Refreshed >24h ago). Global Trading LOCKOUT active.")
             return "STALE_DATA_LOCKOUT"
         
         # If we are degraded (no fresh fetch but cache exists), we stay in DEGRADED
-        if not self.events and self.resilience_mode == "HEALTHY":
-             self.resilience_mode = "DEGRADED"
+        if not self.events and self.resilience_mode == NewsResilience.HEALTHY:
+             self.resilience_mode = NewsResilience.DEGRADED
 
         if not self.events:
             return None
@@ -309,9 +357,97 @@ class InstitutionalNewsFilter:
 
     def get_resilience_multiplier(self) -> float:
         """Returns a lot size multiplier based on feed health."""
-        if self.resilience_mode == "HEALTHY":
+        if self.resilience_mode == NewsResilience.HEALTHY:
             return 1.0
-        elif self.resilience_mode == "DEGRADED":
-            return 0.5 # Halve exposure if feeding is blind
+        elif self.resilience_mode == NewsResilience.DEGRADED:
+            return 0.5
         else:
-            return 0.0 # Lockout
+            return 0.0
+
+    def get_health_status(self) -> Dict[str, Any]:
+        """Returns comprehensive health metrics."""
+        return {
+            "mode": self.resilience_mode.value,
+            "event_count": len(self.events),
+            "last_fetch": self._last_fetch,
+            "refresh_count": self._refresh_count,
+            "error_count": self._error_count,
+            "upcoming_24h": len(self.get_upcoming_events(window_hours=24))
+        }
+
+    def categorize_event(self, event: Dict) -> str:
+        """Categorizes an event by type."""
+        title = event.get("title", "").lower()
+        
+        categories = {
+            "inflation": ["cpi", "pce", "inflation", "consumer price"],
+            "employment": ["nonfarm", "payroll", "unemployment", "jobs"],
+            "interest": ["rate", "fed", "ecb", "boj", "boe", "monetary"],
+            "gdp": ["gdp", "growth", "gdp"],
+            "trade": ["trade balance", "current account", "exports", "imports"],
+            "consumer": ["retail", "consumer confidence", "confidence"],
+            "manufacturing": ["pmi", "ism", "manufacturing", "industrial"],
+        }
+        
+        for cat, keywords in categories.items():
+            if any(kw in title for kw in keywords):
+                return cat
+        return "other"
+
+    def get_impact_score(self, event: Dict) -> int:
+        """Calculates impact score for an event."""
+        impact = event.get("impact", "Medium").upper()
+        title = event.get("title", "").lower()
+        score = 0
+        
+        if impact == "HIGH":
+            score = 3
+        elif impact == "MEDIUM":
+            score = 2
+        else:
+            score = 1
+        
+        if any(t in title for t in ["rate", "fed", "ecb", "employment", "gdp", "cpi"]):
+            score += 1
+            
+        return min(score, 5)
+
+    def get_significant_events(self, window_hours: int = 24, min_score: int = 3) -> List[Dict]:
+        """Returns high-impact events with score filtering."""
+        events = self.get_upcoming_events(window_hours=window_hours)
+        return [e for e in events if self.get_impact_score(e) >= min_score]
+
+    def get_symbol_events(self, symbol: str, window_hours: int = 24) -> List[Dict]:
+        """Returns events specifically relevant to a symbol."""
+        if len(symbol) < 6:
+            return []
+            
+        ccy1 = symbol[0:3].upper()
+        ccy2 = symbol[3:6].upper()
+        
+        events = self.get_upcoming_events(window_hours=window_hours)
+        relevant = []
+        
+        for event in events:
+            event_ccy = event.get("country", "").upper()
+            if event_ccy in [ccy1, ccy2, "ALL", "GLOBAL"]:
+                relevant.append(event)
+                
+        return relevant
+
+    def should_flatten_position(self, symbol: str, current_time: float) -> bool:
+        """Determines if a position should be closed proactively."""
+        auto_close_min = self.config.get("news_filter", {}).get("auto_close_before_min", 5)
+        return self.is_blocked(symbol, current_time - (auto_close_min * 60)) is not None
+
+    def record_actual(self, event: Dict, actual: float):
+        """Records actual vs forecast for post-event analysis."""
+        event["actual"] = actual
+        event["is_actual"] = True
+        event["surprise"] = actual - event.get("forecast", 0) if event.get("forecast") else None
+
+    def refresh_if_needed(self):
+        """Forces refresh if cache is expired."""
+        if self._is_data_stale():
+            logger.info("News: Forcing refresh due to stale data.")
+            self.fetch_news()

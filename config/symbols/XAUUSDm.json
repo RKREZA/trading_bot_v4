@@ -101,6 +101,12 @@
       "lookback_bars": 60,
       "min_range_bars": 20,
       "min_confidence": 0.2
+    },
+    "SMASampleStrategy": {
+      "enabled": true,
+      "fast_sma_period": 20,
+      "slow_sma_period": 50,
+      "min_confidence": 0.7
     }
   },
   "backtest": {

@@ -55,6 +55,12 @@ class RiskGuardian:
         if "risk_per_trade_pct" not in risk_governance:
             logger.warning(f"Risk parameter 'risk_per_trade_pct' missing. Defaulting to safe {self.risk_per_trade_pct}%.")
         
+        # Mode Detection
+        bt_cfg = config.get("backtest", {})
+        self._mode = "live"
+        if bt_cfg.get("enabled") or config.get("backtest_mode"):
+            self._mode = "backtest"
+        
         # State Tracking
         # Institutional Calibration Priority: Search for initial_balance_per_strategy first, then standard initial_balance
         bt_cfg = config.get("backtest", {})
@@ -181,10 +187,6 @@ class RiskGuardian:
         
         denominator = points_dist * tick_value
         raw_lot = (risk_amount / denominator) if denominator > 0 else 0.0
-        
-        # FORCED GRADUATION FORENSIC
-        if not self.silent:
-            self.logger.info(f"[RISK_LOG] Bal: {balance:.2f} | Risk%: {risk_pct:.2f} | R_Amt: {risk_amount:.2f} | SL_Pts: {points_dist:.1f} | Denom: {denominator:.2f} | Raw: {raw_lot:.4f}")
 
         return self._normalize_lots(raw_lot, symbol_info, current_price)
 

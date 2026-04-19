@@ -1,6 +1,7 @@
 import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
+from dataclasses import replace
 import threading
 
 from core.strategy_runtime import StrategyRuntime
@@ -134,23 +135,22 @@ class StrategyOrchestrator:
             
             if sig and sig.direction != "NONE":
                 sl = runtime.strategy.get_stop_loss(sig, market_data)
-                sig.stop_loss = sl
+                sig = replace(sig, stop_loss=sl)
                 
                 # ML LAYER: Immutable DTO Priority 1 Evaluation (Statistical + Macro Reasoning)
+                # Pass m5_candles instead of market_data (FeatureEngineer expects CandleArray)
+                candles_for_ai = market_data.m5_candles if market_data.m5_candles is not None else market_data.htf_candles
                 filtered_sig = self.ai_predictor.filter_signal(
                     sig, 
-                    market_data, 
-                    abs(sig.fill_price - sl) if hasattr(sig, 'fill_price') else sl,
+                    candles_for_ai, 
+                    abs(sig.price - sl) if hasattr(sig, 'price') else sl,
                     news_events=news_events
                 )
                 
                 if filtered_sig.approved:
-                    return sid, filtered_sig.original, metrics, thresholds
+                    return sid, sig, metrics, thresholds
                 else:
-                    # Return safe explicit dead object, NOT mutating original memory
-                    from core.common.types import TradeSignal
-                    veto_sig = TradeSignal(direction="NONE", confidence=filtered_sig.confidence, comment=filtered_sig.comment)
-                    return sid, veto_sig, metrics, thresholds
+                    return sid, None, metrics, thresholds
                     
             return sid, sig, metrics, thresholds
 
@@ -252,24 +252,17 @@ class StrategyOrchestrator:
             if not runtime:
                 continue
                 
-            # Final TP Calculation
-            sig.take_profit = runtime.strategy.get_take_profit(sig, market_data)
+            # Final TP Calculation (using replace for frozen dataclass)
+            tp = runtime.strategy.get_take_profit(sig, market_data)
+            sig = replace(sig, take_profit=tp)
             
-            # Final Lot Calculation (Partitioned Strategy Balance)
-            strat_balance = self.portfolio_manager.get_strategy_balance(current_balance, sid)
-            sl_dist = abs(market_data.current_price - sig.stop_loss)
-            base_volume = runtime.risk_guardian.calculate_lot_size(strat_balance, sl_dist, symbol_info)
+            # Fixed lot size override (0.05 = user requested max)
+            fixed_lot = 0.05
+            sym_min_lot = symbol_info.get("min_lot", 0.01) if symbol_info else 0.01
+            if fixed_lot < sym_min_lot:
+                fixed_lot = sym_min_lot
             
-            # Apply News & Drift Resilience Multipliers (Institutional Hardening Pillar 2)
-            news_mult = self.news_filter.get_resilience_multiplier()
-            
-            # PHASE 6: Drift-Aware Adaptive Scaling
-            drift_mult = 1.0
-            if hasattr(self.ai_predictor, 'drift_layer') and hasattr(self.ai_predictor.drift_layer, 'is_drifted') and self.ai_predictor.drift_layer.is_drifted:
-                drift_mult = self.config.get("ai_layer", {}).get("drift_multiplier", 0.5)
-                logger.warning(f"ADAPTIVE SCALING: Market structural drift detected. Reducing exposure by {drift_mult}x")
-            
-            sig.volume = base_volume * news_mult * drift_mult
+            sig = replace(sig, volume=fixed_lot)
             
             if sig.volume > 0:
                 # 8. UNIFIED EXECUTION BRIDGE (Audit Bug #7 Fix)
@@ -288,16 +281,14 @@ class StrategyOrchestrator:
                     price_data=price_data,
                     is_news_blocked=False, # Already checked at start of cycle
                     magic=magic,
-                    comment=f"V5 {sid.upper()} PARALLEL"
+                    comment=f"V5-PBO"
                 )
                 
                 # 9. PERFORMANCE TRACKER LOGS RESULT
                 if execution_result and not execution_result.get("is_error", False):
                     # Strategy-specific feedback
                     runtime.risk_guardian.check_governance(
-                        current_balance, current_equity, 
-                        slippage=execution_result.get("actual_slippage_pips", 0),
-                        is_error=execution_result.get("is_error", False)
+                        current_balance, current_equity
                     )
                     pulse_report["execution"].append(execution_result)
                     

@@ -65,6 +65,10 @@ class LiveOrchestrator:
         self.mismatch_count = 0
         self.is_paused = False
         
+        # AI Auto-Training: Collect closed trades for periodic retraining
+        self.ai_training_data = []
+        self.ai_train_threshold = 50
+        
         # Rule 5.1: Persistence Reset
         self.kill_switch_active = False # Manual reset required in real prod
         
@@ -107,6 +111,11 @@ class LiveOrchestrator:
             broker_clock=self.connection, 
             news_filter=self.news_filter
         )
+        
+        # Initialize trade history for dashboard
+        self.trade_history = []  # List of trade dicts
+        self._open_trade_keys = set()  # Set of (symbol, direction) for open trades we're tracking
+        self._position_tickets = {}  # Map of (symbol, direction) -> ticket for matching
         
         # 5. INITIALIZE HEALTH SERVER (Production Observability)
         health_port = int(os.getenv("HEALTH_PORT", 8080))
@@ -164,15 +173,18 @@ class LiveOrchestrator:
         drift = abs((datetime.now(broker_time.tzinfo) - broker_time).total_seconds())
         
         # Weekend Waiver: Allow large drift if market is closed
-        session = SessionDetector.get_session(datetime.now().astimezone())
-        if "(CLOSED)" in session:
+        session = SessionDetector.get_session(datetime.now().astimezone(), symbol=self.symbol)
+        
+        # Crypto is 24/7 - skip session closed check
+        is_crypto = self.symbol in ["BTCUSDm", "BTCUSD", "ETHUSDm"]
+        
+        if "(CLOSED)" in session and not is_crypto:
             if drift > 3600: 
-                # Throttle log to once every 30 minutes
                 if not hasattr(self, "_last_weekend_log") or (time.time() - self._last_weekend_log > 1800):
                     logger.info(f"Weekend Sync: Drift {drift:.1f}s ignored (Market Closed).")
                     self._last_weekend_log = time.time()
                 return
-            
+        
         if drift > 10.0:
             logger.critical(f"CLOCK DRIFT FATAL: {drift:.1f}s > 10s limit. Triggering KILL-SWITCH.")
             self.emergency_flatten("CLOCK_DRIFT_FATAL")
@@ -338,6 +350,14 @@ class LiveOrchestrator:
                     # Capture Absolute Latest Tick for UI (Tick Fix)
                     tick = mt5.symbol_info_tick(self.symbol)
                     
+                    # Market Closed Check - Skip trading if no valid tick
+                    tick_age = time.time() - tick.time if (tick and tick.time > 0) else 999
+                    if tick_age > 120:
+                        self._update_ui(live, dashboard, status="MARKET CLOSED (Weekend/Holiday)")
+                        self.system_logs.append(f"[{datetime.now().astimezone().strftime('%H:%M:%S')}] Market closed - skipping cycle")
+                        time.sleep(10)
+                        continue
+                    
                     # Daily Reset Check (D6 FIX)
                     today = date.today()
                     if today != last_reset_date:
@@ -408,12 +428,13 @@ class LiveOrchestrator:
                         m15_candles=m15_data,
                         m5_candles=m5_data,
                         d1_candles=d1_data,
+                        m1_candles=m5_data,  # Use M5 as proxy for M1 in live (real M1 tick handling separate)
                         current_price=float(tick.bid),
                         bid=float(tick.bid),
                         ask=float(tick.ask),
                         spread=float(tick.ask - tick.bid),
                         point=sym_point,
-                        session=SessionDetector.get_session(dt_server, self.connection.server_utc_offset),
+                        session=SessionDetector.get_session(dt_server, self.connection.server_utc_offset, symbol=self.symbol),
                         timestamp=dt_server
                     )
 
@@ -461,6 +482,17 @@ class LiveOrchestrator:
                     for exec_res in pulse_report.get("execution", []):
                         self.system_logs.append(f"[{pulse_report.get('timestamp')}] [TRADE] ENTERED {exec_res.get('direction')} @ {exec_res.get('fill_price')}")
                         self.health_server.record_trade(exec_res.get('direction', 'UNKNOWN'))
+                        
+                        # Add to trade history for dashboard
+                        trade_record = {
+                            'timestamp': pulse_report.get('timestamp'),
+                            'direction': exec_res.get('direction', 'UNKNOWN'),
+                            'symbol': self.symbol,
+                            'profit': 0.0,  # Initial profit is 0 when entering trade
+                            'volume': exec_res.get('filled_volume', 0.0),
+                            'price': exec_res.get('fill_price', 0.0)
+                        }
+                        self.trade_history.append(trade_record)
                     
                     # Record Metrics
                     self.health_server.record_cycle()
@@ -479,6 +511,10 @@ class LiveOrchestrator:
 
                     if len(self.analysis_logs) > 50: self.analysis_logs = self.analysis_logs[-50:]
                     if len(self.system_logs) > 50: self.system_logs = self.system_logs[-50:]
+                    
+                    # AI Auto-Training: Retrain every N cycles
+                    if hasattr(self, 'ai_training_data') and len(self.ai_training_data) >= self.ai_train_threshold:
+                        self._auto_train_ai()
 
                     # Final Cycle Update (Pass Live Tick)
                     self._update_ui(live, dashboard, md=md, reg=reg, pulse_report=pulse_report, tick=tick)
@@ -553,9 +589,40 @@ class LiveOrchestrator:
                 pass
         self.connection.disconnect()
 
+    def _auto_train_ai(self):
+        """Auto-train AI model after collecting enough trade data."""
+        try:
+            import pandas as pd
+            from core.ai.model import AIModelWrapper
+            
+            df = pd.DataFrame(self.ai_training_data)
+            cols = ['body_ratio', 'upper_wick_ratio', 'lower_wick_ratio', 'atr_ratio',
+                   'spread_ratio', 'adx', 'hour_of_day', 'day_of_week', 'signal_dir', 'sl_pips']
+            
+            available_cols = [c for c in cols if c in df.columns]
+            if len(df) < 20:
+                return
+            
+            X = df[available_cols].fillna(0)
+            y = df['outcome'].fillna(0).astype(int)
+            
+            logger.info(f"Auto-training AI with {len(X)} samples...")
+            model = AIModelWrapper()
+            model.train(X, y)
+            
+            import joblib
+            joblib.dump(X, os.path.join(model.model_dir, "v4_rf_baseline.pkl"))
+            
+            logger.info(f"AI auto-trained. Win rate: {y.mean()*100:.1f}%")
+            self.ai_training_data = []
+            
+        except Exception as e:
+            logger.error(f"AI auto-train failed: {e}")
+
     def _update_ui(self, live, dashboard, md=None, reg=None, pulse_report=None, status=None, tick=None):
         """Unified UI state pulser with absolute tick priority."""
         acc = self.connection.get_account_snapshot()
+        live_profit = acc.get("profit", 0) if acc.get("connected") else 0
         if not tick:
             tick = mt5.symbol_info_tick(self.symbol)
         
@@ -574,7 +641,9 @@ class LiveOrchestrator:
         price_now = tick.bid if tick else 0.0
         ask_now = tick.ask if tick else 0.0
         bid_now = tick.bid if tick else 0.0
-        spread_now = (tick.ask - tick.bid) / si.point if (tick and si) else 0.0
+        spread_now = tick.ask - tick.bid if tick else 0.0
+        # For display: multiply by 100 for XAU pips (0.36 * 100 = 36)
+        # But keep raw for now
         digits = si.digits if si else 2
         
         # Staleness Detection & Aggressive Cache Buster
@@ -583,8 +652,13 @@ class LiveOrchestrator:
             tick_lag = int(time.time() - tick.time)
             
             # Weekend Check: Don't trigger cache buster/logs if market is closed
-            current_session = SessionDetector.get_session(datetime.now().astimezone())
+            current_session = SessionDetector.get_session(datetime.now().astimezone(), symbol=self.symbol)
             is_market_closed = "(CLOSED)" in current_session
+            
+            # Crypto is 24/7, don't treat as closed
+            is_crypto = self.symbol in ["BTCUSDm", "BTCUSD", "ETHUSDm"]
+            if is_crypto:
+                is_market_closed = False
             
             if tick_lag > 10 and not is_market_closed:
                 # Aggressive Cache Buster: Toggle subscription to force refresh
@@ -622,11 +696,14 @@ class LiveOrchestrator:
             "bid": bid_now,
             "ask": ask_now,
             "spread": spread_now,
-            "pips": (ask_now - bid_now) / (0.10 if "XAU" in self.symbol else 0.01 if "JPY" in self.symbol else 0.0001),
-            "session": SessionDetector.get_session(datetime.now().astimezone(), 0),
+            "pips": (ask_now - bid_now) / (0.10 if "XAU" in self.symbol else 0.00001 if "BTC" in self.symbol else 0.0001 if "JPY" not in self.symbol else 0.01),
+            "session": SessionDetector.get_session(datetime.now().astimezone(), 0, symbol=self.symbol),
             "regime_type": status or "SYNCING...",
             "volatility": status or "SYNCING...",
-            "equity_history": self.equity_history # Required for VaR/DD
+            "equity_history": self.equity_history,
+            "live_profit": live_profit,
+            "trade_history": self.trade_history[-50:] if self.trade_history else [],  # Last 50 trades
+            "metrics": self.health_server.get_metrics()
         }
         
         # Primary Data Acquisition
@@ -647,7 +724,7 @@ class LiveOrchestrator:
             # Try to detect session using broker clock if available
             dt_server = self.connection.get_broker_time(self.symbol)
             if dt_server:
-                state["session"] = SessionDetector.get_session(dt_server, self.connection.server_utc_offset)
+                state["session"] = SessionDetector.get_session(dt_server, self.connection.server_utc_offset, symbol=self.symbol)
                 state["local_time"] = datetime.now().astimezone().strftime("%d-%b-%Y %I:%M:%S %p %z")
                 state["server_time"] = self.connection.format_broker_time(dt_server)
         
@@ -657,23 +734,40 @@ class LiveOrchestrator:
                 "volatility": reg.volatility.value
             })
             
-        if pulse_report:
-            ui_positions = []
-            all_positions = self.pos_manager.get_open_positions()
-            for pos in all_positions:
-                ui_positions.append({
-                    'symbol': pos.symbol,
-                    'type_text': "BUY" if pos.type == 0 else "SELL",
-                    'volume': pos.volume,
-                    'profit': pos.profit
-                })
-            
-            state.update({
-                "setups": pulse_report.get("strategies", {}),
-                "positions": ui_positions,
-                "news_list": pulse_report.get("upcoming_news_obj", []),
-                "news_stale": (time.time() - os.path.getmtime(self.news_filter.cache_file)) > 86400 if os.path.exists(self.news_filter.cache_file) else True
+        # Always update setups - ensure strategies are passed to dashboard
+        strategies_data = pulse_report.get("strategies", {}) if pulse_report else {}
+        
+        # Debug: If no strategies from orchestrator, manually add runtime info
+        if not strategies_data and self.runtimes:
+            for runtime in self.runtimes:
+                sid = runtime.strategy_id
+                strategies_data[sid] = {
+                    "signal": "DEBUG_NO_SIGNAL",
+                    "metrics": {"debug_active": True, "runtime_loaded": True},
+                    "thresholds": {"allocation": self.config.get("portfolio_allocations", {}).get(runtime.strategy.__class__.__name__, 0)},
+                    "fidelity": 0.0
+                }
+                logging.info(f"Debug added runtime: {sid}")
+        
+        state.update({
+            "setups": strategies_data,
+            "debug_runimes_count": len(self.runtimes),
+            "news_list": pulse_report.get("upcoming_news_obj", []) if pulse_report else [],
+            "news_stale": (time.time() - os.path.getmtime(self.news_filter.cache_file)) > 86400 if os.path.exists(self.news_filter.cache_file) else True
+        })
+        
+        # Always update positions for exposure heatmap
+        ui_positions = []
+        all_positions = self.pos_manager.get_open_positions()
+        for pos in all_positions:
+            ui_positions.append({
+                'symbol': pos.symbol,
+                'type_text': "BUY" if pos.type == 0 else "SELL",
+                'volume': pos.volume,
+                'profit': pos.profit
             })
+        
+        state["positions"] = ui_positions
 
         # Add system metrics to state
         state["metrics"] = self.health_server.get_metrics()

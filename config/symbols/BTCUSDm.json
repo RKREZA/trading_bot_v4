@@ -1,0 +1,93 @@
+{
+  "_comment": "BTCUSDm Symbol Configuration - OPTIMIZED FOR CRYPTO",
+  "symbol_info": {
+    "point": 0.01,
+    "tick_value": 1.0,
+    "spread_pips": 50,
+    "digits": 2,
+    "commission_per_lot": 25.0,
+    "min_lot": 0.01,
+    "max_lot": 50.0,
+    "lot_step": 0.01,
+    "contract_size": 1.0,
+    "backtest_timeframe": "M5",
+    "initial_balance_per_strategy": 10000.0
+  },
+  "strategies": {
+    "TrendFollowing": {
+      "enabled": true,
+      "allowed_sessions": ["TOKYO", "LONDON", "NEW_YORK", "LONDON/NY", "GLOBAL"],
+      "adx_threshold": 20,
+      "sl_atr": 2.5,
+      "tp_atr": 5.0,
+      "min_confidence": 0.15,
+      "min_bars_between_signals": 15,
+      "ema_fast": 21,
+      "ema_mid": 50,
+      "ema_slow": 200,
+      "supertrend_period": 10,
+      "supertrend_multiplier": 3.0,
+      "max_spread_points": 500
+    },
+    "LiquiditySweepBreakout": {
+      "enabled": true,
+      "allowed_sessions": ["TOKYO", "LONDON", "NEW_YORK", "LONDON/NY", "GLOBAL"],
+      "lookback": 30,
+      "rejection_thresh": 0.55,
+      "adx_threshold": 20.0,
+      "min_confidence": 0.15,
+      "min_rr": 1.5,
+      "cooldown_seconds": 7200,
+      "max_trades_per_day": 3,
+      "post_sl_cooldown_seconds": 10800,
+      "max_atr_spike_mult": 2.0,
+      "sweep_depth_mult": 0.15,
+      "duplicate_zone_mult": 0.4,
+      "adx_trend_threshold": 20.0,
+      "impulse_threshold": 1.5,
+      "trend_strength_threshold": 0.7,
+      "max_spread_points": 500
+    },
+    "SmartMeanReversion": {
+      "enabled": true,
+      "allowed_sessions": ["TOKYO", "LONDON", "NEW_YORK", "GLOBAL"],
+      "rsi_period": 14,
+      "rsi_oversold": 35,
+      "rsi_overbought": 65,
+      "bb_period": 20,
+      "bb_std": 2.0,
+      "min_confidence": 0.15,
+      "sl_atr": 2.0,
+      "tp_atr": 3.0,
+      "min_rr": 1.5,
+      "cooldown_seconds": 3600,
+      "max_spread_points": 500
+    },
+    "RangeBounce": {
+      "enabled": true,
+      "allowed_sessions": ["TOKYO", "GLOBAL"],
+      "range_period": 20,
+      "min_range_pips": 100,
+      "max_range_pips": 500,
+      "bb_period": 20,
+      "bb_std": 2.5,
+      "min_confidence": 0.15,
+      "sl_atr": 2.0,
+      "tp_atr": 3.0,
+      "min_rr": 1.2,
+      "cooldown_seconds": 7200,
+      "max_spread_points": 500
+    },
+    "PureBreakoutOneMinute": {
+      "enabled": false,
+      "max_spread_points": 500,
+      "min_confidence": 0.15,
+      "min_body_ratio": 0.15,
+      "sl_points": 3000,
+      "tp_mult": 2.0,
+      "lookback": 3,
+      " ATR_period": 14,
+      "volume_spike_mult": 1.5
+    }
+  }
+}

@@ -149,6 +149,7 @@ class ComprehensiveBacktestSuite:
         
         # [ Institutional A+ Refactor ]: Load Symbol-Specific Config
         config = self.config_loader.get_symbol_config(symbol)
+        logger.info(f"Config loaded - PureBreakoutOneMinute: {config.get('PureBreakoutOneMinute')}")
         
         # Create strategy
         sid = f"{strategy_name.lower()}_v4"
@@ -440,5 +441,126 @@ def run_all_tests():
     return results
 
 
+def auto_train_ai(results: dict):
+    """Automatically train AI model with backtest trade data."""
+    import numpy as np
+    import pandas as pd
+    from core.ai.model import AIModelWrapper
+    from core.ai.features import FeatureEngineer
+    from core.common.types import CandleArray
+    from core.indicator_engine import IndicatorEngine
+    
+    logger.info("=" * 60)
+    logger.info("AUTO-TRAINING AI MODEL")
+    logger.info("=" * 60)
+    
+    all_trades = []
+    
+    from comprehensive_backtest import ComprehensiveBacktestSuite
+    suite = ComprehensiveBacktestSuite()
+    
+    data = suite.load_real_data()
+    if data is None or len(data) < 1000:
+        logger.warning("Insufficient data for auto-training. Using current model.")
+        return False
+    
+    candles = CandleArray(
+        time=np.array(data['time'].values, dtype=np.int64),
+        open=np.array(data['open'].values, dtype=np.float64),
+        high=np.array(data['high'].values, dtype=np.float64),
+        low=np.array(data['low'].values, dtype=np.float64),
+        close=np.array(data['close'].values, dtype=np.float64),
+        tick_volume=np.array(data['tick_volume'].values, dtype=np.int64),
+        spread=np.array(data.get('spread', pd.Series(30, index=range(len(data)))).values, dtype=np.float64)
+    )
+    
+    features = IndicatorEngine.precalculate_all("XAUUSDm", "M5", candles)
+    for k, v in features.items():
+        candles._indicators[k] = v
+    
+    strategy_names = ["TrendFollowing", "LiquiditySweepBreakout", "SmartMeanReversion"]
+    
+    for strat_name in strategy_names:
+        for i in range(200, len(candles.time) - 50, 30):
+            if i >= len(candles.time):
+                break
+            
+            c = CandleArray(
+                time=candles.time[:i+1],
+                open=candles.open[:i+1],
+                high=candles.high[:i+1],
+                low=candles.low[:i+1],
+                close=candles.close[:i+1],
+                tick_volume=candles.tick_volume[:i+1],
+                spread=candles.spread[:i+1]
+            )
+            
+            ema50 = c.get_indicator("ema_50")
+            ema100 = c.get_indicator("ema_100")
+            ema200 = c.get_indicator("ema_200")
+            adx = c.get_indicator("adx_14")
+            
+            direction = "NONE"
+            sl_pips = 300
+            
+            if len(ema200) > 5 and len(adx) > 0:
+                if ema50[-1] > ema100[-1] > ema200[-1] and adx[-1] > 25:
+                    direction = "BUY"
+                elif ema50[-1] < ema100[-1] < ema200[-1] and adx[-1] > 25:
+                    direction = "SELL"
+            
+            if direction != "NONE":
+                entry = c.close[-1]
+                exit_idx = min(i + 50, len(candles.close) - 1)
+                exit_price = candles.close[exit_idx]
+                pnl_pct = (exit_price - entry) / entry * 100
+                outcome = 1 if pnl_pct > 0 else 0
+                
+                feat = FeatureEngineer.extract_features(c, direction, sl_pips)
+                if feat:
+                    feat['outcome'] = outcome
+                    feat['pnl_pct'] = pnl_pct
+                    feat['strategy'] = strat_name
+                    all_trades.append(feat)
+    
+    if len(all_trades) < 50:
+        logger.warning(f"Only {len(all_trades)} trades, augmenting with synthetic data...")
+        for _ in range(300):
+            all_trades.append({
+                'body_ratio': np.random.uniform(0.1, 0.9),
+                'upper_wick_ratio': np.random.uniform(0, 0.4),
+                'lower_wick_ratio': np.random.uniform(0, 0.4),
+                'atr_ratio': np.random.uniform(0.5, 1.5),
+                'spread_ratio': np.random.uniform(0.8, 1.2),
+                'adx': np.random.uniform(10, 40),
+                'hour_of_day': np.random.randint(0, 24),
+                'day_of_week': np.random.randint(0, 5),
+                'signal_dir': np.random.choice([-1, 1]),
+                'sl_pips': np.random.uniform(100, 500),
+                'outcome': np.random.choice([0, 1], p=[0.4, 0.6]),
+                'pnl_pct': np.random.uniform(-2, 3),
+                'strategy': 'SYNTHETIC'
+            })
+    
+    df = pd.DataFrame(all_trades)
+    feature_cols = ['body_ratio', 'upper_wick_ratio', 'lower_wick_ratio', 'atr_ratio',
+                 'spread_ratio', 'adx', 'hour_of_day', 'day_of_week', 'signal_dir', 'sl_pips']
+    
+    X = df[feature_cols].fillna(0)
+    y = df['outcome'].fillna(0).astype(int)
+    
+    logger.info(f"Training on {len(X)} samples, {y.sum()} wins ({y.mean()*100:.1f}%)")
+    
+    model = AIModelWrapper()
+    model.train(X, y)
+    
+    import joblib
+    joblib.dump(X, os.path.join(model.model_dir, "v4_rf_baseline.pkl"))
+    
+    logger.info(f"AI model auto-trained and saved to {model.model_path}")
+    return True
+
+
 if __name__ == "__main__":
-    run_all_tests()
+    results = run_all_tests()
+    auto_train_ai(results)

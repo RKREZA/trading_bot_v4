@@ -28,13 +28,14 @@ class MarketData:
     m15_candles: CandleArray
     m5_candles: CandleArray
     d1_candles: Optional[CandleArray]
-    current_price: float # Deprecated: Use bid/ask for precision
+    current_price: float  # Deprecated: Use bid/ask for precision
     bid: float
     ask: float
     spread: float
     point: float
     session: str
     timestamp: datetime
+    m1_candles: Optional[CandleArray] = None  # M1 data for scalping strategies
     preprocessed: Optional[dict] = None   # Precomputed indicators per M5 bar
 
 @dataclass
@@ -85,18 +86,25 @@ class BaseStrategy(ABC):
 
     def get_strat_config(self) -> Dict[str, Any]:
         """Ensures consistent access to the strategy-specific configuration block regardless of nesting."""
+        # Strip version suffix for config lookup
+        base_name = self.strategy_id.rsplit('_v', 1)[0] if '_v' in self.strategy_id else self.strategy_id
+        
         # Check 'strategies' key first (Standard V5 structure)
         strategies_block = self.config.get("strategies", {})
         if self.strategy_id in strategies_block:
             return strategies_block[self.strategy_id]
+        if base_name in strategies_block:
+            return strategies_block[base_name]
             
         # Fallback 1: Direct key at root (Legacy/Diagnostic support)
         if self.strategy_id in self.config:
             return self.config[self.strategy_id]
+        if base_name in self.config:
+            return self.config[base_name]
             
         # Fallback 2: Case-insensitive search
         for key in self.config:
-            if key.lower() == self.strategy_id.lower():
+            if key.lower() == self.strategy_id.lower() or key.lower() == base_name.lower():
                 return self.config[key]
                 
         return {}
