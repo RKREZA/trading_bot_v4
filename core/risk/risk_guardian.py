@@ -94,6 +94,17 @@ class RiskGuardian:
             config.get("risk_governance", {}).get("circuit_breaker_cooldown_hours", 24.0)
         )
 
+        # Initialize Institutional Telemetry (Telegram)
+        try:
+            from core.notifications.telegram_alerter import TelegramAlerter
+            self.alerter = TelegramAlerter()
+        except ImportError:
+            self.logger.warning("[RISK] TelegramAlerter could not be imported. Alerts acting as no-op.")
+            class DummyAlerter:
+                def send_emergency_alert(self, *args, **kwargs): pass
+                def send_risk_alert(self, *args, **kwargs): pass
+            self.alerter = DummyAlerter()
+
     def validate_signal(self, 
                         signal: Any, 
                         balance: float, 
@@ -212,7 +223,10 @@ class RiskGuardian:
         total_dd = ((self.max_equity - current_equity) / self.max_equity) * 100 if self.max_equity > 0 else 0
         if total_dd >= self.max_drawdown_halt_pct:
             self.kill_switch_active = True
-            self.logger.critical(f"MAX DRAWDOWN {total_dd:.1f}% REACHED! EMERGENCY HALT. MaxEq: {self.max_equity:.2f}, CurrEq: {current_equity:.2f}")
+            msg = f"MAX DRAWDOWN {total_dd:.1f}% REACHED! EMERGENCY HALT. MaxEq: {self.max_equity:.2f}, CurrEq: {current_equity:.2f}"
+            self.logger.critical(msg)
+            if hasattr(self, 'alerter'):
+                self.alerter.send_emergency_alert(msg)
             return False, f"MAX_DRAWDOWN_REACHED ({total_dd:.1f}%)"
 
         # 2. Exposure Netting 2.0 Enforcement
@@ -339,7 +353,10 @@ class RiskGuardian:
             self.strategy_status[strategy_id] = "HALTED"
             self.strategy_status[f"{strategy_id}_halt_time"] = time.time()  # Track halt timestamp
             self._save_health_state()
-            self.logger.critical(f"CIRCUIT BREAKER: Strategy {strategy_id} HALTED! Trailing 48h PnL: {total_pnl_pct:.2f}%")
+            msg = f"CIRCUIT BREAKER: Strategy {strategy_id} HALTED! Trailing 48h PnL: {total_pnl_pct:.2f}%"
+            self.logger.critical(msg)
+            if hasattr(self, 'alerter'):
+                self.alerter.send_risk_alert(f"Strategy Halted: {strategy_id}", f"Trailing 48h PnL: {total_pnl_pct:.2f}%")
             return False, f"CIRCUIT_BREAKER_TRIGGERED ({total_pnl_pct:.2f}%)"
 
         return True, "OK"

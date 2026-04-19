@@ -125,6 +125,13 @@ class OrderManager:
             max_retries = 3
             backoff = 0.5
             
+            # Resolve magic for position deduplication
+            eval_magic = magic if magic is not None else self.config.get("magic_number", 234000)
+            
+            # PRE-FLIGHT: Snapshot active position tickets for this magic/symbol
+            pre_positions = self.connection.get_positions(symbol=symbol)
+            pre_tickets = {p.ticket for p in pre_positions if p.magic == eval_magic} if pre_positions else set()
+            
             result = None
             for attempt in range(max_retries):
                 result = self.connection.place_order(
@@ -140,6 +147,23 @@ class OrderManager:
                     
                 err_msg = result.get("error", "Unknown MT5 Rejection") if result else "None/Timeout"
                 self.logger.warning(f"Execute attempt {attempt+1}/{max_retries} failed on {symbol}: {err_msg}")
+                
+                # INSTITUTIONAL ORPHAN HOOK: Check if terminal processed it despite returning failure
+                time.sleep(0.5) # Give MT5 brief window to sync state
+                post_positions = self.connection.get_positions(symbol=symbol)
+                if post_positions:
+                    post_tickets = [p for p in post_positions if p.magic == eval_magic and p.ticket not in pre_tickets]
+                    if post_tickets:
+                        new_pos = post_tickets[0]
+                        self.logger.warning(f"ORPHAN INTERCEPT: Ticket {new_pos.ticket} found despite timeout. Deduplicating.")
+                        result = {
+                            "is_error": False,
+                            "ticket": new_pos.ticket,
+                            "volume": new_pos.volume,
+                            "price": new_pos.price_open
+                        }
+                        break
+                        
                 if attempt < max_retries - 1:
                     time.sleep(backoff)
                     backoff *= 2.0

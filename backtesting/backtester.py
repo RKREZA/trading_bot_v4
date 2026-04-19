@@ -761,8 +761,23 @@ class PortfolioBacktester:
                     tf_data.timeframe attribute if not provided.
         """
         if len(tf_data.time) == 0: return 0
-        idx = np.searchsorted(tf_data.time, target_time, side=side)
-        idx = max(0, min(idx, len(tf_data.time) - 1))
+        
+        # CPU OPTIMIZATION: Pointer-cached sliced search
+        if not hasattr(self, "_tf_pointers"): self._tf_pointers = {}
+        tf_id = id(tf_data)
+        
+        # Fallback to 0 if time went backwards
+        last_t = getattr(self, "_last_target_time", 0)
+        start_idx = self._tf_pointers.get(tf_id, 0) if target_time >= last_t else 0
+        self._last_target_time = target_time
+        
+        sliced_times = tf_data.time[start_idx:]
+        if len(sliced_times) == 0: 
+            idx = len(tf_data.time) - 1
+        else:
+            offset = np.searchsorted(sliced_times, target_time, side=side)
+            idx = min(start_idx + offset, len(tf_data.time) - 1)
+            self._tf_pointers[tf_id] = max(0, idx - 2)
         
         # STRICT ANTI-LOOKAHEAD: Ensure the candle at idx does not start AFTER target_time
         # If it does, step back by one to guarantee we only use past data.
@@ -800,10 +815,28 @@ class PortfolioBacktester:
         tf_str = self.config.get("backtest", {}).get("timeframe", "M5")
         tf_seconds = self._TF_INTERVALS.get(tf_str, 300)
 
-        idx_start = np.searchsorted(m1.time, target_time, side='left')
-        next_bar_time = target_time + tf_seconds
-        idx_end = np.searchsorted(m1.time, next_bar_time, side='left')
+        # CPU OPTIMIZATION: Pointer array tracking for M1
+        if not hasattr(self, "_m1_pointers"): self._m1_pointers = {}
+        m1_id = id(m1)
+        start_idx = self._m1_pointers.get(m1_id, 0)
         
+        sliced_times = m1.time[start_idx:]
+        if len(sliced_times) == 0: return m1[0:0]
+        
+        idx_start_offset = np.searchsorted(sliced_times, target_time, side='left')
+        idx_start = start_idx + idx_start_offset
+        
+        next_bar_time = target_time + tf_seconds
+        
+        search_slice = m1.time[idx_start:]
+        if len(search_slice) == 0:
+            idx_end = idx_start
+        else:
+            idx_end_offset = np.searchsorted(search_slice, next_bar_time, side='left')
+            idx_end = idx_start + idx_end_offset
+
+        self._m1_pointers[m1_id] = max(0, idx_start - 5)
+
         if idx_end <= idx_start:
             idx_end = min(idx_start + (tf_seconds // 60), len(m1.time))
         
