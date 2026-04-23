@@ -43,38 +43,49 @@ class CheckpointManager:
         """
         Atomic save of the global backtest state (now gzip compressed).
         Includes current index, balances, open positions, and strategy states.
+        Uses PID-unique temp files and retry-with-backoff to defeat Windows NTFS lock contention.
         """
-        temp_path = self.main_state_path + ".tmp"
+        # PID-unique temp path prevents collisions from parallel WFO workers
+        temp_path = self.main_state_path + f".{os.getpid()}.tmp"
         try:
             # 1. Serialize to string first to ensure we don't hold a file lock if serialization fails
-            # Separators used to reduce size even before compression
             content = json.dumps(state, separators=(',', ':'), cls=InstitutionalEncoder).encode('utf-8')
             
             # 2. Write compressed string to temp file
             with gzip.open(temp_path, "wb") as f:
                 f.write(content)
             
-            # 3. Windows-Safe Atomic Swap
-            if os.path.exists(self.main_state_path):
-                # On Windows, we often need to retry delete if a process is heartbeat-scanning
-                for _ in range(3):
-                    try:
+            # 3. Windows-Safe Atomic Swap with retry on BOTH remove and rename
+            max_retries = 5
+            for attempt in range(max_retries):
+                try:
+                    if os.path.exists(self.main_state_path):
                         os.remove(self.main_state_path)
-                        break
-                    except PermissionError:
-                        time.sleep(0.1)
-            
-            os.rename(temp_path, self.main_state_path)
-            logger.debug(f"Checkpoint saved at step {state.get('current_index')} (Compressed)")
+                    os.rename(temp_path, self.main_state_path)
+                    logger.debug(f"Checkpoint saved at step {state.get('current_index')} (Compressed)")
+                    return  # Success
+                except (PermissionError, OSError) as swap_err:
+                    if attempt < max_retries - 1:
+                        time.sleep(0.05 * (2 ** attempt))  # Exponential backoff: 50ms, 100ms, 200ms, 400ms
+                        continue
+                    # Final fallback: shutil.move uses copy+delete which sidesteps NTFS locks
+                    try:
+                        import shutil
+                        shutil.move(temp_path, self.main_state_path)
+                        logger.debug(f"Checkpoint saved via shutil fallback at step {state.get('current_index')}")
+                        return
+                    except Exception:
+                        logger.error(f"Failed to save checkpoint after {max_retries} retries: {swap_err}")
             
         except Exception as e:
             logger.error(f"Failed to save checkpoint: {e}")
-            # Cleanup temp file if it exists and isn't locked
-            if os.path.exists(temp_path):
-                try:
+        finally:
+            # Cleanup temp file if it still exists
+            try:
+                if os.path.exists(temp_path):
                     os.remove(temp_path)
-                except:
-                    pass
+            except OSError:
+                pass
 
     def load_checkpoint(self) -> Optional[Dict[str, Any]]:
         """Loads the last saved state for recovery. Supports auto-migration from legacy .json."""

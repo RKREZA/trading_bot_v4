@@ -12,6 +12,7 @@ import heapq
 import math
 import subprocess
 import sys
+import time
 from tqdm import tqdm
 from datetime import datetime, timezone, timedelta
 import numpy as np
@@ -55,6 +56,7 @@ class DatasetFingerprinter:
 
 from core.base_strategy import MarketData
 from core.regime_detector import RegimeDetector
+from core.regime_store import MemoryRegimeStore # v3 Persistence
 from core.volatility_detector import VolatilityDetector, VolatilityLevel
 from core.risk.risk_guardian import RiskGuardian
 from core.session_detector import SessionDetector
@@ -92,6 +94,7 @@ class PortfolioBacktester:
         self.kernel = StochasticKernel(config.get("backtest", {}).get("random_seed", 42))
         self.reconstructor = PathReconstructor(n_paths=200, seed=config.get("backtest", {}).get("random_seed", 42))
         self.audit_engine = AuditEngine()
+        self.regime_store = MemoryRegimeStore() # v3 Persistent Store
 
         bt_cfg = config.get("backtest", {})
         self.initial_partition_balance = float(bt_cfg.get("initial_balance_per_strategy", 1000.0))
@@ -146,6 +149,9 @@ class PortfolioBacktester:
             # Audit Trail
             print(f"[ALLOCATION_AUDIT] {sid}: ${bal:,.2f} (DYNAMIC CONFIG)")
             logger.info(f"[ALLOCATION_AUDIT] {sid}: ${bal:,.2f} / Weight: 100%")
+            
+        # v3 Persistence Reset
+        self.regime_store = MemoryRegimeStore()
             
         risk_cfg = self.config.get("risk_governance", {})
         self.risk_guardian.max_drawdown_halt_pct = float(risk_cfg.get("max_drawdown_halt_pct", 8.0))
@@ -246,32 +252,39 @@ class PortfolioBacktester:
             logger.critical("RUN ABORTED: Data fidelity below institutional threshold.")
             return [], []
 
-        with console.status(f"[bold blue]Calibrating {symbol} Strategy Indicators...") as status:
-            target_tf_data._indicators = IndicatorEngine.precalculate_all(symbol, getattr(target_tf_data, "timeframe", "UNKNOWN"), target_tf_data)
-            m5_data._indicators = IndicatorEngine.precalculate_all(symbol, "M5", m5_data)
-            m15_data._indicators = IndicatorEngine.precalculate_all(symbol, "M15", m15_data)
-            h1_data._indicators = IndicatorEngine.precalculate_all(symbol, "H1", h1_data)
-            if d1_data is not None:
-                d1_data._indicators = IndicatorEngine.precalculate_all(symbol, "D1", d1_data)
-            logger.info("Indicator Pre-calculation COMPLETED.")
+        logger.info(f"Calibrating {symbol} Strategy Indicators...")
+        target_tf_data._indicators = IndicatorEngine.precalculate_all(symbol, getattr(target_tf_data, "timeframe", "UNKNOWN"), target_tf_data)
+        m5_data._indicators = IndicatorEngine.precalculate_all(symbol, "M5", m5_data)
+        m15_data._indicators = IndicatorEngine.precalculate_all(symbol, "M15", m15_data)
+        h1_data._indicators = IndicatorEngine.precalculate_all(symbol, "H1", h1_data)
+        if d1_data is not None:
+            d1_data._indicators = IndicatorEngine.precalculate_all(symbol, "D1", d1_data)
+        logger.info("Indicator Pre-calculation COMPLETED.")
 
         # Pre-flight data integrity check (Step 11)
         self._validate_data_alignment(target_tf_data, m1_data)
 
         # V5-LOCKED: Ensure institutional warmup for HTF indicators (Step 9)
-        # Reduced from 1000 to 200 to allow shorter calibration runs while maintaining EMA integrity
-        start_idx = max(10, self.current_index)
+        # RegimeDetector requires atr_14 with ≥100 values and adx_14 with ≥20 values.
+        # Minimum warmup must exceed max(100 + atr_period, htf_ema_200) to guarantee
+        # all indicators are fully mature before strategy evaluation begins.
+        start_idx = max(200, self.current_index)
         if start_idx >= len(target_tf_data.time):
-            start_idx = min(10, len(target_tf_data.time) // 2) if len(target_tf_data.time) > 10 else 0
+            start_idx = min(200, len(target_tf_data.time) // 2) if len(target_tf_data.time) > 200 else 0
         
         if len(active_strategies) == 0:
             logger.warning(f"NO STRATEGIES LOADED - cannot run backtest")
             return [], []
             
         last_date = None
-        pbar = tqdm(total=len(target_tf_data.time), initial=start_idx)
+        last_date = None
+        start_time = time.time()
         
         for i in range(start_idx, len(target_tf_data.time)):
+            if i % 5000 == 0:
+                elapsed = time.time() - start_time
+                speed = i / elapsed if elapsed > 0 else 0
+                logger.info(f"[PROGRESS] {i}/{len(target_tf_data.time)} bars | Speed: {speed:.1f} it/s")
             try:
                 self.current_index = i
                 t = target_tf_data.time[i]
@@ -322,19 +335,39 @@ class PortfolioBacktester:
                     d1_idx = self._get_tf_idx(d1_data, t, side="right")
                     d1_data.set_limit(d1_idx)
                 
-                # 1. Regime Detection & Gating
+                # V3 Institutional Upgrade: Canonical Execution Anchoring
+                timeframe = self.config.get("backtest", {}).get("timeframe", "M5")
+                tf_secs = 300
+                if timeframe == "M1": tf_secs = 60
+                elif timeframe == "M15": tf_secs = 900
+                elif timeframe == "H1": tf_secs = 3600
+                
                 # V2 Institutional Patch: RegimeDetector now expects an object exposing m5_candles and htf_candles.
                 class _RegimeDataShim: pass
                 shim = _RegimeDataShim()
                 shim.m5_candles = target_tf_data if m5_data is target_tf_data else m5_data
                 shim.htf_candles = h1_data
+                shim.session = SessionDetector.get_session(dt, self.config.get("backtest", {}).get("utc_offset", 0))
                 
-                regime_info = self.regime_detector.detect(shim)
+                # Backtest Parity: Handle both datetime and raw unix timestamps
+                ts = t.timestamp() if hasattr(t, "timestamp") else float(t)
+                shim.timestamp = datetime.fromtimestamp(ts, tz=timezone.utc)
+                
+                time_bucket = int(ts / tf_secs)
+                global_exec_id = f"GLOBAL:BACKTEST:{time_bucket}"
+
+                # Global "Environment" Regime (for telemetry, logging, and audit)
+                g_state = self.regime_store.load("GLOBAL")
+                regime_info, _, _ = self.regime_detector.detect(
+                    shim, g_state, global_exec_id, "GLOBAL", is_live=False
+                )
                 regime = regime_info.market_type
 
                 # --- 0.7 DFS STABILITY UPDATE ---
-                self.dfs_score = FidelityEngine.calculate_dfs(target_tf_data, self.config.get("backtest", {}).get("timeframe", "M5"), self.dfs_score)
-                self.dfs_class = FidelityEngine.get_classification(self.dfs_score)
+                # Only calculate DFS every 500 bars to save CPU
+                if i % 500 == 0:
+                    self.dfs_score = FidelityEngine.calculate_dfs(target_tf_data, self.config.get("backtest", {}).get("timeframe", "M5"), self.dfs_score)
+                    self.dfs_class = FidelityEngine.get_classification(self.dfs_score)
 
                 # --- 1. EXPLICIT EXECUTION PIPELINE (Priority Queue Fulfillment) ---
                 # Step 3: Maturity Check for Latency Queue (Strict Ordering)
@@ -403,6 +436,7 @@ class PortfolioBacktester:
                     vol_analysis = self.volatility_detector.analyze(m5_data, h1_data)
                     self.volatility_history.append(vol_analysis)
                     
+                    # Progress bar update removed - replaced by periodic logging
                     # Update risk multiplier based on volatility level
                     vol_risk_mult = vol_analysis.risk_multiplier
                     risk_mult = risk_mult * vol_risk_mult
@@ -446,8 +480,23 @@ class PortfolioBacktester:
                 for strat in strategies_to_try:
                     sid = strat.strategy_id
                     
+                    # v3 State-Aware Regime Gating
+                    ts = t.timestamp() if hasattr(t, "timestamp") else float(t)
+                    time_bucket = int(ts / tf_secs)
+                    exec_id = f"{sid}:BACKTEST:{time_bucket}"
+                    s_state = self.regime_store.load(sid)
+                    s_regime_info, new_s_state, _ = self.regime_detector.detect(
+                        shim, s_state, exec_id, sid, is_live=False
+                    )
+                    self.regime_store.save(sid, new_s_state)
+
                     if RegimeGater.is_drawdown_gated(self.max_drawdowns.get(sid, 0)): continue
-                    if not RegimeGater.is_strategy_allowed(strat.__class__.__name__, regime_info): continue
+                    
+                    if not RegimeGater.is_strategy_allowed(strat.__class__.__name__, s_regime_info):
+                        if self.config.get("backtest", {}).get("debug_signals"):
+                            logger.info(f"[{dt}] [{sid}] REGIME GATED: Strat {strat.__class__.__name__} not allowed in {s_regime_info.market_type} (conf={s_regime_info.confidence:.2f}, vol={s_regime_info.volatility})")
+                        continue
+                        
                     if sid in self.open_trades: continue
                     
                     # Apply volatility-adjusted parameters if available
@@ -585,11 +634,17 @@ class PortfolioBacktester:
                     self.peak_equity[sid] = max(self.peak_equity[sid], self.equities[sid])
                     dd = (self.peak_equity[sid] - self.equities[sid]) / self.peak_equity[sid] * 100 if self.peak_equity[sid] > 0 else 0.0
                     self.max_drawdowns[sid] = max(self.max_drawdowns[sid], dd)
-                    self.equity_history.append({"time": t, "strategy_id": sid, "equity": self.equities[sid]})
+                   # Step 10: State Sampling (Optimized: Sample hourly at M5 to reduce memory pressure)
+                if i % 12 == 0: # 12 bars @ M5 = 1 hour
+                    for sid in self.balances:
+                        self.equity_history.append({"time": t, "strategy_id": sid, "equity": self.equities[sid]})
 
                 # [ Institutional Recovery ]: Checkpoint every 100 bars if enabled
                 if i % 100 == 0 and not self.config.get("backtest", {}).get("disable_checkpoint", False):
-                    self.checkpoint_manager.save_checkpoint(self.get_state())
+                    try:
+                        self.checkpoint_manager.save_checkpoint(self.get_state())
+                    except Exception as e:
+                        logger.warning(f"Checkpoint failed (skipping): {e}")
 
             except CriticalRiskViolationError as crve:
                 # INSTITUTIONAL: Graceful handling of lot size violations
@@ -613,7 +668,7 @@ class PortfolioBacktester:
                     f.write(traceback.format_exc())
                 raise e
 
-        pbar.close()
+        # Progress bar closed by removing tqdm - periodic logging handles status
         self._force_close_at_end(target_tf_data, point, tick_value, comm_per_lot, active_strategies)
         self.checkpoint_manager.clear_checkpoint()
         

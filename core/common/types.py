@@ -8,6 +8,7 @@ import hashlib
 import json
 from types import MappingProxyType
 import math
+import pandas as pd
 
 class CanonicalHasher:
     """
@@ -231,7 +232,6 @@ class CandleArray:
 
     def _calc_ema(self, data: np.ndarray, period: int) -> np.ndarray:
         if len(data) < period: return np.full_like(data, np.nan)
-        import pandas as pd
         s = pd.Series(data)
         out = s.copy()
         out.iloc[:period-1] = np.nan
@@ -240,7 +240,6 @@ class CandleArray:
 
     def _calc_rsi(self, data: np.ndarray, period: int) -> np.ndarray:
         if len(data) < period + 1: return np.full_like(data, np.nan)
-        import pandas as pd
         delta = np.diff(data)
         gain = (delta > 0) * delta
         loss = (delta < 0) * -delta
@@ -271,7 +270,6 @@ class CandleArray:
 
     def _calc_atr(self, period: int) -> np.ndarray:
         if self.limit < period + 1: return np.full(self.limit, np.nan)
-        import pandas as pd
         h, l, cp = self.h[1:], self.l[1:], self.c[:-1]
         tr = np.maximum(h - l, np.maximum(np.abs(h - cp), np.abs(l - cp)))
         
@@ -300,7 +298,6 @@ class CandleArray:
         
         alpha = 1.0 / period
         
-        import pandas as pd
         def wilders_smooth(data_arr):
             s = pd.Series(data_arr)
             mod = s.copy()
@@ -331,6 +328,11 @@ class CandleArray:
 
     def bollinger_bands(self, period: int = 20, std_dev: float = 2.0) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """High-performance vectorized Bollinger Bands (anti-lookahead safe)."""
+        # Institutional Optimize: Check IPC cache for standard settings
+        if period == 20 and std_dev == 2.0:
+            if "bb_upper" in self._indicators and "bb_lower" in self._indicators:
+                return self.get_indicator("bb_upper"), self.get_indicator("bb_lower"), self.get_indicator("bb_mid")
+
         data = self.c  # Use limited view to prevent lookahead bias
         if len(data) < period:
             nan_arr = np.full(len(data), np.nan)
@@ -339,7 +341,6 @@ class CandleArray:
         # Institutional Vectorization (Step 10 Optimization)
         # Using a rolling window via stride_tricks or pandas if available (fallback to cumsum)
         try:
-            import pandas as pd
             series = pd.Series(data)
             sma = series.rolling(window=period).mean().values
             rolling_std = series.rolling(window=period).std(ddof=0).values

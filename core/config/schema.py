@@ -17,6 +17,15 @@ class V5ConfigSchema:
         """Validates and coerces the incoming configuration dictionary."""
         validated = {}
         
+        # Paths
+        paths = config_dict.get("paths", {})
+        validated["paths"] = {
+            "strategy_health_file": str(paths.get("strategy_health_file", "config/strategy_health.json")),
+            "state_db_path": str(paths.get("state_db_path", "config/regime_state_v3.db")),
+            "shadow_fill_audit": str(paths.get("shadow_fill_audit", "logs/shadow_fill_audit.csv")),
+            "crash_report": str(paths.get("crash_report", "logs/crash_report.log"))
+        }
+
         # Risk Governance
         risk = config_dict.get("risk_governance", {})
         validated["risk_governance"] = {

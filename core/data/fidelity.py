@@ -13,38 +13,51 @@ class FidelityEngine:
     """
 
     @staticmethod
-    def calculate_dfs(candles: CandleArray, timeframe: str, prev_dfs: float = 1.0) -> float:
+    def calculate_dfs(candles: CandleArray, timeframe: str, prev_dfs: float = 1.0, window: int = 500) -> float:
         """
         Calculates the composite DFS with Rule 2 (Stability & Smoothing).
+        Optimized for Performance: Uses a rolling window for historical data.
         """
-        if len(candles) < 20:
+        # [ Institutional Performance ]: Use only the last N bars for status checks
+        # Prevents O(N^2) slowdown during long backtests.
+        limit = len(candles)
+        if limit < 20:
             return prev_dfs
+            
+        start_idx = max(0, limit - window)
+        
+        # Slice arrays for localized quality check
+        v_win = candles.v[start_idx:]
+        s_win = candles.s[start_idx:]
+        t_win = candles.t[start_idx:]
         
         # 1. Density Score
-        avg_ticks = np.mean(candles.v)
+        avg_ticks = np.mean(v_win)
         baseline = {"M1": 50, "M5": 200, "M15": 500, "H1": 2000}.get(timeframe, 200)
         density_score = min(1.0, avg_ticks / baseline)
-
+        
         # 2. Stability Score
-        spread_std = np.std(candles.s)
-        spread_mean = np.max([np.mean(candles.s), 1.0])
+        spread_std = np.std(s_win)
+        spread_mean = np.max([np.mean(s_win), 1.0])
         stability_score = max(0.0, 1.0 - (spread_std / spread_mean))
-
+        
         # 3. Gap Score
         tf_seconds = {"M1": 60, "M5": 300, "M15": 900, "H1": 3600, "D1": 86400}.get(timeframe, 300)
-        time_diffs = np.diff(candles.t)
+        time_diffs = np.diff(t_win)
+        if len(time_diffs) == 0: return prev_dfs
+        
         gaps = np.sum(time_diffs > (tf_seconds * 1.1))
-        gap_score = max(0.0, 1.0 - (gaps / len(candles)))
-
+        gap_score = max(0.0, 1.0 - (gaps / len(v_win)))
+        
         # 4. Spread Noise Score
-        spread_diffs = np.diff(candles.s)
+        spread_diffs = np.diff(s_win)
         oscillations = np.sum(np.diff(np.sign(spread_diffs[spread_diffs != 0])) != 0)
-        noise_score = max(0.0, 1.0 - (oscillations / len(candles)))
-
+        noise_score = max(0.0, 1.0 - (oscillations / len(v_win)))
+        
         # 5. Regularity Score
         jitter = np.std(time_diffs % tf_seconds)
         regularity_score = max(0.0, 1.0 - (jitter / 10.0))
-
+        
         # Rule 2.1: Weight Normalization (Σw = 1.0)
         w = {
             "density": 0.2,
@@ -61,14 +74,14 @@ class FidelityEngine:
             w["noise"] * noise_score +
             w["regularity"] * regularity_score
         )
-
+        
         # Rule 2.2: EMA Smoothing (α=0.7) to prevent regime flicker
         alpha = 0.7
         dfs_smooth = alpha * dfs_raw + (1.0 - alpha) * prev_dfs
         
         # Rule 2.2: Hard Stability Constraint (|Δ| < 0.2)
         final_dfs = np.clip(dfs_smooth, prev_dfs - 0.2, prev_dfs + 0.2)
-
+        
         return float(np.clip(final_dfs, 0.0, 1.0))
 
     @staticmethod

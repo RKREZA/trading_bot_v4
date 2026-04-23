@@ -39,41 +39,49 @@ class SessionDetector:
         "GLOBAL": SessionConfig("GLOBAL", 0, 24, 5, 5),
     }
 
+    _DST_CACHE: Dict[Tuple[int, str], Tuple[datetime.datetime, datetime.datetime]] = {}
+
     @staticmethod
     def _is_dst_active(dt: datetime.datetime, region: str = "EU") -> bool:
-        """Determines if DST is active for a region."""
+        """Determines if DST is active for a region. (Cached for Performance)"""
         year = dt.year
+        cache_key = (year, region)
         
-        if region == "EU":
-            march_last = datetime.date(year, 3, 31)
-            while march_last.weekday() != 6:
-                march_last -= datetime.timedelta(days=1)
-            dst_start = datetime.datetime(year, march_last.month, march_last.day, 1, 0, tzinfo=datetime.timezone.utc)
-            
-            oct_last = datetime.date(year, 10, 31)
-            while oct_last.weekday() != 6:
-                oct_last -= datetime.timedelta(days=1)
-            dst_end = datetime.datetime(year, oct_last.month, oct_last.day, 1, 0, tzinfo=datetime.timezone.utc)
-        
-        elif region == "US":
-            march_first = datetime.date(year, 3, 1)
-            sundays = 0
-            d = march_first
-            while sundays < 2:
-                if d.weekday() == 6:
-                    sundays += 1
-                    if sundays == 2:
-                        break
-                d += datetime.timedelta(days=1)
-            dst_start = datetime.datetime(year, d.month, d.day, 7, 0, tzinfo=datetime.timezone.utc)
-            
-            nov_first = datetime.date(year, 11, 1)
-            d = nov_first
-            while d.weekday() != 6:
-                d += datetime.timedelta(days=1)
-            dst_end = datetime.datetime(year, d.month, d.day, 6, 0, tzinfo=datetime.timezone.utc)
+        if cache_key in SessionDetector._DST_CACHE:
+            dst_start, dst_end = SessionDetector._DST_CACHE[cache_key]
         else:
-            return False
+            if region == "EU":
+                march_last = datetime.date(year, 3, 31)
+                while march_last.weekday() != 6:
+                    march_last -= datetime.timedelta(days=1)
+                dst_start = datetime.datetime(year, march_last.month, march_last.day, 1, 0, tzinfo=datetime.timezone.utc)
+                
+                oct_last = datetime.date(year, 10, 31)
+                while oct_last.weekday() != 6:
+                    oct_last -= datetime.timedelta(days=1)
+                dst_end = datetime.datetime(year, oct_last.month, oct_last.day, 1, 0, tzinfo=datetime.timezone.utc)
+            
+            elif region == "US":
+                march_first = datetime.date(year, 3, 1)
+                sundays = 0
+                d = march_first
+                while sundays < 2:
+                    if d.weekday() == 6:
+                        sundays += 1
+                        if sundays == 2:
+                            break
+                    d += datetime.timedelta(days=1)
+                dst_start = datetime.datetime(year, d.month, d.day, 7, 0, tzinfo=datetime.timezone.utc)
+                
+                nov_first = datetime.date(year, 11, 1)
+                d = nov_first
+                while d.weekday() != 6:
+                    d += datetime.timedelta(days=1)
+                dst_end = datetime.datetime(year, d.month, d.day, 6, 0, tzinfo=datetime.timezone.utc)
+            else:
+                return False
+                
+            SessionDetector._DST_CACHE[cache_key] = (dst_start, dst_end)
         
         aware_dt = dt if dt.tzinfo else dt.replace(tzinfo=datetime.timezone.utc)
         return dst_start <= aware_dt < dst_end

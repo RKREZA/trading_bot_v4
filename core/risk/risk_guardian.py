@@ -6,6 +6,7 @@ import numpy as np
 from collections import deque
 from datetime import datetime, date
 from typing import Dict, Any, Optional, Tuple, List
+from ..common.types import VolatilityStatus
 
 class RiskGuardian:
     """

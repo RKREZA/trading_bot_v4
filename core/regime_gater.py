@@ -14,11 +14,29 @@ class RegimeGater:
     # Institutional Regime Contract Mapping (Priority 2)
     # Strategies MUST match these class names exactly to execute under specific regimes
     REGIME_CONTRACT: Dict[MarketRegime, set] = {
-        MarketRegime.TREND: {"TrendFollowing", "TrendFollowingStrategy", "Diagnostic", "LiquiditySession", "PureBreakoutOneMinute"},
-        MarketRegime.RANGE: {"SmartMeanReversion", "RangeBounce", "MeanReversionStrategy", "Diagnostic", "LiquiditySession"},
-        MarketRegime.LIQUIDITY_EVENT: {"LiquiditySweepBreakout", "LiquiditySweepStrategy", "Diagnostic"},
-        MarketRegime.EXPANSION: {"PureBreakoutOneMinute", "TrendFollowing", "TrendFollowingStrategy", "Diagnostic"},
-        MarketRegime.TRANSITION: {"Diagnostic"}  # Only diagnostic tools allowed during transition
+        MarketRegime.TREND: {
+            "TrendFollowing", "TrendFollowingStrategy", "Diagnostic", "LiquiditySession",
+            "PureBreakoutOneMinute", "LiquiditySweepBreakout", "LiquiditySweepBreakoutStrategy"
+        },
+        MarketRegime.RANGE: {
+            "SmartMeanReversion", "SmartMeanReversionStrategy", "RangeBounce",
+            "MeanReversionStrategy", "Diagnostic", "LiquiditySession",
+            "TrendFollowing", "TrendFollowingStrategy",
+            "LiquiditySweepBreakout", "LiquiditySweepBreakoutStrategy"
+        },
+        MarketRegime.LIQUIDITY_EVENT: {
+            "LiquiditySweepBreakout", "LiquiditySweepBreakoutStrategy",
+            "LiquiditySweepStrategy", "TrendFollowing", "TrendFollowingStrategy", "Diagnostic"
+        },
+        MarketRegime.EXPANSION: {
+            "PureBreakoutOneMinute", "TrendFollowing", "TrendFollowingStrategy",
+            "LiquiditySweepBreakout", "LiquiditySweepBreakoutStrategy", "Diagnostic"
+        },
+        MarketRegime.TRANSITION: {
+            "TrendFollowing", "TrendFollowingStrategy",
+            "SmartMeanReversion", "SmartMeanReversionStrategy",
+            "LiquiditySweepBreakout", "LiquiditySweepBreakoutStrategy", "Diagnostic"
+        }
     }
 
     @classmethod
@@ -29,7 +47,7 @@ class RegimeGater:
         """
         # Hard suppression: Do not trade if overall regime confidence is weak
         # Includes volatility-aware confidence buffer (e.g. higher req for LOW vol)
-        required_confidence = 0.55 + cls.get_confidence_buffer(regime_info.volatility)
+        required_confidence = 0.45 + cls.get_confidence_buffer(regime_info.volatility)
         if regime_info.confidence < required_confidence:
             return False
             
@@ -45,14 +63,10 @@ class RegimeGater:
         if is_mean_rev and regime_info.volatility == VolatilityStatus.HIGH:
             return False
             
-        # Hard block TrendFollowing/Breakout during LOW volatility unless it is the EXACT start of an expansion
-        is_trend_strat = "Trend" in strategy_name or "Breakout" in strategy_name
-        if is_trend_strat and regime_info.volatility == VolatilityStatus.LOW and regime_info.market_type != MarketRegime.EXPANSION:
-            return False
+        # Note: LOW volatility hard block removed. SMC strategies can trade
+        # structural entries during consolidation — this is by design.
             
-        # Block active strategies during TRANSITION unless they are diagnostic/specifically designed
-        if regime_info.market_type == MarketRegime.TRANSITION and "Diagnostic" not in strategy_name:
-            return False
+        # TRANSITION regime: allow all strategies included in the contract (already gated above)
             
         return True
 

@@ -28,7 +28,8 @@ class StrategyOrchestrator:
                  position_manager, 
                  notification_manager,
                  broker_clock,
-                 news_filter):
+                 news_filter,
+                 regime_store=None):
         self.runtimes = runtimes
         self.config = config
         self.order_manager = order_manager
@@ -37,6 +38,7 @@ class StrategyOrchestrator:
         self.notification_manager = notification_manager
         self.broker_clock = broker_clock
         self.news_filter = news_filter
+        self.regime_store = regime_store
         
         self.portfolio_manager = PortfolioManager(self.config)
         self.ai_predictor = AIPredictor(self.config)
@@ -119,22 +121,40 @@ class StrategyOrchestrator:
 
         # 1. LOAD: Handled via market_data arrival
         
-        # 2. DETECT REGIME (use cached singleton — no per-cycle instantiation)
-        regime_info = self._regime_detector.detect(market_data)
-        market_type = regime_info.market_type
-        volatility = regime_info.volatility
+        # 2. CANONICAL EXECUTION ANCHORING (v3 Hardening)
+        # timeframe_seconds: default 300 for M5
+        timeframe_seconds = 300 
+        target_tf = self.config.get("backtest", {}).get("timeframe", "M5")
+        if target_tf == "M1": timeframe_seconds = 60
+        elif target_tf == "M15": timeframe_seconds = 900
+        elif target_tf == "H1": timeframe_seconds = 3600
         
-        ts = market_data.timestamp.timestamp()
-        blocking_event = self.news_filter.is_blocked(symbol, ts)
+        ts_val = market_data.timestamp.timestamp()
+        time_bucket = int(ts_val / timeframe_seconds)
+        
+        # Representative Regime for Cycle Telemetry (using GLOBAL ID)
+        global_exec_id = f"GLOBAL:{market_data.session}:{time_bucket}"
+        
+        # If no store, we use a transient memory store as fallback
+        if not self.regime_store:
+            from core.regime_store import MemoryRegimeStore
+            self.regime_store = MemoryRegimeStore()
+            
+        global_state = self.regime_store.load("GLOBAL")
+        pulse_regime_info, _, _ = self._regime_detector.detect(
+            market_data, global_state, global_exec_id, "GLOBAL", is_live=True
+        )
+
+        blocking_event = self.news_filter.is_blocked(symbol, ts_val)
         
         # Pulse Telemetry Initialization
-        upcoming_obj = self.news_filter.get_upcoming_events(ts, 24)
+        upcoming_obj = self.news_filter.get_upcoming_events(ts_val, 24)
         for ev in upcoming_obj:
             # Shift from UTC to Local System Time for Unified UI alignment
             ev['time'] = datetime.fromtimestamp(ev['timestamp'], tz=timezone.utc).astimezone().strftime("%I:%M %p")
             
         pulse_report = {
-            "regime": regime_info,
+            "regime": pulse_regime_info,
             "strategies": {},
             "execution": [],
             "news_blocked": blocking_event,
@@ -151,7 +171,7 @@ class StrategyOrchestrator:
             new_analysis[symbol] = {
                 'bid': market_data.current_price,
                 'ask': market_data.current_price + (symbol_info.get("spread", 0) * symbol_info.get("point", 0)),
-                'atr': regime_info.atr,
+                'atr': pulse_regime_info.atr,
                 'timestamp': time.time()
             }
             self.last_analysis = new_analysis
@@ -176,22 +196,39 @@ class StrategyOrchestrator:
             if not r.strategy.is_symbol_allowed(symbol):
                 continue
             
+            # --- Per-Strategy REGIME DETERMINISM (v3 Spec) ---
+            sid = r.strategy_id
+            exec_id = f"{sid}:{market_data.session}:{time_bucket}"
+            
+            # 1. Load State
+            state = self.regime_store.load(sid)
+            # 2. Detect with State Injection
+            r_regime_info, new_state, trace = self._regime_detector.detect(
+                market_data, state, exec_id, sid, is_live=True
+            )
+            # 3. Persist New State
+            self.regime_store.save(sid, new_state)
+            
             # Diagnostic: Session Gating
             allowed_sessions = r.strategy.config.get("allowed_sessions", [])
             if allowed_sessions and market_data.session not in allowed_sessions:
                 if self.config.get("backtest", {}).get("debug_signals"):
-                    logger.debug(f"[{symbol}] [{r.strategy_id}] Skipped: Session {market_data.session} not in {allowed_sessions}")
+                    logger.debug(f"[{symbol}] [{sid}] Skipped: Session {market_data.session} not in {allowed_sessions}")
                 continue
 
-            if RegimeGater.is_strategy_allowed(r.strategy.__class__.__name__, regime_info):
-                active_runtimes.append(r)
+            if RegimeGater.is_strategy_allowed(r.strategy.__class__.__name__, r_regime_info):
+                # Inject strategy-specific regime into execution context
+                active_runtimes.append((r, r_regime_info))
         
         # 4. GENERATE SIGNALS (Institutional Parallel Execution)
         raw_signals = {}
         import concurrent.futures
         
-        def _execute_runtime(runtime):
+        def _execute_runtime(args):
+            runtime, r_regime_info = args
             sid = runtime.strategy_id
+            # Note: We pass the specific regime_info calculated for this strategy
+            # to accommodate per-strategy state drift.
             sig = runtime.execute_cycle(market_data)
             metrics = runtime.strategy.get_metrics(market_data)
             thresholds = runtime.strategy.get_thresholds()
@@ -229,7 +266,7 @@ class StrategyOrchestrator:
 
         if active_runtimes:
             with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(active_runtimes))) as executor:
-                futures = {executor.submit(_execute_runtime, r): r for r in active_runtimes}
+                futures = {executor.submit(_execute_runtime, args): args[0] for args in active_runtimes}
                 for future in concurrent.futures.as_completed(futures):
                     try:
                         sid, sig, metrics, thresholds = future.result()

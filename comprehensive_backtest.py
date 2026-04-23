@@ -51,7 +51,8 @@ class ComprehensiveBacktestSuite:
                 "initial_balance_per_strategy": 5000.0,
                 "deterministic": True,
                 "random_seed": 42,
-                "utc_offset": 3
+                "utc_offset": 3,
+                "disable_checkpoint": True
             },
             "portfolio_allocations": {
                 "TrendFollowing": 0.45,

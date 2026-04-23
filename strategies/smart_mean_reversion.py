@@ -31,8 +31,8 @@ class SmartMeanReversionStrategy(BaseStrategy):
         
         # ── Institutional Gating ──
         self.va_lookback = strat_config.get("va_lookback", 100)
-        self.adx_max_threshold = strat_config.get("adx_max_threshold", 25.0)
-        self.vol_climax_ratio = strat_config.get("vol_climax_ratio", 1.5)
+        self.adx_max_threshold = strat_config.get("adx_max_threshold", 30.0)
+        self.vol_climax_ratio = strat_config.get("vol_climax_ratio", 1.2)
         self.buffer_atr_mult = 0.2  # Gold Wick-Hunt Protection
         
         # ── State Tracking ──
@@ -194,6 +194,15 @@ class SmartMeanReversionStrategy(BaseStrategy):
                     tp1_price=va["poc"],
                     tp2_price=va["vah"]
                 )
+
+    def get_parameter_grid(self) -> Dict[str, list]:
+        """Institutional grid for WFO optimization."""
+        return {
+            "bb_std": [1.5, 2.0, 2.5],
+            "vol_climax_ratio": [1.2, 1.5, 2.0],
+            "adx_max_threshold": [20.0, 25.0, 30.0]
+        }
+
 
     def get_metrics(self, market_data: MarketData) -> Dict[str, Any]:
         """Returns live Value Area metrics for the institutional dashboard."""

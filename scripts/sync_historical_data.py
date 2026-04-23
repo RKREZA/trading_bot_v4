@@ -51,7 +51,8 @@ def sync_data(symbol: str, days: int = 90):
             continue
 
         df = pd.DataFrame(rates)
-        df['time'] = pd.to_datetime(df['time'], unit='s')
+        # Keep 'time' as integer Unix timestamps (epoch seconds).
+        # CandleArray, FidelityEngine, and RegimeDetector all expect int64, NOT datetime64.
         df['tick_volume'] = df['tick_volume'].astype(float)
         df['spread'] = df['spread'].astype(float)
         

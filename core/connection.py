@@ -538,9 +538,9 @@ class MT5Connection:
                 return {"ticket": result.order, "volume": result.volume, "price": result.price}
 
             # SAFE LOGGING (Audit Fix): Guard against NoneType return in final warning
-            comment = result.comment if result else "TERMINAL_TIMEOUT"
+            fail_comment = result.comment if result else "TERMINAL_TIMEOUT"
             retcode = result.retcode if result else "NO_RESPONSE"
-            logger.warning(f"Order attempt {attempt+1}/{max_retries} failed: retcode={retcode}, comment={comment}")
+            logger.warning(f"Order attempt {attempt+1}/{max_retries} failed: retcode={retcode}, comment={fail_comment}")
             
             if attempt < max_retries - 1:
                 # 10004 REQUOTE, 10006 REJECTED, 10020 PRICE_CHANGED

@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timezone
 from core.common.types import CandleArray
 
 class FeatureEngineer:
@@ -63,7 +63,7 @@ class FeatureEngineer:
 
         # 5. Temporal
         timestamp = candles.time[-1]
-        dt = datetime.utcfromtimestamp(timestamp)
+        dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
         features["hour_of_day"] = dt.hour
         features["day_of_week"] = dt.weekday()
 

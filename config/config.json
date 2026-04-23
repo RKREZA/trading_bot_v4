@@ -4,6 +4,7 @@
   "_audit_date": "2026-04-11",
   "paths": {
     "strategy_health_file": "config/strategy_health.json",
+    "state_db_path": "config/regime_state_v3.db",
     "shadow_fill_audit": "logs/shadow_fill_audit.csv",
     "crash_report": "logs/crash_report.log"
   },
@@ -57,10 +58,11 @@
     "phase1_close_pct": 50,
     "move_to_be_at_partial": true
   },
+  "_old_portfolio_allocations": {"TrendFollowing": 0.50, "LiquiditySweepBreakout": 0.35, "SmartMeanReversion": 0.15},
   "portfolio_allocations": {
-    "TrendFollowing": 0.50,
-    "LiquiditySweepBreakout": 0.35,
-    "SmartMeanReversion": 0.15
+    "TrendFollowing": 0.0,
+    "LiquiditySweepBreakout": 0.0,
+    "SmartMeanReversion": 1.0
   },
   "backtest": {
     "initial_balance_per_strategy": 10000.0,
@@ -69,30 +71,36 @@
   },
   "symbols_config": {},
   "TrendFollowing": {
-    "enabled": true,
+    "enabled": false,
     "max_spread_points": 1000,
-    "adx_threshold": 25,
-    "min_confidence": 0.65,
+    "adx_min_threshold": 18,
+    "min_confidence": 0.60,
     "allowed_sessions": [
       "LONDON",
       "NEW_YORK",
       "LONDON/NY"
     ],
+    "fvg_min_size": 0.3,
+    "displacement_threshold": 0.7,
+    "volume_spike_factor": 1.0,
+    "ic_lookback": 50,
     "sl_atr": 3.0,
     "tp_atr": 6.0,
-    "min_bars_between_signals": 20
+    "min_bars_between_signals": 10
   },
   "LiquiditySweepBreakout": {
-    "enabled": true,
+    "enabled": false,
     "max_spread_points": 1500,
-    "min_confidence": 0.05,
+    "min_confidence": 0.10,
     "min_rr": 1.0,
     "cooldown_seconds": 1800,
-    "max_trades_per_day": 6,
+    "max_trades_per_day": 3,
     "post_sl_cooldown_seconds": 3600,
+    "max_atr_ratio": 2.0,
+    "mss_timeout_bars": 10,
     "max_atr_spike_mult": 5.0,
     "lookback": 20,
-    "rejection_thresh": 0.40,
+    "rejection_thresh": 0.45,
     "adx_trend_threshold": 25.0,
     "session_multipliers": {
       "TOKYO": {
@@ -128,11 +136,11 @@
     "rsi_oversold": 25,
     "sl_atr": 1.5,
     "tp_atr": 4.5,
-    "adx_max_threshold": 25.0,
-    "max_ema_slope": 3.0,
+    "adx_max_threshold": 35.0,
+    "max_ema_slope": 8.0,
     "vol_mult_threshold": 1.25,
     "min_wick_ratio": 0.10,
-    "min_bars_between_signals": 30,
+    "min_bars_between_signals": 20,
     "allowed_sessions": [
       "LONDON",
       "NEW_YORK",

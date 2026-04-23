@@ -80,7 +80,6 @@ class LiveOrchestrator:
         # 2. INSTANTIATE MICRO-SERVICES
         self.data_engine = DataEngine(self.connection, self.config)
         self.news_filter = InstitutionalNewsFilter(self.config)
-        # BUG FIX: Pass self.connection so OrderManager executes LIVE trades!
         self.order_manager = OrderManager(self.config, self.connection)
         
         # 3. CONSTRUCT RUNTIMES
@@ -101,7 +100,12 @@ class LiveOrchestrator:
             except Exception as e:
                 logging.error(f"Failed to instantiate strategy {name}: {str(e)}")
 
-        # 4. INITIALIZE ORCHESTRATOR (Satisfy dependencies)
+        # 4. INITIALIZE REGIME PERSISTENCE (Step 12: Production Hardening)
+        from core.regime_store import SQLiteWALRegimeStore
+        db_path = self.config.get("paths", {}).get("state_db_path", "config/regime_state_v3.db")
+        regime_store = SQLiteWALRegimeStore(db_path)
+
+        # 5. INITIALIZE ORCHESTRATOR (Satisfy dependencies)
         self.orchestrator = StrategyOrchestrator(
             runtimes=self.runtimes,
             config=self.config,
@@ -109,7 +113,8 @@ class LiveOrchestrator:
             position_manager=self.pos_manager,
             notification_manager=TelegramAlerter(), 
             broker_clock=self.connection, 
-            news_filter=self.news_filter
+            news_filter=self.news_filter,
+            regime_store=regime_store
         )
         
         # Initialize trade history for dashboard
@@ -117,7 +122,7 @@ class LiveOrchestrator:
         self._open_trade_keys = set()  # Set of (symbol, direction) for open trades we're tracking
         self._position_tickets = {}  # Map of (symbol, direction) -> ticket for matching
         
-        # 5. INITIALIZE HEALTH SERVER (Production Observability)
+        # 6. INITIALIZE HEALTH SERVER (Production Observability)
         health_port = int(os.getenv("HEALTH_PORT", 8080))
         self.health_server = HealthServer(port=health_port, bot_ref=self)
         
@@ -208,7 +213,7 @@ class LiveOrchestrator:
         if not mismatch:
             self.mismatch_count = 0
             return True
-
+ 
         if immediate:
             logger.critical(f"IMMEDIATE FLATTEN TRIGGERED: {reason}")
             self.emergency_flatten(reason)
@@ -300,8 +305,6 @@ class LiveOrchestrator:
                 sid = runtime.strategy_id
                 base_weight = self.orchestrator.portfolio_manager.get_strategy_allocation(sid, dynamic=False)
                 # Heuristic: If base_weight * account / SL leads to > 0.05, we don't even start.
-                # However, the user specifically asked to block if EXCEEDED.
-                # We will add a runtime check inside the loop for every signal too.
             
             self.system_logs.append(f"[{datetime.now().astimezone().strftime('%H:%M:%S')}] System Initialized. Trading {self.symbol}.")
             
@@ -389,7 +392,7 @@ class LiveOrchestrator:
                         self._update_ui(live, dashboard, status="PAUSED (CLOCK RESYNC)")
                         time.sleep(2)
                         continue
-
+ 
                     # 1. State Reconciliation (Rule 5 & 2)
                     raw_positions = self.pos_manager.get_open_positions()
                     internal_positions = [] # Convert UI format to dict for reconciler
@@ -399,7 +402,7 @@ class LiveOrchestrator:
                     mt5_all = mt5.positions_get() # Actual terminal state
                     if not self._reconcile_state(internal_positions, mt5_all or []):
                         continue
-
+ 
                     # 2. RETRIEVE PROCESSED MARKET STATE (Non-blocking Apex)
                     state = self.data_engine.get_state(self.symbol)
                     
@@ -409,7 +412,7 @@ class LiveOrchestrator:
                         self._update_ui(live, dashboard, status="CALCULATING...", tick=tick)
                         time.sleep(1)
                         continue
-
+ 
                     # 1.5 FETCH ACCOUNT SNAPSHOT (Institutional Pillar 4: Shared Local Ledger)
                     account_snapshot = self.connection.get_account_snapshot()
                     
@@ -417,7 +420,7 @@ class LiveOrchestrator:
                     m15_data = state.m15
                     h1_data = state.h1
                     d1_data = state.d1
-
+ 
                     # 2. Package Market State (Satisfy V4 MarketData contract)
                     sym_info = mt5.symbol_info(self.symbol)
                     sym_point = sym_info.point if sym_info else 0.00001
@@ -437,10 +440,10 @@ class LiveOrchestrator:
                         session=SessionDetector.get_session(dt_server, self.connection.server_utc_offset, symbol=self.symbol),
                         timestamp=dt_server
                     )
-
+ 
                     # 3. Proactive Risk Reduction
                     self.orchestrator.close_before_news(dt_server.timestamp())
-
+ 
                     # 4. Parallel Execution Logic (Zero Latency Vetting)
                     is_news_blocked = self.news_filter.is_blocked(self.symbol, dt_server.timestamp())
                     
@@ -497,7 +500,7 @@ class LiveOrchestrator:
                     # Record Metrics
                     self.health_server.record_cycle()
                     self.health_server.record_signal()
-
+ 
                     # [ Rule 3.3: Dynamic Performance State Update ]
                     # Tracks virtual equity per strategy to drive scaling de-allocation
                     current_equity = account_snapshot.get("equity", 0)
@@ -508,19 +511,19 @@ class LiveOrchestrator:
                             current_equity=current_equity,
                             total_history=self.equity_history
                         )
-
+ 
                     if len(self.analysis_logs) > 50: self.analysis_logs = self.analysis_logs[-50:]
                     if len(self.system_logs) > 50: self.system_logs = self.system_logs[-50:]
                     
                     # AI Auto-Training: Retrain every N cycles
                     if hasattr(self, 'ai_training_data') and len(self.ai_training_data) >= self.ai_train_threshold:
                         self._auto_train_ai()
-
+ 
                     # Final Cycle Update (Pass Live Tick)
                     self._update_ui(live, dashboard, md=md, reg=reg, pulse_report=pulse_report, tick=tick)
                     consecutive_errors = 0  # Reset on successful cycle
                     time.sleep(1)
-
+ 
                 except KeyboardInterrupt:
                     print("\nShutdown requested by user.")
                     break
@@ -542,7 +545,7 @@ class LiveOrchestrator:
                     self.emergency_flatten(f"LOT_VIOLATION: {crve.detail}")
                     self.system_logs.append(f"[{datetime.now().astimezone().strftime('%H:%M:%S')}] [FATAL] {crve.detail}")
                     break
-
+ 
                 except Exception as e:
                     import traceback
                     consecutive_errors += 1
@@ -561,7 +564,7 @@ class LiveOrchestrator:
                             f.write(traceback.format_exc())
                     except Exception as log_err:
                         print(f"FAILED TO WRITE CRASH LOG: {log_err}")
-
+ 
                     self.system_logs.append(f"[{datetime.now().astimezone().strftime('%H:%M:%S')}] [ERROR] {err_msg[:50]} ({consecutive_errors}/{max_consecutive_errors})")
                     print(f"ERROR: {err_msg}") # Direct terminal feedback
                     
@@ -576,7 +579,7 @@ class LiveOrchestrator:
         self.data_engine.stop()
         self.health_server.stop()  # Stop health server
         # Release singleton lock
-        if self._lock_handle:
+        if hasattr(self, '_lock_handle') and self._lock_handle:
             try:
                 msvcrt.locking(self._lock_handle.fileno(), msvcrt.LK_UNLCK, 1)
                 self._lock_handle.close()
@@ -588,7 +591,7 @@ class LiveOrchestrator:
             except:
                 pass
         self.connection.disconnect()
-
+ 
     def _auto_train_ai(self):
         """Auto-train AI model after collecting enough trade data."""
         try:
@@ -618,7 +621,7 @@ class LiveOrchestrator:
             
         except Exception as e:
             logger.error(f"AI auto-train failed: {e}")
-
+ 
     def _update_ui(self, live, dashboard, md=None, reg=None, pulse_report=None, status=None, tick=None):
         """Unified UI state pulser with absolute tick priority."""
         acc = self.connection.get_account_snapshot()
@@ -671,13 +674,13 @@ class LiveOrchestrator:
         else:
             # If no tick yet, we are still waiting for initial data
             tick_lag = 0
-
+ 
         current_equity = ai.equity if ai else 0.0
         if current_equity > 0:
             self.equity_history.append(current_equity)
             if len(self.equity_history) > 200: # Maintain rolling window
                 self.equity_history.pop(0)
-
+ 
         state = {
             "connection": acc,
             "account": acc,
@@ -747,7 +750,6 @@ class LiveOrchestrator:
                     "thresholds": {"allocation": self.config.get("portfolio_allocations", {}).get(runtime.strategy.__class__.__name__, 0)},
                     "fidelity": 0.0
                 }
-                logging.info(f"Debug added runtime: {sid}")
         
         state.update({
             "setups": strategies_data,
@@ -768,16 +770,16 @@ class LiveOrchestrator:
             })
         
         state["positions"] = ui_positions
-
+ 
         # Add system metrics to state
         state["metrics"] = self.health_server.get_metrics()
         
         live.update(dashboard.update(state), refresh=True)
-
+ 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="V5-INSIGNIA Institutional Trading Machine")
     parser.add_argument("--symbol", type=str, default="XAUUSDm")
-    parser.add_argument("--strategies", type=str, default="LiquiditySweepBreakout,RangeBounce")
+    parser.add_argument("--strategies", type=str, default="LiquiditySweepBreakout,TrendFollowing,SmartMeanReversion")
     
     args = parser.parse_args()
     setup_live_logging()

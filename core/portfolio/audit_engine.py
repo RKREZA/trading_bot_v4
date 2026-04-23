@@ -1,5 +1,7 @@
 import math
 import logging
+import os
+import time
 import numpy as np
 from datetime import datetime
 from typing import Dict, Any, List
@@ -100,7 +102,8 @@ class AuditEngine:
         if drag > 1e-10 or micro > 1e-10:
              logger.error(f"AUDIT FAILURE: Positive friction drift (Drag: {drag:.12f}, Micro: {micro:.12f})")
              return False
-             
+
+        return True
     @staticmethod
     def generate_bundle(output_dir: str, 
                         fingerprint: str, 
@@ -170,12 +173,12 @@ class AuditEngine:
 """
         return report
 
-@staticmethod
-def save_audit(report: str, strategy: str):
-    ts = int(time.time())
-    path = f"backtests/audit_logs/{strategy}"
-    os.makedirs(path, exist_ok=True)
-    filename = f"{path}/{ts}_audit.md"
-    with open(filename, "w") as f:
-        f.write(report)
-    return filename
+    @staticmethod
+    def save_audit(report: str, strategy: str):
+        ts = int(time.time())
+        path = f"backtests/audit_logs/{strategy}"
+        os.makedirs(path, exist_ok=True)
+        filename = f"{path}/{ts}_audit.md"
+        with open(filename, "w") as f:
+            f.write(report)
+        return filename
