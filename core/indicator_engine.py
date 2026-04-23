@@ -102,7 +102,21 @@ class IndicatorEngine:
         
         # 5. Price Action & Volume
         features["body_size"] = (df['close'] - df['open']).abs().values
-        features["vol_sma_20"] = df['tick_volume'].rolling(20).mean().values
+        vol_sma = df['tick_volume'].rolling(20).mean()
+        features["vol_sma_20"] = vol_sma.values
+        features["vol_climax"] = (df['tick_volume'] / vol_sma).fillna(1.0).values
+        
+        # 5.5 Session VWAP
+        if 'time' in df.columns:
+            date_col = pd.to_datetime(df['time'], unit='s').dt.date
+            df['typ_price'] = (df['high'] + df['low'] + df['close']) / 3
+            df['vol_typ'] = df['typ_price'] * df['tick_volume']
+            cum_vol = df.groupby(date_col)['tick_volume'].cumsum()
+            cum_vol_typ = df.groupby(date_col)['vol_typ'].cumsum()
+            features["session_vwap"] = (cum_vol_typ / cum_vol).fillna(df['close']).values
+            df.drop(columns=['typ_price', 'vol_typ'], inplace=True)
+        else:
+            features["session_vwap"] = df['close'].values
         
         # 6. Trend Strength (ADX) — Institutional Gating
         # ... (rest of ADX code)

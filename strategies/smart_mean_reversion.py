@@ -30,6 +30,7 @@ class SmartMeanReversionStrategy(BaseStrategy):
         self.min_confidence = float(strat_config.get("min_confidence", self.min_confidence))
         
         # ── Institutional Gating ──
+        self.allowed_sessions = strat_config.get("allowed_sessions", ["TOKYO", "LONDON", "NEW_YORK", "LONDON/NY"])
         self.va_lookback = strat_config.get("va_lookback", 100)
         self.adx_max_threshold = strat_config.get("adx_max_threshold", 30.0)
         self.vol_climax_ratio = strat_config.get("vol_climax_ratio", 1.2)
@@ -127,6 +128,10 @@ class SmartMeanReversionStrategy(BaseStrategy):
     def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
         if not self.is_spread_safe(market_data): return None
         
+        if not SessionDetector.is_session_active(market_data.timestamp, allowed_sessions=self.allowed_sessions):
+            self.last_rejection_reason = "Out of Kill Zone"
+            return None
+            
         m5 = market_data.m5_candles
         if len(m5) < self.va_lookback: return None
         

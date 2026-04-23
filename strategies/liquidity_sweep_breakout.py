@@ -187,6 +187,36 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
             
         return pools
 
+    def _calculate_frvp_poc(self, m5: Any, lookback: int) -> float:
+        """Calculates Fixed Range Volume Profile Point of Control."""
+        if lookback <= 0:
+            lookback = 1
+        if len(m5) < lookback:
+            return m5.close[-1] if len(m5) > 0 else 0.0
+            
+        recent_m5 = m5[-lookback:]
+        if len(recent_m5) == 0:
+            return m5.close[-1] if len(m5) > 0 else 0.0
+            
+        min_p = np.min(recent_m5.low)
+        max_p = np.max(recent_m5.high)
+        
+        if max_p == min_p:
+            return min_p
+            
+        bins = np.linspace(min_p, max_p, num=20)
+        vol_profile = np.zeros(19)
+        
+        typ_prices = (recent_m5.high + recent_m5.low + recent_m5.close) / 3
+        indices = np.digitize(typ_prices, bins) - 1
+        indices = np.clip(indices, 0, 18)
+        
+        for i in range(len(recent_m5)):
+            vol_profile[indices[i]] += recent_m5.tick_volume[i]
+            
+        poc_idx = np.argmax(vol_profile)
+        return (bins[poc_idx] + bins[poc_idx+1]) / 2
+
     def _detect_mss(self, m5: Any, direction: str, sweep_extreme: float) -> Tuple[bool, Optional[float]]:
         """
         Detects Market Structure Shift (MSS) on M5 after a sweep.
@@ -253,6 +283,13 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
         atr = self._get_m15_atr(market_data)
         now_ts = market_data.timestamp.timestamp()
         
+        vwap_vals = m5.get_indicator("session_vwap")
+        vol_climax_vals = m5.get_indicator("vol_climax")
+        current_vwap = vwap_vals[-1] if vwap_vals is not None and len(vwap_vals) > 0 else 0
+        
+        lookback = self._get_dynamic_lookback(market_data)
+        current_poc = self._calculate_frvp_poc(m5, lookback)
+        
         # 2. Daily Cap & Cooldown
         today_str = market_data.timestamp.strftime("%Y-%m-%d")
         if today_str != self._last_trade_date:
@@ -318,6 +355,18 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
             
             # Step 1: Wait for price to close back INSIDE the pool level (Rejection)
             if sweep_type == "BUY" and last_candle.close > self._sweep_data["level"]:
+                if current_vwap > 0 and extreme > current_vwap:
+                    self.last_rejection_reason = "BUY Sweep extreme must be BELOW VWAP"
+                    self._sweep_data = None
+                    return None
+                    
+                if vol_climax_vals is not None and len(vol_climax_vals) > 2:
+                    recent_vol = vol_climax_vals[-self._sweep_bar_count-2:]
+                    if not np.any(recent_vol > 1.5):
+                        self.last_rejection_reason = "No institutional absorption (Volume < 1.5x)"
+                        self._sweep_data = None
+                        return None
+                        
                 # Step 2: Confirm M5 Market Structure Shift (MSS)
                 mss_confirmed, mss_level = self._detect_mss(m5, "BUY", extreme)
                 if mss_confirmed:
@@ -331,8 +380,8 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
                     conf = self._get_confidence_score(sweep_depth, True, True, has_pdh)
                     pool_name = self._sweep_data['pool']
                     
-                    # V6: TP targeting opposing pool
-                    tp_target = self._get_opposing_pool_tp(pools, "BUY", entry_price, atr)
+                    # V6: TP targeting opposing pool or POC
+                    tp_target = self._get_opposing_pool_tp(pools, "BUY", entry_price, atr, current_poc)
                     
                     self._sweep_data = None
                     self._daily_trade_count += 1
@@ -346,6 +395,18 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
                     )
                         
             elif sweep_type == "SELL" and last_candle.close < self._sweep_data["level"]:
+                if current_vwap > 0 and extreme < current_vwap:
+                    self.last_rejection_reason = "SELL Sweep extreme must be ABOVE VWAP"
+                    self._sweep_data = None
+                    return None
+                    
+                if vol_climax_vals is not None and len(vol_climax_vals) > 2:
+                    recent_vol = vol_climax_vals[-self._sweep_bar_count-2:]
+                    if not np.any(recent_vol > 1.5):
+                        self.last_rejection_reason = "No institutional absorption (Volume < 1.5x)"
+                        self._sweep_data = None
+                        return None
+                        
                 mss_confirmed, mss_level = self._detect_mss(m5, "SELL", extreme)
                 if mss_confirmed:
                     entry_price = self._get_fvg_entry(m5, "SELL")
@@ -356,7 +417,7 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
                     conf = self._get_confidence_score(sweep_depth, True, True, has_pdh)
                     pool_name = self._sweep_data['pool']
                     
-                    tp_target = self._get_opposing_pool_tp(pools, "SELL", entry_price, atr)
+                    tp_target = self._get_opposing_pool_tp(pools, "SELL", entry_price, atr, current_poc)
                     
                     self._sweep_data = None
                     self._daily_trade_count += 1
@@ -373,28 +434,26 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
         return None
 
     def _get_opposing_pool_tp(self, pools: Dict[str, float], direction: str,
-                               entry_price: float, atr: float) -> float:
+                               entry_price: float, atr: float, poc: float = 0.0) -> float:
         """
-        V6: TP targets opposing liquidity pool instead of fixed ATR multiple.
-        BUY: Target PDH or STRUCT_H
-        SELL: Target PDL or STRUCT_L
-        Falls back to 2.5x ATR if no pool available.
+        V6: TP targets opposing liquidity pool or POC instead of fixed ATR multiple.
         """
+        targets = [poc] if poc > 0 else []
         if direction == "BUY":
-            targets = []
             for key in ["PDH", "STRUCT_H"]:
                 if key in pools and pools[key] > entry_price:
                     targets.append(pools[key])
+            targets = [t for t in targets if t > entry_price + atr]
             if targets:
-                return min(targets)  # Nearest overhead pool
+                return min(targets)
             return entry_price + (2.5 * atr)
         else:
-            targets = []
             for key in ["PDL", "STRUCT_L"]:
                 if key in pools and pools[key] < entry_price:
                     targets.append(pools[key])
+            targets = [t for t in targets if t < entry_price - atr]
             if targets:
-                return max(targets)  # Nearest below pool
+                return max(targets)
             return entry_price - (2.5 * atr)
 
     # ==================================================================

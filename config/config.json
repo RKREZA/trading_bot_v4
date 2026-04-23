@@ -11,7 +11,7 @@
   "magic_number": 234000,
   "server_utc_offset_override": null,
   "risk_governance": {
-    "risk_per_trade_pct": 0.5,
+    "risk_per_trade_pct": 1.0,
     "max_daily_loss_pct": 10.0,
     "max_drawdown_halt_pct": 30.0,
     "max_consecutive_losses": 10,
@@ -64,9 +64,9 @@
     "SmartMeanReversion": 0.15
   },
   "portfolio_allocations": {
-    "TrendFollowing": 0.0,
-    "LiquiditySweepBreakout": 0.0,
-    "SmartMeanReversion": 1.0
+    "TrendFollowing": 0.34,
+    "LiquiditySweepBreakout": 0.33,
+    "SmartMeanReversion": 0.33
   },
   "backtest": {
     "initial_balance_per_strategy": 10000.0,
@@ -75,11 +75,12 @@
   },
   "symbols_config": {},
   "TrendFollowing": {
-    "enabled": false,
+    "enabled": true,
     "max_spread_points": 1000,
     "adx_min_threshold": 18,
     "min_confidence": 0.60,
     "allowed_sessions": [
+      "TOKYO",
       "LONDON",
       "NEW_YORK",
       "LONDON/NY"
@@ -93,7 +94,7 @@
     "min_bars_between_signals": 10
   },
   "LiquiditySweepBreakout": {
-    "enabled": false,
+    "enabled": true,
     "max_spread_points": 1500,
     "min_confidence": 0.10,
     "min_rr": 1.0,
@@ -146,6 +147,7 @@
     "min_wick_ratio": 0.10,
     "min_bars_between_signals": 20,
     "allowed_sessions": [
+      "TOKYO",
       "LONDON",
       "NEW_YORK",
       "LONDON/NY"
