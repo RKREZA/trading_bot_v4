@@ -58,7 +58,11 @@
     "phase1_close_pct": 50,
     "move_to_be_at_partial": true
   },
-  "_old_portfolio_allocations": {"TrendFollowing": 0.50, "LiquiditySweepBreakout": 0.35, "SmartMeanReversion": 0.15},
+  "_old_portfolio_allocations": {
+    "TrendFollowing": 0.50,
+    "LiquiditySweepBreakout": 0.35,
+    "SmartMeanReversion": 0.15
+  },
   "portfolio_allocations": {
     "TrendFollowing": 0.0,
     "LiquiditySweepBreakout": 0.0,
@@ -152,8 +156,7 @@
     "cache_file": "config/news_cache.json",
     "source_url": "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
     "impact_levels": [
-      "High",
-      "Medium"
+      "High"
     ],
     "buffer_before_min": 30,
     "buffer_after_min": 15,
