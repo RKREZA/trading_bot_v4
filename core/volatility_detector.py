@@ -151,9 +151,13 @@ class VolatilityDetector:
             # Robustness guard: Ensure slices are non-empty
             if len(slice_h) == 0 or len(slice_l) == 0:
                 continue
+            
+            try:
+                day_high = np.max(slice_h)
+                day_low = np.min(slice_l)
+            except ValueError:
+                continue
                 
-            day_high = np.max(slice_h)
-            day_low = np.min(slice_l)
             day_start = closes[i-288]
             
             if day_start > 0:

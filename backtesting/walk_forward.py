@@ -76,10 +76,13 @@ class WalkForwardValidator:
         self._param_history: Dict[str, List] = {}
 
     def run_validation(self, symbol: str, strategies: list, data: dict, 
-                       window_weeks: int = 8, test_weeks: int = 2,
+                       window_weeks: int = 8, test_weeks: int = 2, step_weeks: int = None,
                        min_wfo_ratio: float = 0.60,
                        run_mc: bool = True) -> List[Dict]:
         """Executes rolling walk-forward validation with MC robustness."""
+        if step_weeks is None:
+            step_weeks = test_weeks
+            
         m5 = data.get("M5")
         if not m5:
             return []
@@ -109,14 +112,14 @@ class WalkForwardValidator:
                       for tf, candles in data.items()}
 
             if len(oos_data.get("M5", [])) < 50 or len(oos_data.get("M1", [])) < 10:
-                current_is_start += timedelta(weeks=test_weeks)
+                current_is_start += timedelta(weeks=step_weeks)
                 continue
 
             is_data = {tf: candles[(candles.time >= is_start_ts) & (candles.time < oos_start_ts)]
                       for tf, candles in data.items()}
             
             if len(is_data.get("M5", [])) < 100 or len(is_data.get("M1", [])) < 20:
-                current_is_start += timedelta(weeks=test_weeks)
+                current_is_start += timedelta(weeks=step_weeks)
                 continue
 
             # --- Walk-Forward Grid Search Optimizer ---
@@ -151,7 +154,7 @@ class WalkForwardValidator:
                     f"[WFO] Window {is_end.date()} skipped: OOS has only {oos_trade_count} trades "
                     f"(min={min_oos_trades}). Insufficient for significance."
                 )
-                current_is_start += timedelta(weeks=test_weeks)
+                current_is_start += timedelta(weeks=step_weeks)
                 continue
             
             normalized_is = is_profit / window_weeks
@@ -201,7 +204,7 @@ class WalkForwardValidator:
                     oos_profit=round(oos_profit, 2),
                 )
 
-            current_is_start += timedelta(weeks=test_weeks)
+            current_is_start += timedelta(weeks=step_weeks)
 
         self._results = oos_results
         return self._get_dict_results(oos_results)

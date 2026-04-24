@@ -1,0 +1,10 @@
+{
+  "volume_zscore_threshold": 0.8,
+  "rejection_percentile": 0.25,
+  "sweep_depth_percentile": 0.40,
+  "max_atr_ratio": 3.0,
+  "vwap_filter_enabled": false,
+  "ema_trend_filter": false,
+  "max_trades_per_day": 5,
+  "mss_timeout_bars": 10
+}
