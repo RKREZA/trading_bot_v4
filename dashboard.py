@@ -33,10 +33,9 @@ class TradingDashboard:
         # All functional tiers are set to exact content-height (fitting)
         # The 'vacuum' absorbing everything else to ensure top-pinning
         self.layout.split_column(
-            Layout(name="header", size=4),
-            Layout(name="body", size=24),
-            Layout(name="footer", size=15),
-            Layout(name="vacuum", ratio=1)
+            Layout(name="header", size=3),
+            Layout(name="body", size=12),
+            Layout(name="footer", size=5)
         )
         
         # Footer Synchronization: Row-based horizontal split
@@ -46,13 +45,11 @@ class TradingDashboard:
             Layout(name="footer_calendar", ratio=3)
         )
         
-        # Body Refactor: Tiered Architecture (Precision Vertical Fitting)
-        # Top Row: Fixed height (fitted)
-        # Setups Row: Fixed height (fitted)
+        # Body Refactor: Tiered Architecture
         self.layout["body"].split_column(
-            Layout(name="body_top", size=9),
-            Layout(name="body_middle", size=8),
-            Layout(name="setups", size=5)
+            Layout(name="body_top", size=4),
+            Layout(name="body_middle", size=4),
+            Layout(name="setups", size=4)
         )
         self.layout["body_top"].split_row(
             Layout(name="environment", ratio=5),
@@ -103,7 +100,7 @@ class TradingDashboard:
         price_color = "bright_green" if price > self.prev_price else "bright_red" if price < self.prev_price else "white"
         self.prev_price = price
         
-        heartbeat = "●" if self.pulse_toggle else "○"
+        heartbeat = "[X]" if self.pulse_toggle else "[ ]"
         self.pulse_toggle = not self.pulse_toggle
         
         table = Table.grid(padding=0)
@@ -313,12 +310,12 @@ class TradingDashboard:
         
         # 1. ANALYSIS LOGS (Strategy heartbeats)
         analysis_text = Text()
-        for log in analysis_logs[-5:]:
+        for log in analysis_logs[-2:]:
             analysis_text.append(f"> {log}\n", style="cyan")
             
         # 2. SYSTEM LOGS (Trades, Errors, Environment)
         system_text = Text()
-        for log in system_logs[-5:]:
+        for log in system_logs[-2:]:
             color = "green" if "[TRADE]" in log else "red" if "[ERROR]" in log or "[FATAL]" in log else "white"
             system_text.append(f"> {log}\n", style=color)
             
@@ -337,6 +334,61 @@ class TradingDashboard:
             Panel(news_text, title="Economic Calendar", border_style="magenta")
         )
 
+    def _make_indicators(self, state: dict) -> Panel:
+        rsi = state.get("rsi", 0)
+        atr = state.get("atr", 0)
+        adx = state.get("adx", 0)
+        rsi_color = "red" if rsi > 70 or rsi < 30 else "green"
+        adx_color = "bright_green" if adx > 25 else "yellow"
+        table = Table.grid(padding=0)
+        table.add_column(style="bold cyan", width=12)
+        table.add_column(justify="right", style="bold white")
+        table.add_row("RSI (14)", f"[{rsi_color}]{rsi:.2f}[/]")
+        table.add_row("ATR (14)", f"{atr:.5f}")
+        table.add_row("ADX (14)", f"[{adx_color}]{adx:.2f}[/]")
+        return Panel(table, title="Indicators [M5]", border_style="cyan")
+
+    def _make_account(self, state: dict) -> Panel:
+        acc = state.get("account", {})
+        balance = acc.get("balance", 0)
+        equity = acc.get("equity", 0)
+        margin_level = acc.get("margin_level", 0)
+        table = Table.grid(padding=0)
+        table.add_column(style="bold yellow", width=12)
+        table.add_column(justify="right", style="bold white")
+        table.add_row("Balance", f"${balance:,.2f}")
+        table.add_row("Equity", f"${equity:,.2f}")
+        table.add_row("Margin Lvl", f"{margin_level:.1f}%")
+        return Panel(table, title="Account Health", border_style="yellow")
+
+    def _make_body_bottom(self, state: dict) -> Panel:
+        positions = state.get("detailed_positions", [])
+        if not positions:
+            return Panel(Text("No active positions", style="dim center"), title="Active Positions Tracker", border_style="bright_blue")
+        table = Table(show_header=True, header_style="bold blue", box=box.SIMPLE, expand=True)
+        table.add_column("ID", style="dim")
+        table.add_column("Symbol")
+        table.add_column("Type")
+        table.add_column("Lots", justify="right")
+        table.add_column("Entry", justify="right")
+        table.add_column("Current", justify="right")
+        table.add_column("Pips", justify="right")
+        table.add_column("Profit", justify="right")
+        for pos in positions:
+            pnl_color = "bright_green" if pos['profit'] > 0 else "bright_red"
+            type_color = "cyan" if pos['type'] == "BUY" else "magenta"
+            table.add_row(
+                str(pos['id'])[-6:],
+                pos['symbol'],
+                f"[{type_color}]{pos['type']}[/]",
+                f"{pos['lots']:.2f}",
+                f"{pos['entry']:.5f}",
+                f"{pos['current']:.5f}",
+                f"[{pnl_color}]{pos['pips']:+.1f}[/]",
+                f"[{pnl_color}]${pos['profit']:+.2f}[/]"
+            )
+        return Panel(table, title="Active Positions Tracker", border_style="bright_blue")
+
     def update(self, state: dict) -> Layout:
         """Update Layout with fresh state objects."""
         self.layout["header"].update(self._make_header(state))
@@ -352,9 +404,7 @@ class TradingDashboard:
         self.layout["footer_analysis"].update(f_analysis)
         self.layout["footer_logs"].update(f_logs)
         self.layout["footer_calendar"].update(f_calendar)
-        
-        self.layout["vacuum"].update("")
         return self.layout
 
 def start_dashboard(layout):
-    return Live(layout, auto_refresh=False, screen=True)
+    return Live(layout, auto_refresh=True, refresh_per_second=2, screen=False)

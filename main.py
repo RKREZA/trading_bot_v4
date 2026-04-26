@@ -255,7 +255,7 @@ class LiveOrchestrator:
             try:
                 # Wait for new state with timeout to check stop event
                 state = self.ui_queue.get(timeout=0.5)
-                live.update(dashboard.update(state), refresh=True)
+                dashboard.update(state)
                 self.ui_queue.task_done()
             except queue.Empty:
                 continue
@@ -330,7 +330,7 @@ class LiveOrchestrator:
             [!] Monitoring: Live Portfolio Governance
             ==========================================================
             """
-            print(banner)
+            # print(banner) # Disabled to prevent flickering
             self.system_logs.append(f"[{datetime.now().astimezone().strftime('%H:%M:%S')}] SHADOW RUN CALIBRATION ACTIVE.")
             
             # TRADE PROTOCOL ENFORCEMENT (Rule 5.1 Hard Block)
@@ -382,7 +382,7 @@ class LiveOrchestrator:
                                         raw_config = json.load(f)
                                     break
                                 except json.JSONDecodeError:
-                                    time.sleep(0.1)
+                                    time.sleep(0.2)
                             
                             if raw_config:
                                 # SCHEMA VALIDATION WALL
@@ -564,7 +564,7 @@ class LiveOrchestrator:
                     # Final Cycle Update (Pass Live Tick)
                     self._update_ui(live, dashboard, md=md, reg=reg, pulse_report=pulse_report, tick=tick)
                     consecutive_errors = 0  # Reset on successful cycle
-                    time.sleep(0.1)
+                    time.sleep(0.2)
  
                 except KeyboardInterrupt:
                     print("\nShutdown requested by user.")
@@ -608,7 +608,7 @@ class LiveOrchestrator:
                         print(f"FAILED TO WRITE CRASH LOG: {log_err}")
  
                     self.system_logs.append(f"[{datetime.now().astimezone().strftime('%H:%M:%S')}] [ERROR] {err_msg[:50]} ({consecutive_errors}/{max_consecutive_errors})")
-                    print(f"ERROR: {err_msg}") # Direct terminal feedback
+                    # print(f"ERROR: {err_msg}") # Direct terminal feedback
                     
                     if consecutive_errors >= max_consecutive_errors:
                         self.system_logs.append(f"[{datetime.now().astimezone().strftime('%H:%M:%S')}] [FATAL] Critical failure threshold reached.")
@@ -739,7 +739,10 @@ class LiveOrchestrator:
                 "session": md.session,
                 "timestamp": md.timestamp,
                 "local_time": datetime.now().astimezone().strftime("%d-%b-%Y %I:%M:%S %p %z"),
-                "server_time": self.connection.format_broker_time(md.timestamp)
+                "server_time": self.connection.format_broker_time(md.timestamp.timestamp()),
+                "rsi": md.m5_candles.get_indicator("rsi_14")[-1] if len(md.m5_candles.get_indicator("rsi_14")) > 0 else 0,
+                "atr": md.m5_candles.get_indicator("atr_14")[-1] if len(md.m5_candles.get_indicator("atr_14")) > 0 else 0,
+                "adx": md.m5_candles.get_indicator("adx_14")[-1] if len(md.m5_candles.get_indicator("adx_14")) > 0 else 0
             })
         else:
             # Fallback for early cycles (Waiting for candles)
@@ -784,17 +787,31 @@ class LiveOrchestrator:
         })
         
         # Always update positions for exposure heatmap
-        ui_positions = []
         all_positions = self.pos_manager.get_open_positions()
+        ui_positions = []
+        detailed_positions = []
         for pos in all_positions:
+            # Heatmap format
             ui_positions.append({
                 'symbol': pos.symbol,
                 'type_text': "BUY" if pos.type == 0 else "SELL",
                 'volume': pos.volume,
                 'profit': pos.profit
             })
+            # Detailed table format
+            detailed_positions.append({
+                'id': pos.ticket,
+                'symbol': pos.symbol,
+                'type': "BUY" if pos.type == 0 else "SELL",
+                'lots': pos.volume,
+                'entry': pos.price_open,
+                'current': pos.price_current,
+                'profit': pos.profit,
+                'pips': (pos.price_current - pos.price_open) / (si.point * 10) if pos.type == 0 else (pos.price_open - pos.price_current) / (si.point * 10)
+            })
         
         state["positions"] = ui_positions
+        state["detailed_positions"] = detailed_positions
  
         # Add system metrics to state
         state["metrics"] = self.health_server.get_metrics()

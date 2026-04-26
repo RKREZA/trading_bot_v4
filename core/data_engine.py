@@ -51,7 +51,7 @@ class DataEngine:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         
-        self.update_interval = config.get("performance", {}).get("data_engine_interval", 2.0)
+        self.update_interval = config.get("performance", {}).get("data_engine_interval", 5.0)
         self.symbols = list(config.get("symbols_config", {}).keys())
         if "XAUUSDm" not in self.symbols:
             self.symbols.append("XAUUSDm")
