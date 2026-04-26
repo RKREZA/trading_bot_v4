@@ -132,17 +132,21 @@ class VolatilityDetector:
     
     def _calculate_daily_range_pct(self, m5_candles) -> float:
         """Calculate average daily range as percentage of price."""
+        # Optimization: Only look at the last 30 days of history to prevent O(N^2) slowdown
+        # 30 days * 288 M5 bars/day = 8640 bars
         limit = len(m5_candles)
+        start_idx = max(0, limit - (30 * 288))
+        
+        highs = m5_candles.h[start_idx:]
+        lows = m5_candles.l[start_idx:]
+        closes = m5_candles.c[start_idx:]
+        
+        limit = len(highs)
         if limit < 288:
             return 0.0
         
-        # Use institutional view properties (.h, .l, .c) to obey anti-lookahead limit
-        highs = m5_candles.h
-        lows = m5_candles.l
-        closes = m5_candles.c
-        
         daily_ranges = []
-        # Calculate daily range for each 24h window available in the history
+        # Calculate daily range for each 24h window available in the sliced history
         # i is the end-boundary of the 24h window
         for i in range(288, limit + 1, 288):
             slice_h = highs[i-288:i]

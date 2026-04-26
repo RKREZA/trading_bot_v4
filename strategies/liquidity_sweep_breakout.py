@@ -36,15 +36,17 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
         self.adx_threshold = strat_config.get("adx_threshold", 25.0)
         self.max_trades_per_day = strat_config.get("max_trades_per_day", 3)
         
-        # ── Adaptive thresholds (rolling percentiles) ──
-        self.rejection_percentile = strat_config.get("rejection_percentile", 0.35)
-        self.sweep_depth_percentile = strat_config.get("sweep_depth_percentile", 0.60)
-        self.volume_zscore_threshold = strat_config.get("volume_zscore_threshold", 1.2)
-        self.max_atr_ratio = strat_config.get("max_atr_ratio", 2.5)
-        
-        # ── MSS Refinements ──
+        # ── Adaptive thresholds (Hyper-Relaxed Scalper) ──
+        self.rejection_percentile = strat_config.get("rejection_percentile", 0.90)
+        self.sweep_depth_percentile = strat_config.get("sweep_depth_percentile", 0.10)
+        self.volume_zscore_threshold = strat_config.get("volume_zscore_threshold", -0.5)
         self.mss_timeout_bars = strat_config.get("mss_timeout_bars", 10)
-        self.mss_timeframe = strat_config.get("mss_timeframe", "M5")  # "M5" or "M15"
+        self.daily_trade_limit = strat_config.get("daily_trade_limit", 20)
+        self.max_atr_ratio = strat_config.get("max_atr_ratio", 8.5)
+        
+        # ── MSS Scalper ──
+        self.mss_timeout_bars = strat_config.get("mss_timeout_bars", 5)
+        self.mss_timeframe = strat_config.get("mss_timeframe", "M1")
         self.mss_buffer_pct = strat_config.get("mss_buffer_pct", 0.0) # e.g., 0.001 for 0.1%
         
         # ── VWAP Filter ──
@@ -62,12 +64,13 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
         self.slippage_bps = strat_config.get("slippage_bps", 0.5)
         self.impulse_threshold = strat_config.get("impulse_threshold", 2.5)
         
-        # ── State (persistent) ──
+        # ── State Tracking ──
+        self._last_signal_bar = 0
+        self.min_bars_between_signals = strat_config.get("min_bars_between_signals", 15)
+        self._last_sl_time = 0
         self._daily_trade_count = 0
-        self._last_trade_date = ""
-        self._daily_loss = 0.0
-        self._consecutive_losses = 0
-        self._last_sl_time = 0.0
+        self._last_pool_update_day = -1
+        self._cached_pools = {}
         self._sweep_data: Optional[Dict[str, Any]] = None
         self._sweep_bar_count = 0
         
@@ -77,7 +80,10 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
         self._recent_rejection_ratios = deque(maxlen=200)
         
         # ── Session filter ──
-        self.allowed_sessions = ["TOKYO", "LONDON", "NEW_YORK", "LONDON/NY", "GLOBAL", "ROLLOVER"]
+        self.london_start = strat_config.get("london_start", 7)
+        self.london_end = strat_config.get("london_end", 12)
+        self.cooldown_seconds = strat_config.get("cooldown_seconds", 900)  # 15 mins
+        self._last_trade_time = 0
         
         # ── Load persistent state if exists (for bot restarts) ──
         self.state_file = f"{self.strategy_id}_state.json"
@@ -121,14 +127,16 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
         candle_range = candle.high - candle.low
         if candle_range <= 0:
             return False
+            
         if direction == "BUY":
             wick_ratio = (candle.close - candle.low) / candle_range
         else:
             wick_ratio = (candle.high - candle.close) / candle_range
         
         self._recent_rejection_ratios.append(wick_ratio)
-        thresh = self._get_adaptive_threshold(self._recent_rejection_ratios, self.rejection_percentile, 0.45)
-        return wick_ratio < thresh
+        # Use configurable threshold, default to 0.30 (30% rejection wick)
+        thresh = self.get_strat_config().get("wick_ratio_threshold", 0.30)
+        return wick_ratio >= thresh
 
     # ==================================================================
     # Risk Management
@@ -190,32 +198,64 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
         return ratio > self.max_atr_ratio
 
     def _get_liquidity_pools(self, market_data: MarketData) -> Dict[str, float]:
+        current_day = market_data.timestamp.day
+        if current_day == self._last_pool_update_day and self._cached_pools:
+            return self._cached_pools
+            
         pools = {}
+        # 1. Previous Day High/Low (PDH/PDL)
         if market_data.d1_candles is not None and len(market_data.d1_candles) >= 2:
             pd = market_data.d1_candles[-2]
             pools["PDH"] = pd.high
             pools["PDL"] = pd.low
-        else:
-            m5 = market_data.m5_candles
-            if m5 is not None and len(m5) > 200:
-                current_day_start = datetime(
-                    market_data.timestamp.year, 
-                    market_data.timestamp.month,
-                    market_data.timestamp.day,
-                    tzinfo=timezone.utc
-                ).timestamp()
-                prev_day_start = current_day_start - 86400
-                prev_day_mask = (m5.time >= prev_day_start) & (m5.time < current_day_start)
-                prev_day_bars = m5[prev_day_mask]
-                
-                if prev_day_bars is not None and len(prev_day_bars) > 20:
-                    pools["PDH"] = np.max(prev_day_bars.high)
-                    pools["PDL"] = np.min(prev_day_bars.low)
-
+            
+        # 2. Previous Week High/Low (PWH/PWL)
+        h1 = market_data.htf_candles
+        if h1 is not None and len(h1) >= 121:
+            h_vals = h1.h[:-1] # Exclude current bar
+            l_vals = h1.l[:-1]
+            pools["PWH"] = float(np.max(h_vals[-120:]))
+            pools["PWL"] = float(np.min(l_vals[-120:]))
+            
+        # 3. Dynamic Structural Pools (Recent extremes)
         m15 = market_data.m15_candles
-        if m15 is not None and len(m15) > 50:
-            pools["STRUCT_H"] = np.max(m15.h[-100:])
-            pools["STRUCT_L"] = np.min(m15.l[-100:])
+        if m15 is not None and len(m15) > 51:
+            h_vals_m15 = m15.h[:-1]
+            l_vals_m15 = m15.l[:-1]
+            pools["STRUCT_H"] = np.max(h_vals_m15[-100:])
+            pools["STRUCT_L"] = np.min(l_vals_m15[-100:])
+            
+        # 4. Session Highs/Lows (Institutional Kill Zones)
+        m5 = market_data.m5_candles
+        if m5 is not None and len(m5) > 100:
+            # We look for Tokyo and London extremes in the recent history
+            # This is a bit expensive, so we only do it once per day
+            recent_times = m5.time[-500:]
+            recent_highs = m5.h[-500:]
+            recent_lows = m5.l[-500:]
+            
+            tokyo_h, tokyo_l = -1.0, -1.0
+            london_h, london_l = -1.0, -1.0
+            
+            for i in range(len(recent_times)):
+                dt = datetime.fromtimestamp(recent_times[i], tz=timezone.utc)
+                sess = SessionDetector.get_session(dt)
+                if sess == "TOKYO":
+                    if tokyo_h < 0 or recent_highs[i] > tokyo_h: tokyo_h = recent_highs[i]
+                    if tokyo_l < 0 or recent_lows[i] < tokyo_l: tokyo_l = recent_lows[i]
+                elif sess == "LONDON":
+                    if london_h < 0 or recent_highs[i] > london_h: london_h = recent_highs[i]
+                    if london_l < 0 or recent_lows[i] < london_l: london_l = recent_lows[i]
+            
+            if tokyo_h > 0:
+                pools["TOKYO_H"] = tokyo_h
+                pools["TOKYO_L"] = tokyo_l
+            if london_h > 0:
+                pools["LONDON_H"] = london_h
+                pools["LONDON_L"] = london_l
+
+        self._cached_pools = pools
+        self._last_pool_update_day = current_day
         return pools
 
     def _calculate_ema(self, closes: Any, period: int) -> float:
@@ -336,225 +376,90 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
     # Main Signal Generation
     # ==================================================================
     def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
-        self._market_data_cache = market_data
+        now_ts = market_data.timestamp.timestamp()
+        dt = market_data.timestamp
         
-        if not self.is_spread_safe(market_data):
+        # ── London Scalper Session (The Profitable Window) ──
+        is_london_prime = (dt.hour >= self.london_start and dt.hour < self.london_end)
+        if not is_london_prime:
+            self.last_rejection_reason = "Out of London Prime Session"
             return None
 
-        if not SessionDetector.is_session_active(market_data.timestamp, allowed_sessions=self.allowed_sessions):
-            self.last_rejection_reason = "Out of Kill Zone"
+        # ── High-Freq Cooldown ──
+        if (now_ts - self._last_trade_time) < self.cooldown_seconds:
+            self.last_rejection_reason = "Cooldown Active"
             return None
 
         m5 = market_data.m5_candles
-        if m5 is None or len(m5) < 50:
-            return None
-
         atr = self._get_m15_atr(market_data)
-        now_ts = market_data.timestamp.timestamp()
         
-        vwap_vals = m5.get_indicator("session_vwap")
-        current_vwap = vwap_vals[-1] if vwap_vals is not None and len(vwap_vals) > 0 else 0
-        tick_vol_vals = m5.v if hasattr(m5, 'v') else np.ones(len(m5))
-        current_vol = tick_vol_vals[-1] if len(tick_vol_vals) > 0 else 1.0
-
-        today_str = market_data.timestamp.strftime("%Y-%m-%d")
-        if today_str != self._last_trade_date:
-            self._daily_trade_count = 0
-            self._last_trade_date = today_str
-            self._daily_loss = 0.0
-            self._consecutive_losses = 0
-
-        if self._daily_trade_count >= self.max_trades_per_day:
-            self.last_rejection_reason = f"Daily trade cap reached ({self.max_trades_per_day})"
+        # ── Scalper Trend Filter (EMA 50 on M15) ──
+        m15_ema50 = market_data.m15_candles.ema(50)
+        if len(m15_ema50) < 1 or np.isnan(m15_ema50[-1]): 
+            self.last_rejection_reason = "EMA Warmup"
+            return None
+        trend_dir = 1 if market_data.m15_candles.c[-1] > m15_ema50[-1] else -1
+        
+        # ── Scalper Volume Validation (Above Average) ──
+        vol_vals = m5.v
+        avg_vol = np.mean(vol_vals[-50:]) if len(vol_vals) >= 50 else 0
+        std_vol = np.std(vol_vals[-50:]) if len(vol_vals) >= 50 else 0
+        vol_z = (vol_vals[-1] - avg_vol) / std_vol if std_vol > 0 else 0
+        if vol_z < 0.0:
+            self.last_rejection_reason = f"Vol Below Average ({vol_z:.2f})"
             return None
 
-        if self._daily_loss <= -self.max_daily_risk:
-            self.last_rejection_reason = f"Daily loss limit hit ({self.max_daily_risk*100:.1f}%)"
+        # --- STEP 1: LIQUIDITY DETECTION ---
+        lookback = self.base_lookback 
+        if len(m5) < lookback + 1: 
+            self.last_rejection_reason = "M5 History Inadequate"
             return None
-
-        if self._is_volatility_extreme(market_data):
-            self.last_rejection_reason = "Volatility Extreme"
-            self._sweep_data = None
-            return None
-
-        baseline_atr = self._get_adaptive_threshold(deque([15.0]), 0.5, 15.0) 
-        atr_ratio = atr / baseline_atr if baseline_atr > 0 else 1.0
-        cooldown_seconds = 1800 + int(1800 * (atr_ratio - 1.0))
-        if self._last_sl_time > 0 and (now_ts - self._last_sl_time) < cooldown_seconds:
-            remaining = int(cooldown_seconds - (now_ts - self._last_sl_time))
-            self.last_rejection_reason = f"Post-SL cooldown ({remaining}s)"
-            return None
-
-        pools = self._get_liquidity_pools(market_data)
+        
+        recent_h = m5.h[-lookback-1:-1]
+        recent_l = m5.l[-lookback-1:-1]
+        swing_h = np.max(recent_h)
+        swing_l = np.min(recent_l)
+        
         last_candle = m5[-1]
-
-        if self._sweep_data is None:
-            for pool_name, level in pools.items():
-                if pool_name.endswith("L") and last_candle.low < level:
-                    self._sweep_data = {
-                        "type": "BUY", "extreme": last_candle.low, "pool": pool_name,
-                        "level": level, "ts": now_ts, "has_pdh": pool_name.startswith("PD")
-                    }
-                    self._sweep_bar_count = 0
-                    break
-                elif pool_name.endswith("H") and last_candle.high > level:
-                    self._sweep_data = {
-                        "type": "SELL", "extreme": last_candle.high, "pool": pool_name,
-                        "level": level, "ts": now_ts, "has_pdh": pool_name.startswith("PD")
-                    }
-                    self._sweep_bar_count = 0
-                    break
-
-        if self._sweep_data:
-            self._sweep_bar_count += 1
-            if self._sweep_bar_count > self.mss_timeout_bars:
-                if self._sweep_data.get("rejection_validated", False):
-                    self.last_rejection_reason = "MSS Timeout"
-                self._sweep_data = None
+        
+        # BUY Setup: Sweep of Low + Wick Rejection
+        if last_candle.low < swing_l and last_candle.close > swing_l:
+            if not self._is_valid_rejection(last_candle, "BUY"):
+                self.last_rejection_reason = "Poor Wick Rejection (BUY)"
                 return None
+
+            self._last_trade_time = now_ts
+            risk = abs(last_candle.close - (last_candle.low - 0.2*atr))
+            conf = 0.90 if trend_dir == 1 else 0.70
+            return TradeSignal(
+                direction="BUY",
+                price=last_candle.close,
+                confidence=conf,
+                stop_loss=last_candle.low - 0.2*atr,
+                take_profit=last_candle.close + (risk * 2.5),
+                reasons=["SCALPER_SWEEP_LOW", f"VOL_Z:{vol_z:.1f}", f"TREND:{'ALIGNED' if trend_dir==1 else 'REVERSAL'}", "REJECTION_OK"]
+            )
+
+        # SELL Setup: Sweep of High + Wick Rejection
+        elif last_candle.high > swing_h and last_candle.close < swing_h:
+            if not self._is_valid_rejection(last_candle, "SELL"):
+                self.last_rejection_reason = "Poor Wick Rejection (SELL)"
+                return None
+
+            self._last_trade_time = now_ts
+            risk = abs(last_candle.close - (last_candle.high + 0.2*atr))
+            conf = 0.90 if trend_dir == -1 else 0.70
+            return TradeSignal(
+                direction="SELL",
+                price=last_candle.close,
+                confidence=conf,
+                stop_loss=last_candle.high + 0.2*atr,
+                take_profit=last_candle.close - (risk * 2.5),
+                reasons=["SCALPER_SWEEP_HIGH", f"VOL_Z:{vol_z:.1f}", f"TREND:{'ALIGNED' if trend_dir==-1 else 'REVERSAL'}", "REJECTION_OK"]
+            )
+        else:
+            self.last_rejection_reason = "No Sweep Detected"
             
-            sweep_type = self._sweep_data["type"]
-            extreme = self._sweep_data["extreme"]
-            has_pdh = self._sweep_data.get("has_pdh", False)
-            pool_name = self._sweep_data.get("pool", "UNKNOWN")
-
-            if now_ts - self._sweep_data["ts"] > 7200:
-                self._sweep_data = None
-                return None
-
-            if sweep_type == "BUY":
-                if not self._sweep_data.get("rejection_validated", False):
-                    if last_candle.close > self._sweep_data["level"]:
-                        if self.vwap_filter_enabled and current_vwap > 0 and extreme > current_vwap:
-                            self.last_rejection_reason = "VWAP Check Failed (BUY extreme above VWAP)"
-                            self._sweep_data = None
-                            return None
-
-                        if not self._is_volume_spike(market_data, current_vol):
-                            self.last_rejection_reason = "Insufficient volume spike"
-                            self._sweep_data = None
-                            return None
-                            
-                        if self.ema_trend_filter:
-                            ema = self._calculate_ema(market_data.m15_candles.c, self.ema_period)
-                            if ema > 0 and not (extreme < ema and last_candle.close > ema):
-                                self.last_rejection_reason = "Trend Filter (EMA) failed"
-                                self._sweep_data = None
-                                return None
-
-                        if not self._is_valid_rejection(last_candle, "BUY"):
-                            self.last_rejection_reason = "Poor rejection candle"
-                            self._sweep_data = None
-                            return None
-                            
-                        sweep_depth_atr = abs(extreme - self._sweep_data["level"]) / atr
-                        if not self._is_valid_sweep_depth(sweep_depth_atr):
-                            self.last_rejection_reason = "Sweep depth too shallow"
-                            self._sweep_data = None
-                            return None
-                            
-                        self._sweep_data["rejection_validated"] = True
-                
-                if self._sweep_data.get("rejection_validated", False):
-                    mss_confirmed, _ = self._detect_mss(m5, market_data.m15_candles, "BUY", extreme)
-                    if mss_confirmed:
-                        entry_price = self._get_fvg_entry(m5, "BUY")
-                        if entry_price is None:
-                            entry_price = (last_candle.open + last_candle.close) / 2
-
-                        entry_price = self._apply_slippage(entry_price, "BUY")
-                        lookback = self._get_dynamic_lookback(market_data)
-                        current_poc = self._calculate_frvp_poc(m5, lookback)
-                        tp_target = self._get_opposing_pool_tp(pools, "BUY", entry_price, atr, current_poc)
-                        
-                        sl_buffer = 0.3 * atr
-                        sl_price = extreme - sl_buffer
-
-                        risk_distance = abs(entry_price - sl_price)
-
-                        self._sweep_data = None
-                        self._daily_trade_count += 1
-
-                        signal = TradeSignal(
-                            direction="BUY",
-                            price=entry_price,
-                            confidence=0.75 if has_pdh else 0.65,
-                            reasons=["AMD:MANIPULATION_COMPLETE", "MSS:CONFIRMED",
-                                     f"POOL:{pool_name if 'pool_name' in locals() else 'UNKNOWN'}", f"PROTECT:{extreme}",
-                                     f"TARGET:{tp_target:.2f}", f"RISK:{risk_distance:.2f}"]
-                        )
-                        return signal
-                    else:
-                        self.last_rejection_reason = "Waiting for MSS"
-                        return None
-
-            elif sweep_type == "SELL":
-                if not self._sweep_data.get("rejection_validated", False):
-                    if last_candle.close < self._sweep_data["level"]:
-                        if self.vwap_filter_enabled and current_vwap > 0 and extreme < current_vwap:
-                            self.last_rejection_reason = "VWAP Check Failed (SELL extreme below VWAP)"
-                            self._sweep_data = None
-                            return None
-
-                        if not self._is_volume_spike(market_data, current_vol):
-                            self.last_rejection_reason = "Insufficient volume spike"
-                            self._sweep_data = None
-                            return None
-                            
-                        if self.ema_trend_filter:
-                            ema = self._calculate_ema(market_data.m15_candles.c, self.ema_period)
-                            if ema > 0 and not (extreme > ema and last_candle.close < ema):
-                                self.last_rejection_reason = "Trend Filter (EMA) failed"
-                                self._sweep_data = None
-                                return None
-
-                        if not self._is_valid_rejection(last_candle, "SELL"):
-                            self.last_rejection_reason = "Poor rejection candle"
-                            self._sweep_data = None
-                            return None
-                            
-                        sweep_depth_atr = abs(extreme - self._sweep_data["level"]) / atr
-                        if not self._is_valid_sweep_depth(sweep_depth_atr):
-                            self.last_rejection_reason = "Sweep depth too shallow"
-                            self._sweep_data = None
-                            return None
-                            
-                        self._sweep_data["rejection_validated"] = True
-                        
-                if self._sweep_data.get("rejection_validated", False):
-                    mss_confirmed, _ = self._detect_mss(m5, market_data.m15_candles, "SELL", extreme)
-                    if mss_confirmed:
-                        entry_price = self._get_fvg_entry(m5, "SELL")
-                        if entry_price is None:
-                            entry_price = (last_candle.open + last_candle.close) / 2
-
-                        entry_price = self._apply_slippage(entry_price, "SELL")
-                        lookback = self._get_dynamic_lookback(market_data)
-                        current_poc = self._calculate_frvp_poc(m5, lookback)
-                        tp_target = self._get_opposing_pool_tp(pools, "SELL", entry_price, atr, current_poc)
-                        
-                        sl_buffer = 0.3 * atr
-                        sl_price = extreme + sl_buffer
-
-                        risk_distance = abs(entry_price - sl_price)
-
-                        self._sweep_data = None
-                        self._daily_trade_count += 1
-
-                        signal = TradeSignal(
-                            direction="SELL",
-                            price=entry_price,
-                            confidence=0.75 if has_pdh else 0.65,
-                            reasons=["AMD:MANIPULATION_COMPLETE", "MSS:CONFIRMED",
-                                     f"POOL:{pool_name if 'pool_name' in locals() else 'UNKNOWN'}", f"PROTECT:{extreme}",
-                                     f"TARGET:{tp_target:.2f}", f"RISK:{risk_distance:.2f}"]
-                        )
-                        return signal
-                    else:
-                        self.last_rejection_reason = "Waiting for MSS"
-                        return None
-
-        self.last_rejection_reason = "No AMD Setup found"
         return None
 
     # ==================================================================
@@ -664,15 +569,11 @@ class LiquiditySweepBreakoutStrategy(BaseStrategy):
         range_data = self._get_range_structure(market_data, lookback)
         r_size = range_data.get("size", 0) / atr if atr > 0 else 0
         
-        pools = self._get_liquidity_pools(market_data)
-        pool_info = ", ".join([f"{k}:{v:.0f}" for k, v in pools.items()])
-        
         return {
             "Regime": f"{'TREND' if adx >= self.adx_threshold else 'RANGE'} ({adx:.1f})",
             "Impulse": f"{impulse:.2f}",
             "Range": f"{r_size:.1f}x ATR",
             "Daily": f"{self._daily_trade_count}/{self.max_trades_per_day}",
-            "Pools": pool_info[:50],
             "ConsecLoss": self._consecutive_losses
         }
 

@@ -38,12 +38,12 @@ class TrendFollowingStrategy(BaseStrategy):
         # SMC / WFO Exposed Parameters (V6 Hardened Values)
         self.fvg_min_size_atr = float(strat_config.get("fvg_min_size", 0.3))       # Reduced from 0.5
         self.poc_window = int(strat_config.get("poc_window", 100))
-        self.displacement_threshold = float(strat_config.get("displacement_threshold", 0.7))  # Reduced from 1.0
-        self.volume_spike_factor = float(strat_config.get("volume_spike_factor", 1.0))  # Reduced from 1.2
-        self.ic_lookback = int(strat_config.get("ic_lookback", 50))       # Increased from 40
+        self.displacement_threshold = float(strat_config.get("displacement_threshold", 0.9))  # Catch real institutional moves
+        self.volume_spike_factor = float(strat_config.get("volume_spike_factor", 1.5))  # Demand high-quality volume
+        self.ic_lookback = int(strat_config.get("ic_lookback", 20))       
         
-        self.min_confidence = float(strat_config.get("min_confidence", 0.60))  # Lowered from 0.65
-        self.adx_min_threshold = float(strat_config.get("adx_min_threshold", 18.0))  # Lowered from 25.0
+        self.min_confidence = float(strat_config.get("min_confidence", 0.70))  
+        self.adx_min_threshold = float(strat_config.get("adx_min_threshold", 25.0))  # High-quality trends only
         self.min_bars_between_signals = int(strat_config.get("min_bars_between_signals", 10))  # Reduced from 20
         self._last_signal_bar = 0
 
@@ -255,30 +255,22 @@ class TrendFollowingStrategy(BaseStrategy):
         signal_dir = "BUY" if ic_type == 1 else "SELL"
 
         # 9. SL/TP using Swing Structure + ATR
-        min_rr = self.config.get("risk_governance", {}).get("min_rr", 1.1)
+        min_rr = 3.0
         swing_highs, swing_lows = self._get_swings(recent_h, recent_l, window=5)
         
         origin_low = l[valid_ic_idx]
         origin_high = h[valid_ic_idx]
         
         if signal_dir == "BUY":
-            # SL: Below IC low with ATR buffer
-            sl = origin_low - (current_atr * 0.3)
-            if swing_lows:
-                nearest_sl = min([s for s in swing_lows if s < current_price], default=sl)
-                sl = min(sl, nearest_sl - (current_atr * 0.15))
-            
-            # TP: Nearest swing high or 3x ATR projection
-            above_swings = [sh for sh in swing_highs if sh > current_price]
-            tp = max(above_swings) if above_swings else current_price + (current_atr * 3.5)
+            # SL: Structural (1.5 ATR)
+            sl = origin_low - (current_atr * 1.5)
+            risk = abs(current_price - sl)
+            # TP: Reliable 1:2 RR for TrendFollowing
+            tp = current_price + (risk * 2.0) 
         else:
-            sl = origin_high + (current_atr * 0.3)
-            if swing_highs:
-                nearest_sh = max([s for s in swing_highs if s > current_price], default=sl)
-                sl = max(sl, nearest_sh + (current_atr * 0.15))
-                
-            below_swings = [sl_ for sl_ in swing_lows if sl_ < current_price]
-            tp = min(below_swings) if below_swings else current_price - (current_atr * 3.5)
+            sl = origin_high + (current_atr * 1.5)
+            risk = abs(current_price - sl)
+            tp = current_price - (risk * 2.0)
 
         # R:R Safety Check
         risk = abs(current_price - sl)

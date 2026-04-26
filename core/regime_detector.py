@@ -34,6 +34,7 @@ class RegimeInfo:
     confidence: float
     adx: float
     atr: float
+    session: str = "UNKNOWN"
     trace: RegimeTrace = field(default=None)
 
 def reduce_state(state: RegimeState, regime: MarketRegime, direction: int, execution_id: str, session: str, bar_index: int) -> RegimeState:
@@ -122,7 +123,7 @@ class RegimeDetector:
                 f"(need adx>=20, atr>=100, htf>=50)"
             )
             trace = RegimeTrace(MarketRegime.TRANSITION.value, 0.0, {}, {}, decision_path, execution_id)
-            return RegimeInfo(MarketRegime.TRANSITION, VolatilityStatus.NORMAL, 0.0, 0.0, 0.0, trace=trace), state, trace
+            return RegimeInfo(MarketRegime.TRANSITION, VolatilityStatus.NORMAL, 0.0, 0.0, 0.0, session=market_data.session, trace=trace), state, trace
 
         # --- STEP 2: VOLATILITY SHOCK FILTER ---
         atr = atr_series[-1]
@@ -134,7 +135,7 @@ class RegimeDetector:
             # Explicitly return reset state
             new_state = RegimeState(last_session=market_data.session, last_reset_ts=time.time())
             trace = RegimeTrace(MarketRegime.TRANSITION.value, 1.0, {"vol": vol_ratio}, {}, decision_path, execution_id)
-            return RegimeInfo(MarketRegime.TRANSITION, VolatilityStatus.HIGH if vol_ratio > 3.0 else VolatilityStatus.LOW, 0.01, adx_series[-1], atr, trace=trace), new_state, trace
+            return RegimeInfo(MarketRegime.TRANSITION, VolatilityStatus.HIGH if vol_ratio > 3.0 else VolatilityStatus.LOW, 0.01, adx_series[-1], atr, session=market_data.session, trace=trace), new_state, trace
 
         # --- STEP 3: FEATURE CACHE (SINGLE PASS) ---
         current_close = m5_candles.c[-1]
@@ -251,4 +252,4 @@ class RegimeDetector:
             execution_id=execution_id
         )
 
-        return RegimeInfo(market_regime, vol_status, confidence, adx, atr, trace=trace), new_state, trace
+        return RegimeInfo(market_regime, vol_status, confidence, adx, atr, session=market_data.session, trace=trace), new_state, trace

@@ -697,8 +697,8 @@ class PortfolioBacktester:
                     profit_price = (current_price - entry) if direction == "BUY" else (entry - current_price)
                     current_rr = profit_price / initial_risk_price
                     
-                    # [ Institutional Scale-Hardening ]: TP1 @ 1.5R (Partial Exit + Break-Even)
-                    if current_rr >= 1.5 and not trade.get("tp1_hit", False):
+                    # [ Institutional Scale-Hardening ]: TP1 @ 1.2R (Partial Exit + Break-Even)
+                    if current_rr >= 1.2 and not trade.get("tp1_hit", False):
                         partial_lots = trade["lots"] * 0.5
                         
                         # Realize 50% profit immediately
@@ -719,7 +719,7 @@ class PortfolioBacktester:
                         be_buffer = 1.0 * point
                         trade["sl"] = entry + be_buffer if direction == "BUY" else entry - be_buffer
                         
-                        logger.info(f"[{m1_candles.time[m]}] [{sid}] PARTIAL EXIT: 50% @ 1.5R (Locked BE)")
+                        logger.info(f"[{m1_candles.time[m]}] [{sid}] PARTIAL EXIT: 50% @ 1.2R (Locked BE)")
 
                     # Phase 2: ATR-based Trailing (at 3R+)
                     if current_rr >= 3.0 and atr_val > 0:

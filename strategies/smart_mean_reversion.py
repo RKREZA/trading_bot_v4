@@ -21,7 +21,7 @@ class SmartMeanReversionStrategy(BaseStrategy):
         
         self.bb_period = strat_config.get("bb_period", 20)
         self.bb_std = strat_config.get("bb_std", 2.0)
-        self.rsi_period = strat_config.get("rsi_period", 14)
+        self.rsi_period = strat_config.get("rsi_period", 21)
         self.rsi_overbought = strat_config.get("rsi_overbought", 75)
         self.rsi_oversold = strat_config.get("rsi_oversold", 25)
         
@@ -31,15 +31,15 @@ class SmartMeanReversionStrategy(BaseStrategy):
         
         # ── Institutional Gating ──
         self.allowed_sessions = strat_config.get("allowed_sessions", ["TOKYO", "LONDON", "NEW_YORK", "LONDON/NY"])
-        self.va_lookback = strat_config.get("va_lookback", 100)
-        self.adx_max_threshold = strat_config.get("adx_max_threshold", 30.0)
+        self.va_lookback = strat_config.get("va_lookback", 200)
+        self.adx_max_threshold = strat_config.get("adx_max_threshold", 35.0)
         self.vol_climax_ratio = strat_config.get("vol_climax_ratio", 1.2)
         self.buffer_atr_mult = 0.2  # Gold Wick-Hunt Protection
         
         # ── State Tracking ──
         self._last_signal_bar = 0
         self.min_bars_between_signals = strat_config.get("min_bars_between_signals", 15)
-        self.max_ema_slope = strat_config.get("max_ema_slope", 5.0) # Pips per bar on H1 (Safety Gate)
+        self.max_ema_slope = strat_config.get("max_ema_slope", 10.0) # Pips per bar on H1 (Safety Gate)
 
 
     def _calculate_value_area(self, prices: np.ndarray, volumes: np.ndarray, bins: int = 50) -> Dict[str, float]:
@@ -175,28 +175,46 @@ class SmartMeanReversionStrategy(BaseStrategy):
         if direction:
             # Check for Rejection Candle (Closing back toward Value)
             last = m5[-1]
+            target_price = va["poc"]
+            
             if direction == "SELL" and last.close < last.high:
+                sl_price = va["vah"] + (0.8 * atr)
+                risk = sl_price - current_price
+                reward = current_price - target_price
+                
+                if risk <= 0 or (reward / risk) < 1.5:
+                    self.last_rejection_reason = f"Poor RR ({reward/risk:.2f} if risk > 0 else 'Invalid')"
+                    return None
+                    
                 self._last_signal_bar = len(m5)
                 return TradeSignal(
                     direction="SELL",
                     price=current_price,
                     confidence=0.80,
                     reasons=["VBP:VAH_EXTENSION", "VOL:CLIMAX", f"POC:{va['poc']:.2f}"],
-                    stop_loss=va["vah"] + (0.8 * atr),
-                    take_profit=va["poc"], # Main Target
-                    tp1_price=va["poc"],
+                    stop_loss=sl_price,
+                    take_profit=target_price, # Main Target
+                    tp1_price=target_price,
                     tp2_price=va["val"]   # Full Rotation Target
                 )
             elif direction == "BUY" and last.close > last.low:
+                sl_price = va["val"] - (0.8 * atr)
+                risk = current_price - sl_price
+                reward = target_price - current_price
+                
+                if risk <= 0 or (reward / risk) < 1.5:
+                    self.last_rejection_reason = f"Poor RR ({reward/risk:.2f} if risk > 0 else 'Invalid')"
+                    return None
+                    
                 self._last_signal_bar = len(m5)
                 return TradeSignal(
                     direction="BUY",
                     price=current_price,
                     confidence=0.80,
                     reasons=["VBP:VAL_EXTENSION", "VOL:CLIMAX", f"POC:{va['poc']:.2f}"],
-                    stop_loss=va["val"] - (0.8 * atr),
-                    take_profit=va["poc"],
-                    tp1_price=va["poc"],
+                    stop_loss=sl_price,
+                    take_profit=target_price,
+                    tp1_price=target_price,
                     tp2_price=va["vah"]
                 )
 

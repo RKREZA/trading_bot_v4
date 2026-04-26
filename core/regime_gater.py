@@ -15,27 +15,19 @@ class RegimeGater:
     # Strategies MUST match these class names exactly to execute under specific regimes
     REGIME_CONTRACT: Dict[MarketRegime, set] = {
         MarketRegime.TREND: {
-            "TrendFollowing", "TrendFollowingStrategy", "Diagnostic", "LiquiditySession",
-            "PureBreakoutOneMinute", "LiquiditySweepBreakout", "LiquiditySweepBreakoutStrategy"
+            "LiquiditySweepBreakout", "LiquiditySweepBreakoutStrategy"
         },
         MarketRegime.RANGE: {
-            "SmartMeanReversion", "SmartMeanReversionStrategy", "RangeBounce",
-            "MeanReversionStrategy", "Diagnostic", "LiquiditySession",
-            "TrendFollowing", "TrendFollowingStrategy",
             "LiquiditySweepBreakout", "LiquiditySweepBreakoutStrategy"
         },
         MarketRegime.LIQUIDITY_EVENT: {
-            "LiquiditySweepBreakout", "LiquiditySweepBreakoutStrategy",
-            "LiquiditySweepStrategy", "TrendFollowing", "TrendFollowingStrategy", "Diagnostic"
+            "LiquiditySweepBreakout", "LiquiditySweepBreakoutStrategy"
         },
         MarketRegime.EXPANSION: {
-            "PureBreakoutOneMinute", "TrendFollowing", "TrendFollowingStrategy",
-            "LiquiditySweepBreakout", "LiquiditySweepBreakoutStrategy", "Diagnostic"
+            "LiquiditySweepBreakout", "LiquiditySweepBreakoutStrategy"
         },
         MarketRegime.TRANSITION: {
-            "TrendFollowing", "TrendFollowingStrategy",
-            "SmartMeanReversion", "SmartMeanReversionStrategy",
-            "LiquiditySweepBreakout", "LiquiditySweepBreakoutStrategy", "Diagnostic"
+            "LiquiditySweepBreakout", "LiquiditySweepBreakoutStrategy"
         }
     }
 
@@ -61,6 +53,10 @@ class RegimeGater:
         # Hard block MeanReversion during HIGH volatility regardless of ADX
         is_mean_rev = "MeanReversion" in strategy_name or "SmartMeanReversion" in strategy_name
         if is_mean_rev and regime_info.volatility == VolatilityStatus.HIGH:
+            return False
+            
+        # [NEW] Session-Regime Hybrid Gate: Forbid TrendFollowing in high-vol overlap
+        if strategy_name.startswith("TrendFollowing") and regime_info.session == "LONDON/NY":
             return False
             
         # Note: LOW volatility hard block removed. SMC strategies can trade

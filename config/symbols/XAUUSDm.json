@@ -31,21 +31,13 @@
     },
     "LiquiditySweepBreakout": {
       "enabled": true,
-      "lookback": 20,
-      "rejection_thresh": 0.7,
+      "lookback": 120,
+      "wick_ratio_threshold": 0.3,
       "adx_threshold": 20,
-      "sweep_depth_mult": 0.1,
+      "london_start": 7,
+      "london_end": 12,
       "max_trades_per_day": 5,
-      "cooldown_seconds": 3600,
-      "use_retracement_entry": true,
-      "allowed_sessions": [
-        "TOKYO",
-        "LONDON",
-        "NEW_YORK",
-        "LONDON/NY",
-        "GLOBAL",
-        "ROLLOVER"
-      ]
+      "cooldown_seconds": 900
     },
     "SmartMeanReversion": {
       "enabled": true,

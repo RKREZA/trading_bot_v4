@@ -1,4 +1,5 @@
 import os
+import time
 import pandas as pd
 import pyarrow
 import pyarrow.parquet
@@ -48,10 +49,20 @@ class ParquetStore:
             
             df.to_parquet(temp_path, engine="pyarrow", index=False)
             
-            # Atomic swap on Windows
-            if os.path.exists(path):
-                os.remove(path)
-            os.rename(temp_path, path)
+            # Atomic swap on Windows with retry logic
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    if os.path.exists(path):
+                        os.replace(temp_path, path)
+                    else:
+                        os.rename(temp_path, path)
+                    break
+                except PermissionError:
+                    if attempt == max_retries - 1:
+                        raise
+                    logger.warning(f"File {path} in use, retrying ({attempt+1}/{max_retries})...")
+                    time.sleep(0.5)
             
             logger.debug(f"Saved {len(df)} candles for {symbol} {timeframe} to {path}")
             

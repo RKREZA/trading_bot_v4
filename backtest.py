@@ -110,14 +110,11 @@ class BacktestCLI:
         # Find how many H1 bars exist before m5_start_ts
         h1_idx_for_m5_start = np.searchsorted(h1.time, m5_start_ts, side='left')
         
-        # We need at least 500 H1 bars for warmup
-        warmup_needed = 500
-        if h1_idx_for_m5_start < warmup_needed:
-            # Need to extend H1 backward by getting more historical data
-            h1_warmup_idx = max(0, warmup_needed - h1_idx_for_m5_start)
-            if h1_warmup_idx > 0 and h1_warmup_idx < len(h1):
-                h1 = h1[h1_warmup_idx:]
-                rprint(f"[cyan]H1 warmup extended: Added {h1_warmup_idx} historical bars for strategy lookback.[/]")
+        # We need at least 500 H1 bars for warmup. 
+        # The slice returned by prepare_data already includes a buffer.
+        # We should NOT slice it further unless we have too much.
+        if h1_idx_for_m5_start < 200:
+            rprint(f"[yellow]Warning: Only {h1_idx_for_m5_start} H1 bars available for warmup. Some indicators may be unstable at start.[/]")
         
         # Now cap H1 to to_ts after warmup is applied
         h1 = h1[h1.time < to_ts]
