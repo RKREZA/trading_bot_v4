@@ -14,7 +14,7 @@ class FeatureEngineer:
     """
 
     @staticmethod
-    def extract_features(candles: CandleArray, signal_direction: str, current_sl_pips: float) -> dict:
+    def extract_features(candles: CandleArray, signal_direction: str, current_sl_pips: float, news_events: list = None) -> dict:
         """
         Calculates standard ML features.
         """
@@ -102,5 +102,26 @@ class FeatureEngineer:
                 features[f"body_ratio_lag_{lag}"] = 0
                 features[f"trend_dir_lag_{lag}"] = 0
                 features[f"size_ratio_lag_{lag}"] = 0
+
+        # 10. News Proximity & Impact Features (Institutional V6-News Additions)
+        features["news_dist_min"] = 9999.0
+        features["news_impact_score"] = 0.0
+        
+        if news_events:
+            current_time = candles.time[-1]
+            for event in news_events:
+                # Time distance in minutes
+                dist = (event["timestamp"] - current_time) / 60.0
+                
+                # Only care about imminent or very recent news (within 2 hours)
+                if abs(dist) < 120:
+                    if abs(dist) < abs(features["news_dist_min"]):
+                        features["news_dist_min"] = dist
+                        # Score: High Impact = 3, plus keywords
+                        title = event.get("title", "").lower()
+                        score = 3.0 if event.get("impact") == "High" else 2.0
+                        if any(t in title for t in ["rate", "fed", "ecb", "employment", "gdp", "cpi"]):
+                            score += 1.0
+                        features["news_impact_score"] = score
 
         return features

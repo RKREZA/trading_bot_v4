@@ -176,7 +176,7 @@ class StrategyOrchestrator:
             }
             self.last_analysis = new_analysis
 
-        # Hard Block Check
+        # Hard Block Check: Skip if blocked by news
         if blocking_event or is_news_blocked:
             logger.info(f"Cycle Skip: {symbol} is blocked by news ({blocking_event})")
             return pulse_report

@@ -43,9 +43,17 @@ class AIPredictor:
             
         try:
             # 1. Feature Map Extraction
-            features = FeatureEngineer.extract_features(candles, base_signal.direction, current_sl_pips)
+            features = FeatureEngineer.extract_features(candles, base_signal.direction, current_sl_pips, news_events=news_events)
             if not features:
                 return FilteredSignal(original=base_signal, approved=True, confidence=0.5, comment="FEATURE_ERR")
+
+            # 1.1 Institutional Gating: News Avoidance Mode
+            # If enabled, proactively block any signal within 2 hours of High-Impact news.
+            if self.config.get("mode") == "news_avoidance":
+                is_dangerous_news = abs(features.get("news_dist_min", 9999)) <= 120
+                if is_dangerous_news:
+                    logger.warning(f"[AI] News Avoidance: Blocking trade due to imminent/recent news ({features.get('news_dist_min')}m).")
+                    return FilteredSignal(original=base_signal, approved=False, confidence=0.0, comment="NEWS_AVOIDANCE_VETO")
                 
             # 1.5 Drift Tracking & Auto-Killswitch 
             self.drift_layer.push_features(features)

@@ -27,15 +27,15 @@
   },
   "ai_layer": {
     "enabled": true,
-    "mode": "filter",
-    "confidence_threshold": 0.20,
+    "mode": "news_avoidance",
+    "confidence_threshold": 0.40,
     "regime_detection": true,
     "dynamic_risk_adjustment": true,
     "drift_multiplier": 0.5,
     "sentiment_vetting": {
-      "enabled": false,
+      "enabled": true,
       "model": "meta/llama-3.3-70b-instruct",
-      "mode": "advisory"
+      "mode": "vetting"
     }
   },
   "volatility_adaptive": {

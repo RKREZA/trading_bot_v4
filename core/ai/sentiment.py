@@ -20,7 +20,7 @@ class SentimentVetter:
         self.api_key = os.getenv("NVIDIA_API_KEY")
         self.model = self.config.get("model", "meta/llama3-70b-instruct")
         self.endpoint = "https://integrate.api.nvidia.com/v1/chat/completions"
-        self.strict_mode = self.config.get("mode", "advisory") == "strict"
+        self.strict_mode = self.config.get("mode", "advisory") in ["strict", "vetting"]
         
     def vet_signal(self, symbol: str, direction: str, news_events: list) -> dict:
         """
