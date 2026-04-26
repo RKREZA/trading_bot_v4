@@ -209,7 +209,8 @@ class RiskGuardian:
         # Apply Institutional Exposure-Based Ceiling (Phase 2 Refactor)
         # Instead of regime confidence, we use a global safety cap based on current account drawdown.
         # Max cap is the configured _phase1_lot_ceiling, but it degrades as DD increases.
-        base_ceiling = float(self.config.get("risk_governance", {}).get("phase1_lot_ceiling", 2.0))
+        base_ceiling = float(self.config.get("execution", {}).get("phase1_lot_ceiling", 
+                            self.config.get("risk_governance", {}).get("phase1_lot_ceiling", 50.0)))
         eval_equity = self.current_portfolio_equity if self.current_portfolio_equity > 0 else balance
         if self.max_equity > eval_equity:
             drawdown = ((self.max_equity - eval_equity) / self.max_equity) * 100

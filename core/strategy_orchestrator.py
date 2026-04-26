@@ -53,10 +53,9 @@ class StrategyOrchestrator:
         # correct initial risk calculation even after SL has been moved to break-even.
         self._original_sl: Dict[int, float] = {}
 
-        # Phase 1 Safety Ceiling: maximum lot size allowed during live deployment.
-        # This is an institutional hard-cap, NOT a replacement for risk-based sizing.
+        # Phase 2: Professional Execution Ceiling
         self._phase1_lot_ceiling = float(
-            self.config.get("execution", {}).get("phase1_lot_ceiling", 0.05)
+            self.config.get("execution", {}).get("phase1_lot_ceiling", 50.0)
         )
 
         # Singleton RegimeDetector — avoids re-instantiating on every cycle.

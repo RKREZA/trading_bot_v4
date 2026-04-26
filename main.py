@@ -285,16 +285,16 @@ class LiveOrchestrator:
             # --- PHASE 1 forensic BANNER ---
             banner = """
             ==========================================================
-            [!] PHASE 1: SHADOW RUN CALIBRATION ACTIVE
-            [!] Hard-Block: Volume > 0.05 lots
-            [!] Monitoring: Slippage Drift, Latency, Execution Regime
+            [!] PHASE 2: INSTITUTIONAL EXECUTION ACTIVE
+            [!] Dynamic Risk: Enabled (per config)
+            [!] Monitoring: Live Portfolio Governance
             ==========================================================
             """
             print(banner)
             self.system_logs.append(f"[{datetime.now().astimezone().strftime('%H:%M:%S')}] SHADOW RUN CALIBRATION ACTIVE.")
             
             # TRADE PROTOCOL ENFORCEMENT (Rule 5.1 Hard Block)
-            max_p1_lot = 0.05
+            # Dynamic Sizing Enabled
             for runtime in self.runtimes:
                 # We check the default initial volume from config or base strategy
                 # Note: Real dynamic lots are checked during execute_cycle, 
@@ -736,10 +736,11 @@ class LiveOrchestrator:
         if not strategies_data and self.runtimes:
             for runtime in self.runtimes:
                 sid = runtime.strategy_id
+                allocation = self.orchestrator.portfolio_manager.get_strategy_allocation(sid, dynamic=False)
                 strategies_data[sid] = {
                     "signal": "DEBUG_NO_SIGNAL",
                     "metrics": {"debug_active": True, "runtime_loaded": True},
-                    "thresholds": {"allocation": self.config.get("portfolio_allocations", {}).get(runtime.strategy.__class__.__name__, 0)},
+                    "thresholds": {"allocation": allocation},
                     "fidelity": 0.0
                 }
         

@@ -18,10 +18,7 @@ class PortfolioManager:
         
         # 1. Base Institutional Allocation Weights
         self.base_allocations = config.get("portfolio_allocations", {
-            "TrendFollowing": 0.40,
-            "MeanReversion": 0.30,
-            "Breakout": 0.30,
-            "LiquiditySession": 0.0
+            "NPatternGrid": 1.0
         })
         
         # 2. Performance Tracking (Institutional State)
