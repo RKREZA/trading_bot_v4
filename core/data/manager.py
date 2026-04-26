@@ -88,6 +88,11 @@ class DataManager:
             
         if len(gaps) > 0:
             logger.critical(f"PROCEEDING WITH TOLERANCE: {len(gaps)} unrepairable gaps detected in {symbol} ({timeframe}) history.")
+        elif attempt > 0:
+            logger.info("=" * 60)
+            logger.info("FIDELITY NOTICE: Data repair was performed DURING this run.")
+            logger.info("To ensure 100% deterministic audit results, please RE-RUN this backtest.")
+            logger.info("=" * 60)
         
         return relevant_array
 

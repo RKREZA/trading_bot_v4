@@ -19,18 +19,21 @@ class OrderManager:
 
     def __init__(self, config: Dict[str, Any], connection=None):
         self.config = config
-        self.connection = connection # MT5Connection if live
+        self.connection = connection
         exe_cfg = config.get("execution", {})
         
         self.latency_ms = int(exe_cfg.get("latency_ms", 150))
         self.max_spread_pts = float(exe_cfg.get("max_spread_points", 500.0))
         
-        # Deterministic RNG for reproducibility (Institutional requirement)
-        self.deterministic = config.get("backtest", {}).get("deterministic", False)
-        self.seed = config.get("backtest", {}).get("random_seed", 42)
+        bt_cfg = config.get("backtest", {})
+        self.is_backtest = bt_cfg.get("enabled", False)
+        
+        # Rule 1.1: Force determinism if in backtest mode
+        self.deterministic = bt_cfg.get("deterministic", False) or self.is_backtest
+        
+        self.seed = bt_cfg.get("random_seed", 42)
         self._rng = random.Random(self.seed if self.deterministic else None)
-        # Seed numpy's global RNG when running in deterministic mode so ALL
-        # numpy random calls across the execution pipeline are reproducible.
+        
         if self.deterministic:
             np.random.seed(self.seed)
         
@@ -86,7 +89,10 @@ class OrderManager:
             return None
 
         # 2. Institutional Live Path
-        if self.connection and not self.config.get("backtest", {}).get("enabled", False):
+        # Rule 1.2: Hybrid-Mode Protection (Anti-Execution Guard)
+        is_live = self.connection and not self.is_backtest
+        
+        if is_live:
             # --- PHASE 1 HARD BLOCK (NON-BYPASSABLE) ---
             lot_to_execute = self.get_degraded_volume(getattr(signal, 'volume', 0.01))
             

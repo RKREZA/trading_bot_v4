@@ -67,9 +67,9 @@ class StrategyOrchestrator:
         # This prevents a strategy that failed walk-forward from trading live.
         self._apply_wfo_gate()
 
-        # Asynchronous Trailing Stop Management (Rule 3.1)
-        self._stop_thread = threading.Thread(target=self._trailing_stop_loop, daemon=True)
-        self._stop_thread.start()
+        # Asynchronous Trailing Stop Management Removed (Institutional Hardening)
+        # Trailing stops and partials are now handled synchronously in execute_cycle
+
 
     def _apply_wfo_gate(self):
         """
@@ -116,7 +116,10 @@ class StrategyOrchestrator:
         exec_payloads = []
         symbol_info = self.connection.get_symbol_info(symbol) if hasattr(self.connection, 'get_symbol_info') else {}
 
-        # 1. LOAD: Handled via market_data arrival
+        # 0. Synchronize Ticket Registry (Step 12: Integrity Check)
+        self._sync_ticket_registry()
+        
+        # 1. ANALYZE MARKET (Hierarchical Multi-Timeframe)
         
         # 2. CANONICAL EXECUTION ANCHORING (v3 Hardening)
         # timeframe_seconds: default 300 for M5
@@ -354,7 +357,7 @@ class StrategyOrchestrator:
                 stop_loss_dist=sl_dist,
                 symbol_info=symbol_info,
                 current_price=market_data.current_price,
-                volatility_status=regime_info.volatility
+                volatility_status=pulse_regime_info.volatility
             )
 
             # Institutional Integrity: All risk scaling and safety caps are now
@@ -407,7 +410,34 @@ class StrategyOrchestrator:
                             self._original_sl[ticket] = sig.stop_loss
                             logger.info(f"[{sid}] Ticket {ticket} added to Orchestrator Registry (orig_sl={sig.stop_loss:.5f}).")
             
+        # 6. POST-CYCLE MANAGEMENT (Trailing Stops & Partials)
+        # Institutional Hardening: Synchronous execution ensures zero race conditions.
+        regime_info = pulse_report.get("regime")
+        if regime_info:
+            self.manage_trailing_stops(
+                symbol, 
+                market_data.current_price, 
+                market_data.current_price + (symbol_info.get("spread", 0) * symbol_info.get("point", 0.0001)), 
+                regime_info.atr, 
+                None, 
+                "GLOBAL"
+            )
+            self.manage_partials(symbol, market_data.current_price, market_data.current_price + (symbol_info.get("spread", 0) * symbol_info.get("point", 0.0001)))
+            
         return pulse_report
+
+    def _sync_ticket_registry(self):
+        """Synchronizes internal ticket registry with live MT5 state."""
+        try:
+            live_pos = self.position_manager.get_open_positions()
+            live_tickets = {p.ticket for p in live_pos}
+            with self._tickets_lock:
+                closed_tickets = self._open_tickets - live_tickets
+                self._open_tickets = self._open_tickets.intersection(live_tickets)
+                for t in closed_tickets:
+                    self._original_sl.pop(t, None)
+        except Exception as e:
+            logger.debug(f"Ticket Sync failed: {e}")
 
     def on_trade_closed(self, trade_record: dict):
         """Propagates trade closure to the relevant strategy runtime."""
@@ -585,60 +615,5 @@ class StrategyOrchestrator:
             else:
                 logger.error(f"Failed to emergency close position {pos.ticket} ({pos.symbol})")
         
-    def _trailing_stop_loop(self):
-        """Background thread for high-frequency stop management."""
-        import time
-        logger.info("Trailing Stop Service started.")
-        while True:
-            try:
-                # 1. Synchronize Registry with Live Positions
-                try:
-                    live_pos = self.position_manager.get_open_positions()
-                    live_tickets = {p.ticket for p in live_pos}
-                    with self._tickets_lock:
-                        # Prune tickets no longer in MT5
-                        closed_tickets = self._open_tickets - live_tickets
-                        self._open_tickets = self._open_tickets.intersection(live_tickets)
-                        # Evict original_sl entries for closed positions
-                        for t in closed_tickets:
-                            self._original_sl.pop(t, None)
-                except Exception as e:
-                    logger.debug(f"Ticket Sync failed: {e}")
-
-                # Concurrent Optimization: Atomic reference read avoids holding lock
-                # during the iteration processing.
-                analysis_snapshot = self.last_analysis 
-
-                if not analysis_snapshot:
-                    time.sleep(0.5)
-                    continue
-
-                now_ts = time.time()
-                for symbol, data in list(analysis_snapshot.items()):
-                    # Guard: skip stale snapshots.
-                    # Increased to 600s to support M5/M15 charting windows in backtesting
-                    # without starving the trailing stop thread.
-                    if now_ts - data.get("timestamp", 0) > 600:
-                        logger.debug(f"[TRAIL] Skipping {symbol}: analysis snapshot is stale (>{600}s old).")
-                        continue
-
-                    # 1. Trailing Stop Management
-                    self.manage_trailing_stops(
-                        symbol, 
-                        data['bid'], 
-                        data['ask'], 
-                        data['atr'], 
-                        None, 
-                        "GLOBAL"
-                    )
-                    
-                    # 2. Partials Management
-                    self.manage_partials(symbol, data['bid'], data['ask'])
-
-                time.sleep(0.2) # 5Hz update rate
-            except Exception as e:
-                logger.error(f"Trailing Stop Thread Error: {e}")
-                time.sleep(1)
-
     def __repr__(self):
         return f"<StrategyOrchestrator(runtimes={len(self.runtimes)})>"

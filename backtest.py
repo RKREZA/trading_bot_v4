@@ -23,7 +23,6 @@ from dotenv import load_dotenv
 from core import SourceHandler, MT5Connection, PerformanceTracker, setup_logging
 from core.data.manager import DataManager
 from backtesting import PortfolioBacktester, MonteCarloSimulator, StressTester, WalkForwardValidator
-from backtesting.backtester import DatasetFingerprinter, ENGINE_VERSION
 from strategies import create_strategy, STRATEGY_REGISTRY
 from core.config.loader import ConfigLoader
 from core.portfolio.audit_engine import AuditEngine
@@ -113,49 +112,7 @@ class BacktestCLI:
         # Now cap H1 to to_ts after warmup is applied
         h1 = h1[h1.time < to_ts]
         
-        # [ M1 Generation ]: Generate synthetic M1 from M5 for periods where real M1 data is unavailable
-        # This ensures trade management works for the ENTIRE backtest period
-        m1_needs_synthetic = len(m1) == 0 or (len(m5) > 0 and m5.time[0] < m1.time[0])
-        
-        if m1_needs_synthetic and len(m5) > 0:
-            if len(m1) == 0:
-                rprint("[yellow]M1 data unavailable. Generating synthetic M1 from M5 for trade management...[/]")
-            else:
-                rprint(f"[yellow]M1 data only available from {datetime.fromtimestamp(m1.time[0], tz=timezone.utc).date()}. Generating synthetic M1 for earlier periods...[/]")
-            
-            from core.common.types import CandleArray
-            
-            # Generate synthetic M1 for the ENTIRE M5 period
-            m1_times = []
-            m1_opens = []
-            m1_highs = []
-            m1_lows = []
-            m1_closes = []
-            m1_volumes = []
-            m1_spreads = []
-            
-            for i in range(len(m5.time)):
-                base_time = int(m5.time[i])
-                for j in range(5):
-                    minute_time = base_time + j * 60
-                    m1_times.append(minute_time)
-                    m1_opens.append(m5.open[i] if j == 0 else m5.close[i-1] if i > 0 else m5.open[i])
-                    m1_highs.append(m5.high[i])
-                    m1_lows.append(m5.low[i])
-                    m1_closes.append(m5.close[i])
-                    m1_volumes.append(int(m5.tick_volume[i] / 5) if m5.tick_volume[i] > 0 else 0)
-                    m1_spreads.append(m5.spread[i] / 5 if m5.spread[i] > 0 else 10)
-            
-            m1 = CandleArray(
-                time=np.array(m1_times, dtype=np.int64),
-                open=np.array(m1_opens, dtype=np.float64),
-                high=np.array(m1_highs, dtype=np.float64),
-                low=np.array(m1_lows, dtype=np.float64),
-                close=np.array(m1_closes, dtype=np.float64),
-                tick_volume=np.array(m1_volumes, dtype=np.int64),
-                spread=np.array(m1_spreads, dtype=np.float64)
-            )
-            rprint(f"[green]Generated {len(m1)} synthetic M1 bars from {len(m5)} M5 bars.[/]")
+
 
         if len(m5) < 10:
              rprint("[bold red]Error:[/] Date range results in zero bars for simulation.")
@@ -186,6 +143,22 @@ class BacktestCLI:
             rprint(f"[bold red]Error:[/] No strategies available for benchmark.")
             return
 
+        # 2.5 [ M1 Validation ]: Institutional Grade-A+ Strict Data Policy
+        # Synthetic data generation is disabled to prevent "Hallucinated Profits".
+        # If the strategy requires M1 fidelity, we must provide real MT5 M1 data.
+        m1_required = self.config.get("backtest", {}).get("timeframe", "M5") == "M1" or \
+                      any(s.config.get("timeframe") == "M1" for s in strategies)
+        
+        if m1_required:
+            if len(m1) == 0:
+                rprint("[bold red]CRITICAL DATA ERROR:[/] M1 data is required but unavailable for this range. Institutional audit FAILED.")
+                return
+            
+            if len(m5) > 0 and m5.time[0] < m1.time[0]:
+                rprint(f"[bold red]CRITICAL DATA GAP:[/] M5 starts at {datetime.fromtimestamp(m5.time[0], tz=timezone.utc).date()}, but M1 starts later at {datetime.fromtimestamp(m1.time[0], tz=timezone.utc).date()}. Partial simulation rejected.")
+                return
+
+
         # 3. Validation: Walk-Forward (Phase 15/16)
         if run_walk_forward:
             self._run_walk_forward(symbol, strategies, {"M5": m5, "M1": m1, "M15": m15, "H1": h1})
@@ -203,10 +176,15 @@ class BacktestCLI:
         
         runtime_config = dict(self.config)
         runtime_backtest = dict(runtime_config.get("backtest", {}))
+        runtime_backtest["enabled"] = True
         if seed is not None:
             runtime_backtest["random_seed"] = int(seed)
         if deterministic is not None:
             runtime_backtest["deterministic"] = bool(deterministic)
+        else:
+            # Institutional Default: If not specified, force deterministic to True for audit stability
+            runtime_backtest["deterministic"] = True
+            
         if no_adaptive:
             runtime_backtest["adaptive_strategy"] = False
             rprint("[bold cyan]ADAPTIVE STRATEGY DISABLED: All strategies will run simultaneously.[/]")

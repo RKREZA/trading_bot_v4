@@ -740,8 +740,8 @@ class PortfolioBacktester:
                 event = None
                 
                 if direction == "BUY":
-                    sl_hit = m1_low <= trade["sl"]
-                    tp_hit = m1_high >= trade["tp"]
+                    sl_hit = trade["sl"] > 0 and m1_low <= trade["sl"]
+                    tp_hit = trade["tp"] > 0 and m1_high >= trade["tp"]
                     
                     if sl_hit and tp_hit:
                         if force_sl_first: exit_price, event = trade["sl"], "sl"
@@ -749,8 +749,8 @@ class PortfolioBacktester:
                     elif sl_hit: exit_price, event = trade["sl"], "sl"
                     elif tp_hit: exit_price, event = trade["tp"], "tp"
                 else: # SELL
-                    sl_hit = m1_high + spread >= trade["sl"]
-                    tp_hit = m1_low + spread <= trade["tp"]
+                    sl_hit = trade["sl"] > 0 and m1_high + spread >= trade["sl"]
+                    tp_hit = trade["tp"] > 0 and m1_low + spread <= trade["tp"]
                     
                     if sl_hit and tp_hit:
                         if force_sl_first: exit_price, event = trade["sl"], "sl"
