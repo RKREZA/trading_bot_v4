@@ -118,9 +118,15 @@ class InstitutionalNewsFilter:
                 with open(local_calendar, 'r') as f:
                     data = json.load(f)
                     events = data.get("events", data if isinstance(data, list) else [])
-                    self.events = self._normalize_timestamps(events)
-                logger.info(f"News: Loaded {len(self.events)} events from local calendar (no web dependency).")
-                return
+                    local_events = self._normalize_timestamps(events)
+                    
+                # FIX: Only return if we actually found local events!
+                if len(local_events) > 0:
+                    self.events = local_events
+                    logger.info(f"News: Loaded {len(self.events)} events from local calendar (no web dependency).")
+                    return
+                else:
+                    logger.info("News: Local calendar is empty. Proceeding to web sources.")
             except Exception as e:
                 logger.warning(f"News: Failed to load local calendar: {e}. Falling back to web sources.")
 
@@ -274,36 +280,35 @@ class InstitutionalNewsFilter:
         return normalized
 
     def is_blocked(self, symbol: str, current_time: float = None) -> Optional[str]:
-        """
-        Checks if trading is blocked for a specific symbol.
-        Returns the event name if blocked, else None.
-        """
         if not self.enabled:
             return None
 
-        # Anchor to system clock if current_time (broker clock) is drifted
         if current_time is None:
             current_time = time.time()
 
-        # Institutional Safe-Gate: Check for Stale Data (Step 23)
         if self._is_data_stale():
             self.resilience_mode = NewsResilience.STALE
             logger.critical("NEWS ALERT: Data is STALE (Refreshed >24h ago). Global Trading LOCKOUT active.")
             return "STALE_DATA_LOCKOUT"
         
-        # If we are degraded (no fresh fetch but cache exists), we stay in DEGRADED
         if not self.events and self.resilience_mode == NewsResilience.HEALTHY:
              self.resilience_mode = NewsResilience.DEGRADED
 
         if not self.events:
             return None
             
-        # Extract currencies from symbol (e.g., XAUUSD -> XAU, USD)
-        affected_currencies = []
+        # Extract base and quote currencies
+        base_ccy, quote_ccy = "ALL", "ALL" # Defaults
         if len(symbol) >= 6:
-            # Common patterns: EURUSD, XAUUSDm, GBPJPY.pro
-            # We take first 3 and next 3
-            affected_currencies = [symbol[0:3], symbol[3:6]]
+            base_ccy = symbol[0:3].upper()
+            quote_ccy = symbol[3:6].upper()
+        
+        # Build the contagion list using the previously unused _CURRENCY_MAP
+        affected_currencies = {base_ccy, quote_ccy, "ALL"}
+        if base_ccy in self._CURRENCY_MAP:
+            affected_currencies.update(self._CURRENCY_MAP[base_ccy])
+        if quote_ccy in self._CURRENCY_MAP:
+            affected_currencies.update(self._CURRENCY_MAP[quote_ccy])
         
         # Buffer range
         before_sec = self.buffer_before * 60
@@ -311,10 +316,10 @@ class InstitutionalNewsFilter:
         
         for event in self.events:
             event_ts = event["timestamp"]
-            event_country = event["country"]
+            event_country = event["country"].upper()
             
-            # Check if event affects our symbol's currencies
-            if event_country in affected_currencies or event_country == "ALL":
+            # Check if event country is in our mapped contagion list
+            if event_country in affected_currencies or event_country == "USD": # USD affects everything
                 if (current_time >= event_ts - before_sec) and (current_time <= event_ts + after_sec):
                     return event["title"]
                     
@@ -436,9 +441,13 @@ class InstitutionalNewsFilter:
         return relevant
 
     def should_flatten_position(self, symbol: str, current_time: float) -> bool:
-        """Determines if a position should be closed proactively."""
+        """Determines if a position should be closed proactively before news hits."""
         auto_close_min = self.config.get("news_filter", {}).get("auto_close_before_min", 5)
-        return self.is_blocked(symbol, current_time - (auto_close_min * 60)) is not None
+        # FIX: Look forward into the future by ADDING time, simulating if we hit the block window
+        simulated_future_time = current_time + (auto_close_min * 60)
+        
+        # Check if trading will be blocked in 'auto_close_min' minutes
+        return self.is_blocked(symbol, simulated_future_time) is not None
 
     def record_actual(self, event: Dict, actual: float):
         """Records actual vs forecast for post-event analysis."""

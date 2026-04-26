@@ -24,6 +24,7 @@ class MarketState:
     def __init__(self, symbol: str):
         self.symbol = symbol
         self.timestamp = 0.0
+        self.m1: Optional[CandleArray] = None
         self.m5: Optional[CandleArray] = None
         self.m15: Optional[CandleArray] = None
         self.h1: Optional[CandleArray] = None
@@ -93,7 +94,7 @@ class DataEngine:
             return DataQuality.INVALID, []
 
         for i in range(1, len(candles)):
-            expected = candles.time[i-1] + (300 if tf == "M5" else 900 if tf == "M15" else 3600 if tf == "H1" else 86400)
+            expected = candles.time[i-1] + (60 if tf == "M1" else 300 if tf == "M5" else 900 if tf == "M15" else 3600 if tf == "H1" else 86400)
             actual = candles.time[i]
             if actual - expected > 3600:
                 gaps.append((tf, expected, actual))
@@ -133,36 +134,40 @@ class DataEngine:
         """Fetches and processes all timeframes for a symbol."""
         try:
             now = datetime.now(timezone.utc)
+            m1_candles = self.data_manager.prepare_data(symbol, "M1", start_date=now - timedelta(days=2))
             m5_candles = self.data_manager.prepare_data(symbol, "M5", start_date=now - timedelta(days=5))
             m15_candles = self.data_manager.prepare_data(symbol, "M15", start_date=now - timedelta(days=10))
             h1_candles = self.data_manager.prepare_data(symbol, "H1", start_date=now - timedelta(days=20))
             d1_candles = self.data_manager.prepare_data(symbol, "D1", start_date=now - timedelta(days=150))
             
-            if len(m5_candles) == 0:
+            if len(m1_candles) == 0:
                 return
 
+            m1_quality, m1_gaps = self._validate_data_quality(m1_candles, "M1")
             m5_quality, m5_gaps = self._validate_data_quality(m5_candles, "M5")
             m15_quality, m15_gaps = self._validate_data_quality(m15_candles, "M15")
             h1_quality, h1_gaps = self._validate_data_quality(h1_candles, "H1")
             
-            all_gaps = m5_gaps + m15_gaps + h1_gaps
-            quality = min(m5_quality, m15_quality, h1_quality, key=lambda x: x.value)
+            all_gaps = m1_gaps + m5_gaps + m15_gaps + h1_gaps
+            quality = min(m1_quality, m5_quality, m15_quality, h1_quality, key=lambda x: x.value)
 
+            m1_candles._indicators = IndicatorEngine.precalculate_all(symbol, "M1", m1_candles)
             m5_candles._indicators = IndicatorEngine.precalculate_all(symbol, "M5", m5_candles)
             m15_candles._indicators = IndicatorEngine.precalculate_all(symbol, "M15", m15_candles)
             h1_candles._indicators = IndicatorEngine.precalculate_all(symbol, "H1", h1_candles)
             d1_candles._indicators = IndicatorEngine.precalculate_all(symbol, "D1", d1_candles)
             
             new_state = MarketState(symbol)
+            new_state.m1 = m1_candles
             new_state.m5 = m5_candles
             new_state.m15 = m15_candles
             new_state.h1 = h1_candles
             new_state.d1 = d1_candles
-            new_state.timestamp = m5_candles.time[-1]
+            new_state.timestamp = m1_candles.time[-1]
             new_state.last_updated = time.time()
             new_state.quality = quality
             new_state.gaps = all_gaps
-            new_state.bar_count = len(m5_candles)
+            new_state.bar_count = len(m1_candles)
             
             with self._lock:
                 self.states[symbol] = new_state
