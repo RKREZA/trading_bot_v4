@@ -6,9 +6,9 @@
   },
   "magic_number": 234000,
   "risk_governance": {
-    "risk_per_trade_pct": 2.0,
-    "max_daily_loss_pct": 20.0,
-    "max_drawdown_halt_pct": 40.0,
+    "risk_per_trade_pct": 1.0,
+    "max_daily_loss_pct": 5.0,
+    "max_drawdown_halt_pct": 15.0,
     "max_consecutive_losses": 10,
     "max_cost_ratio": 0.9
   },
