@@ -65,10 +65,6 @@ class LiveOrchestrator:
         self.mismatch_count = 0
         self.is_paused = False
         
-        # AI Auto-Training: Collect closed trades for periodic retraining
-        self.ai_training_data = []
-        self.ai_train_threshold = 50
-        
         # Rule 5.1: Persistence Reset
         self.kill_switch_active = False # Manual reset required in real prod
         
@@ -512,10 +508,6 @@ class LiveOrchestrator:
                     if len(self.analysis_logs) > 50: self.analysis_logs = self.analysis_logs[-50:]
                     if len(self.system_logs) > 50: self.system_logs = self.system_logs[-50:]
                     
-                    # AI Auto-Training: Retrain every N cycles
-                    if hasattr(self, 'ai_training_data') and len(self.ai_training_data) >= self.ai_train_threshold:
-                        self._auto_train_ai()
- 
                     # Final Cycle Update (Pass Live Tick)
                     self._update_ui(live, dashboard, md=md, reg=reg, pulse_report=pulse_report, tick=tick)
                     consecutive_errors = 0  # Reset on successful cycle
@@ -588,36 +580,6 @@ class LiveOrchestrator:
             except:
                 pass
         self.connection.disconnect()
- 
-    def _auto_train_ai(self):
-        """Auto-train AI model after collecting enough trade data."""
-        try:
-            import pandas as pd
-            from core.ai.model import AIModelWrapper
-            
-            df = pd.DataFrame(self.ai_training_data)
-            cols = ['body_ratio', 'upper_wick_ratio', 'lower_wick_ratio', 'atr_ratio',
-                   'spread_ratio', 'adx', 'hour_of_day', 'day_of_week', 'signal_dir', 'sl_pips']
-            
-            available_cols = [c for c in cols if c in df.columns]
-            if len(df) < 20:
-                return
-            
-            X = df[available_cols].fillna(0)
-            y = df['outcome'].fillna(0).astype(int)
-            
-            logger.info(f"Auto-training AI with {len(X)} samples...")
-            model = AIModelWrapper()
-            model.train(X, y)
-            
-            import joblib
-            joblib.dump(X, os.path.join(model.model_dir, "v4_rf_baseline.pkl"))
-            
-            logger.info(f"AI auto-trained. Win rate: {y.mean()*100:.1f}%")
-            self.ai_training_data = []
-            
-        except Exception as e:
-            logger.error(f"AI auto-train failed: {e}")
  
     def _update_ui(self, live, dashboard, md=None, reg=None, pulse_report=None, status=None, tick=None):
         """Unified UI state pulser with absolute tick priority."""

@@ -46,11 +46,6 @@ def mock_config():
             "latency_ms": 150,
             "max_spread_points": 500.0,
         },
-        "ai_layer": {
-            "enabled": False,
-            "confidence_threshold": 0.65,
-            "sentiment_vetting": {"enabled": False},
-        },
         "symbols_config": {
             "XAUUSDm": {
                 "point": 0.01,

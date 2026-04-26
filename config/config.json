@@ -26,19 +26,6 @@
     "entry_slippage_points": 2.5,
     "sl_exit_slippage_points": 3.5
   },
-  "ai_layer": {
-    "enabled": true,
-    "mode": "news_avoidance",
-    "confidence_threshold": 0.40,
-    "regime_detection": true,
-    "dynamic_risk_adjustment": true,
-    "drift_multiplier": 0.5,
-    "sentiment_vetting": {
-      "enabled": true,
-      "model": "meta/llama-3.3-70b-instruct",
-      "mode": "vetting"
-    }
-  },
   "volatility_adaptive": {
     "enabled": true,
     "min_volatility_for_trades": "VERY_LOW",

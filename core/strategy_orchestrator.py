@@ -9,7 +9,6 @@ from core.portfolio_manager import PortfolioManager
 from core.base_strategy import MarketData
 from core.common.types import TradeSignal
 from core.execution.order_manager import OrderManager
-from core.ai.predictor import AIPredictor
 
 logger = logging.getLogger("trading_bot.orchestrator")
 
@@ -41,7 +40,6 @@ class StrategyOrchestrator:
         self.regime_store = regime_store
         
         self.portfolio_manager = PortfolioManager(self.config)
-        self.ai_predictor = AIPredictor(self.config)
         self.last_cycle_time: Optional[datetime] = None
         self.last_analysis: Dict[str, Any] = {}
         self._analysis_lock = threading.Lock() 
@@ -236,29 +234,6 @@ class StrategyOrchestrator:
                 sl = runtime.strategy.get_stop_loss(sig, market_data)
                 sig = replace(sig, stop_loss=sl)
                 
-                # Phase 5: AI-Driven Vetting (Final Gate)
-                if self.config.get("ai_vetting", {}).get("enabled", False):
-                    try:
-                        # Institutional Fallback Logic
-                        fallback_vote = self.config.get("ai_vetting", {}).get("failure_fallback", "APPROVE")
-                        
-                        # ML LAYER: Evaluation
-                        candles_for_ai = market_data.m5_candles if market_data.m5_candles is not None else market_data.htf_candles
-                        risk_points = abs(sig.price - sl) if sl != 0 else 0
-                        
-                        is_ok = self.ai_predictor.filter_signal(
-                            sig, 
-                            candles_for_ai, 
-                            risk_points,
-                            news_events=news_events
-                        )
-                        if not is_ok:
-                            return sid, None, metrics, thresholds
-                    except Exception as e:
-                        logger.error(f"[EXEC] AI Vetting Failed for {sid}: {e}. Fallback: {fallback_vote}")
-                        if fallback_vote != "APPROVE":
-                            return sid, None, metrics, thresholds
-                            
                 return sid, sig, metrics, thresholds
                     
             return sid, sig, metrics, thresholds

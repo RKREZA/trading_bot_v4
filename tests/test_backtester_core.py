@@ -68,7 +68,6 @@ def _make_config(tmp_path: Path) -> dict:
                 "commission_per_lot": 7.0, "contract_size": 100.0,
             }
         },
-        "ai_layer": {"enabled": False},
     }
 
 
