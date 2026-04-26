@@ -95,15 +95,7 @@ class SessionDetector:
             broker_offset_hours: broker UTC offset
             symbol: trading symbol (for crypto 24/7 detection)
         """
-        # Crypto is 24/7 - never closed
-        if symbol and symbol.startswith(("BTC", "ETH", "XRP", "LTC", "DOGE")):
-            hour = dt.hour
-            if 13 <= hour < 21:
-                return "LONDON/NY"  # Peak crypto volume
-            elif 8 <= hour < 13:
-                return "LONDON"
-            elif 21 <= hour < 24 or 0 <= hour < 8:
-                return "ASIA_PACIFIC"
+        # (Crypto 24/7 detection logic removed - XAUUSDm focused)
         
         if dt.tzinfo is not None:
             utc_dt = dt.astimezone(datetime.timezone.utc)

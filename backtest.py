@@ -306,11 +306,7 @@ class BacktestCLI:
         for st_type, st_class in STRATEGY_REGISTRY.items():
             # 2. Define potential ID matches for this class (PascalCase Priority)
             pascal_name = {
-                "LIQUIDITYSWEEPBREAKOUT": "LiquiditySweepBreakout",
-                "SMARTMEANREVERSION": "SmartMeanReversion",
-                "TRENDFOLLOWING": "TrendFollowing",
-                "LIQUIDITYSESSION": "LiquiditySession",
-                "RANGEBOUNCE": "RangeBounce"
+                "NPATTERNGRID": "NPatternGrid"
             }.get(st_type, st_type.title().replace("_", ""))
 
             
@@ -428,7 +424,7 @@ if __name__ == "__main__":
     parser.add_argument("--symbol", type=str, default="XAUUSDm")
     parser.add_argument("--from", dest="start_date", type=str, required=True)
     parser.add_argument("--to", dest="end_date", type=str, required=True)
-    parser.add_argument("--strategy", type=str, default=None)
+    parser.add_argument("--strategy", type=str, default="NPatternGrid")
     parser.add_argument("--monte-carlo", action="store_true")
     parser.add_argument("--walk-forward", action="store_true")
     parser.add_argument("--stress-test", action="store_true")

@@ -180,10 +180,7 @@ class LiveOrchestrator:
         # Weekend Waiver: Allow large drift if market is closed
         session = SessionDetector.get_session(datetime.now().astimezone(), symbol=self.symbol)
         
-        # Crypto is 24/7 - skip session closed check
-        is_crypto = self.symbol in ["BTCUSDm", "BTCUSD", "ETHUSDm"]
-        
-        if "(CLOSED)" in session and not is_crypto:
+        if "(CLOSED)" in session:
             if drift > 3600: 
                 if not hasattr(self, "_last_weekend_log") or (time.time() - self._last_weekend_log > 1800):
                     logger.info(f"Weekend Sync: Drift {drift:.1f}s ignored (Market Closed).")
@@ -658,11 +655,6 @@ class LiveOrchestrator:
             current_session = SessionDetector.get_session(datetime.now().astimezone(), symbol=self.symbol)
             is_market_closed = "(CLOSED)" in current_session
             
-            # Crypto is 24/7, don't treat as closed
-            is_crypto = self.symbol in ["BTCUSDm", "BTCUSD", "ETHUSDm"]
-            if is_crypto:
-                is_market_closed = False
-            
             if tick_lag > 10 and not is_market_closed:
                 # Aggressive Cache Buster: Toggle subscription to force refresh
                 mt5.symbol_select(self.symbol, False)
@@ -779,7 +771,7 @@ class LiveOrchestrator:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="V5-INSIGNIA Institutional Trading Machine")
     parser.add_argument("--symbol", type=str, default="XAUUSDm")
-    parser.add_argument("--strategies", type=str, default="LiquiditySweepBreakout,TrendFollowing,SmartMeanReversion")
+    parser.add_argument("--strategies", type=str, default="NPatternGrid")
     
     args = parser.parse_args()
     setup_live_logging()

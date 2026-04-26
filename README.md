@@ -1,12 +1,12 @@
 # V5-INSIGNIA Institutional Trading System
 
-**High-Fidelity Multi-Strategy Portfolio Engine** — Featuring high-fidelity event-driven simulation, institutional risk governance, and multi-timeframe regime detection.
+**Institutional N-Pattern Grid Engine** — Featuring high-fidelity event-driven simulation, institutional risk governance, and N-Pattern impulse fusion technology.
 
 ## Key Features
 - **MT5 Production Connection**: Robust terminal interface with auto-recovery and thread-safe execution.
 - **Unified Risk Governance**: Shared `RiskGuardian` for both backtesting and live trading (Zero Parity Gap).
 - **Institutional Execution**: Latency simulation, variable spread modeling, and direction-aware slippage.
-- **Multi-Strategy Portfolio**: Trend Following, Mean Reversion, and Breakout strategies running in parallel.
+- **N-Pattern Grid Strategy**: Advanced impulse fusion and grid scaling with 1:1 risk-to-reward logic.
 - **Advanced Validation**: Monte Carlo, Walk-Forward Optimization, and Stress Testing suites.
 
 ## Setup

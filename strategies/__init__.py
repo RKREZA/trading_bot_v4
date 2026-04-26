@@ -57,9 +57,7 @@ def create_strategy(strategy_id: str, st_type: str = None, config: dict = None):
     # Auto-resolve type if not provided
     if not st_type:
         # Heuristic resolution based on common ID patterns
-        if "trend" in strategy_id.lower(): st_type = "TRENDFOLLOWING"
-        elif "smc" in strategy_id.lower() or "meanreversion" in strategy_id.lower(): st_type = "SMARTMEANREVERSION"
-        elif "breakout" in strategy_id.lower() or "sweep" in strategy_id.lower(): st_type = "LIQUIDITYSWEEPBREAKOUT"
+        if "pattern" in strategy_id.lower() or "grid" in strategy_id.lower(): st_type = "NPATTERNGRID"
         else:
             raise ValueError(f"Could not auto-resolve strategy type for ID '{strategy_id}'. Please provide it explicitly.")
 
