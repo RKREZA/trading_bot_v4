@@ -110,6 +110,11 @@ class SessionDetector:
         else:
             utc_dt = dt.replace(tzinfo=datetime.timezone.utc)
             
+        # Apply broker offset to get true UTC time
+        # If broker is UTC+3, we subtract 3 hours to get true UTC
+        if broker_offset_hours != 0:
+            utc_dt = utc_dt - datetime.timedelta(hours=broker_offset_hours)
+            
         hour = utc_dt.hour
         weekday = utc_dt.weekday()
         

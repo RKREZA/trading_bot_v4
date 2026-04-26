@@ -81,14 +81,8 @@ class BacktestCLI:
             h1 = self.data_manager.prepare_data(symbol, "H1", dt_from)
             d1 = self.data_manager.prepare_data(symbol, "D1", dt_from)
             
-            # [ Institutional Alignment Filter ]: Cap all TFs by available M1 execution data
-            # This prevents simulation crashes on last forming M15/H1 bars.
-            if len(m1) > 0:
-                max_t = m1.time[-1]
-                m5 = m5[m5.time <= max_t]
-                m15 = m15[m15.time <= max_t]
-                h1 = h1[h1.time <= max_t]
-                d1 = d1[d1.time <= max_t]
+            # [ Institutional Alignment Filter Removed ]: Ensuring full-session coverage
+            pass
 
         if len(m5) < 100:
             rprint("[bold red]Error:[/] Insufficient data for benchmark.")

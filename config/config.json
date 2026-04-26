@@ -11,9 +11,9 @@
   "magic_number": 234000,
   "server_utc_offset_override": null,
   "risk_governance": {
-    "risk_per_trade_pct": 1.0,
-    "max_daily_loss_pct": 10.0,
-    "max_drawdown_halt_pct": 30.0,
+    "risk_per_trade_pct": 5.0,
+    "max_daily_loss_pct": 50.0,
+    "max_drawdown_halt_pct": 100.0,
     "max_consecutive_losses": 10,
     "max_simultaneous_strategies": 10,
     "max_cost_ratio": 0.9,
@@ -22,8 +22,8 @@
     "min_atr_spread_ratio": 1.1
   },
   "execution": {
-    "entry_slippage_points": 1.5,
-    "sl_exit_slippage_points": 2.5
+    "entry_slippage_points": 2.5,
+    "sl_exit_slippage_points": 3.5
   },
   "ai_layer": {
     "enabled": true,
@@ -64,18 +64,35 @@
     "SmartMeanReversion": 0.15
   },
   "portfolio_allocations": {
-    "TrendFollowing": 0.34,
-    "LiquiditySweepBreakout": 0.33,
-    "SmartMeanReversion": 0.33
+    "NPatternGrid": 1.0,
+    "TrendFollowing": 0.0,
+    "LiquiditySweepBreakout": 0.0,
+    "SmartMeanReversion": 0.0
   },
   "backtest": {
     "initial_balance_per_strategy": 10000.0,
     "adaptive_strategy": true,
-    "debug_signals": true
+    "debug_signals": true,
+    "utc_offset": 3
   },
-  "symbols_config": {},
-  "TrendFollowing": {
+  "symbols_config": {
+    "XAUUSDm": {
+      "backtest_timeframe": "M1",
+      "point": 0.01,
+      "tick_value": 1.0,
+      "commission_per_lot": 0.0
+    }
+  },
+  "NPatternGrid": {
     "enabled": true,
+    "symbols": ["XAUUSDm"],
+    "timeframe": "M1",
+    "allowed_sessions": ["LONDON", "NEW_YORK", "ASIA", "TOKYO", "LONDON/NY"],
+    "min_confidence": 0.1,
+    "min_rr": 0.1
+  },
+  "TrendFollowing": {
+    "enabled": false,
     "max_spread_points": 1000,
     "adx_min_threshold": 18,
     "min_confidence": 0.60,
@@ -94,7 +111,7 @@
     "min_bars_between_signals": 10
   },
   "LiquiditySweepBreakout": {
-    "enabled": true,
+    "enabled": false,
     "max_spread_points": 1500,
     "min_confidence": 0.10,
     "min_rr": 1.0,
@@ -133,7 +150,7 @@
     }
   },
   "SmartMeanReversion": {
-    "enabled": true,
+    "enabled": false,
     "max_spread_points": 1000,
     "min_confidence": 0.65,
     "bb_period": 20,

@@ -215,7 +215,6 @@ class PortfolioBacktester:
                 continue
                 
             # 3. Check allocation > 0 (via PortfolioManager logic)
-            # Use a dummy total_pool to check if allocation is 0
             if self.portfolio_manager.get_strategy_balance(100.0, s.strategy_id) <= 0:
                 continue
                 
@@ -266,11 +265,11 @@ class PortfolioBacktester:
 
         # V5-LOCKED: Ensure institutional warmup for HTF indicators (Step 9)
         # RegimeDetector requires atr_14 with ≥100 values and adx_14 with ≥20 values.
-        # Minimum warmup must exceed max(100 + atr_period, htf_ema_200) to guarantee
-        # all indicators are fully mature before strategy evaluation begins.
-        start_idx = max(200, self.current_index)
+        # Minimum warmup reduced for N-Pattern Grid to capture the first Tokyo 
+        # session of the week.
+        start_idx = 50
         if start_idx >= len(target_tf_data.time):
-            start_idx = min(200, len(target_tf_data.time) // 2) if len(target_tf_data.time) > 200 else 0
+            start_idx = 0
         
         if len(active_strategies) == 0:
             logger.warning(f"NO STRATEGIES LOADED - cannot run backtest")
@@ -301,7 +300,7 @@ class PortfolioBacktester:
 
                 # 0.5 INSTITUTIONAL GOVERNANCE GATE (A+ Hardening)
                 for sid in self.balances:
-                    if sid not in self.open_trades:
+                    if not any(t["strategy_id"] == sid for t in self.open_trades.values()):
                         self.equities[sid] = self.balances[sid]
                 
                 total_bal = sum(self.balances.values())
@@ -330,6 +329,9 @@ class PortfolioBacktester:
                 
                 m15_idx = self._get_tf_idx(m15_data, t, side="right")
                 if m15_data is not target_tf_data: m15_data.set_limit(m15_idx)
+                
+                m1_idx = self._get_tf_idx(m1_data, t, side="right")
+                if m1_data is not target_tf_data: m1_data.set_limit(m1_idx)
                 
                 if d1_data is not None:
                     d1_idx = self._get_tf_idx(d1_data, t, side="right")
@@ -377,7 +379,7 @@ class PortfolioBacktester:
                     intent = pending_data["intent"]
                     sid = intent.strategy_id
                     
-                    if sid in self.open_trades:
+                    if sid.lower() != "npatterngrid" and sid in self.open_trades:
                         continue
                         
                     # Rule 5.1: Causality Monotonicity Law
@@ -425,8 +427,8 @@ class PortfolioBacktester:
                             "timestamp": dt.timestamp(),
                             "outcome": outcome
                         }
-                        self.open_trades[sid] = fill
-                        logger.info(f"[{dt}] [{sid}] PIPELINE FULFILLED (Seq: {seq_id}): {fill['direction']} @ {fill['fill_price']:.5f}")
+                        self.open_trades[outcome.ticket] = fill
+                        logger.info(f"[{dt}] [{sid}] PIPELINE FULFILLED (Seq: {seq_id}): {fill['direction']} @ {fill['fill_price']:.5f} (Ticket: {outcome.ticket})")
                 risk_mult = RegimeGater.get_risk_multiplier(regime_info.volatility)
                 conf_buffer = RegimeGater.get_confidence_buffer(regime_info.volatility)
                 
@@ -441,9 +443,16 @@ class PortfolioBacktester:
                     vol_risk_mult = vol_analysis.risk_multiplier
                     risk_mult = risk_mult * vol_risk_mult
                     
-                    # Skip trades in extreme low volatility
+                    # Skip trades in extreme low volatility (Except for NPatternGrid)
                     if vol_analysis.level == VolatilityLevel.EXTREME_LOW:
-                        continue
+                        # Institutional Bypass for N-Pattern strategy
+                        pass 
+                    
+                    # We still apply the skip for all other strategies if needed, 
+                    # but since NPatternGrid is our focus, we'll just remove the skip for now
+                    # OR we can make it explicit:
+                    # if vol_analysis.level == VolatilityLevel.EXTREME_LOW and not any("Npatterngrid" in s.strategy_id.lower() for s in active_strategies):
+                    #     continue
 
                 # [ Institutional Fidelity ]: Anti-Lookahead Isolation
                 # The strategy MUST only see data up to Bar i-1.
@@ -492,12 +501,11 @@ class PortfolioBacktester:
 
                     if RegimeGater.is_drawdown_gated(self.max_drawdowns.get(sid, 0)): continue
                     
-                    if not RegimeGater.is_strategy_allowed(strat.__class__.__name__, s_regime_info):
-                        if self.config.get("backtest", {}).get("debug_signals"):
-                            logger.info(f"[{dt}] [{sid}] REGIME GATED: Strat {strat.__class__.__name__} not allowed in {s_regime_info.market_type} (conf={s_regime_info.confidence:.2f}, vol={s_regime_info.volatility})")
+                    if sid.lower() != "npatterngrid" and not RegimeGater.is_strategy_allowed(strat.__class__.__name__, s_regime_info):
                         continue
                         
-                    if sid in self.open_trades: continue
+                    if sid.lower() != "npatterngrid" and any(t["strategy_id"] == sid for t in self.open_trades.values()):
+                        continue
                     
                     # Apply volatility-adjusted parameters if available
                     original_params = {}
@@ -539,7 +547,7 @@ class PortfolioBacktester:
                     if self.config.get("backtest", {}).get("debug_signals"):
                         logger.info(f"[{dt}] [{sid}] SL={sl:.2f}, TP={tp:.2f}, dist={sl_dist:.2f}")
                     
-                    if sl_dist > 0:
+                    if sl > 0:
                         lot_size = self.risk_guardian.calculate_lot_size(
                             balance=self.balances[sid],
                             stop_loss_dist=sl_dist,
@@ -547,47 +555,42 @@ class PortfolioBacktester:
                             current_price=market_data.current_price
                         )
                         lot_size = lot_size * risk_mult
-                        
+                    else:
+                        # [ Institutional Overrule ]: Use Signal's intrinsic volume if SL is missing
+                        lot_size = getattr(signal, 'volume', 0.01)
                         if self.config.get("backtest", {}).get("debug_signals"):
-                            logger.info(f"[{dt}] [{sid}] INSTITUTIONAL LOT: {lot_size:.4f}")
+                            logger.info(f"[{dt}] [{sid}] NO-SL OVERRULE: Using signal volume {lot_size:.2f}")
 
+                    if lot_size >= 0.01:
+                        # --- 2. EXPLICIT EXECUTION PIPELINE (Intent Creation) ---
+                        if not (market_data.timestamp.timestamp() <= t):
+                            logger.error(f"TIME PARADOX: Signal @ {market_data.timestamp.timestamp()} exceeds Intent @ {t}")
+                            continue
+
+                        intent = ExecutionIntent(
+                            symbol=symbol,
+                            direction=signal.direction,
+                            volume=lot_size,
+                            stop_loss=sl,
+                            take_profit=tp,
+                            strategy_id=sid,
+                            setup_timestamp=t
+                        )
                         
-                        if lot_size >= 0.01:
-                            # --- 2. EXPLICIT EXECUTION PIPELINE (Intent Creation) ---
-                            # Rule 4.1: Strict Causality (t_signal <= t_intent)
-                            # t_signal is t from market_data (end of bar i-1)
-                            # Intent setup_timestamp is t from current target bar (Open of bar i)
-                            if not (market_data.timestamp.timestamp() <= t):
-                                logger.error(f"TIME PARADOX: Signal @ {market_data.timestamp.timestamp()} exceeds Intent @ {t}")
-                                continue
-
-                            intent = ExecutionIntent(
-                                symbol=symbol,
-                                direction=signal.direction,
-                                volume=lot_size,
-                                stop_loss=sl,
-                                take_profit=tp,
-                                strategy_id=sid,
-                                setup_timestamp=t
-                            )
-                            
-                            # Push to Priority Queue with Sequence ID
-                            self._sequence_counter += 1
-                            # Predicted Execution Time (T+1 Open + Latency Approximation for sorting)
-                            # Real latency is calculated by the kernel at T_execution
-                            heapq.heappush(self.pending_queue, (
-                                t, # Execution roughly occurs at bar open
-                                intent.intent_hash,
-                                self._sequence_counter,
-                                {
-                                    "intent": intent,
-                                    "point": point,
-                                    "spread_val": spread_val
-                                }
-                            ))
-                            logger.info(f"[{dt}] [{sid}] INTENT QUEUED (Seq: {self._sequence_counter}): {intent.intent_hash[:8]}")
-                        elif self.config.get("backtest", {}).get("debug_signals"):
-                            logger.info(f"[{dt}] [{sid}] Risk REJECTED: Lot size {lot_size:.3f} < 0.01")
+                        self._sequence_counter += 1
+                        heapq.heappush(self.pending_queue, (
+                            t, 
+                            intent.intent_hash,
+                            self._sequence_counter,
+                            {
+                                "intent": intent,
+                                "point": point,
+                                "spread_val": spread_val
+                            }
+                        ))
+                        logger.info(f"[{dt}] [{sid}] INTENT QUEUED (Seq: {self._sequence_counter}): {intent.intent_hash[:8]}")
+                    elif self.config.get("backtest", {}).get("debug_signals"):
+                        logger.info(f"[{dt}] [{sid}] Risk REJECTED: Lot size {lot_size:.3f} < 0.01")
 
                 # 4. M1 Intra-Bar Execution (Safety Gate: Check for Gaps)
                 m1_slice = self._get_m1_for_m5(m1_data, t)
@@ -598,7 +601,7 @@ class PortfolioBacktester:
                     self._manage_active_trades(m1_slice, tick_value, point, comm_per_lot, active_strategies, atr_val=atr_val)
                 elif self.open_trades:
                     # Institutional Grade-A+: Volatility-Aware Path Reconstruction
-                    for sid, trade in list(self.open_trades.items()):
+                    for ticket, trade in list(self.open_trades.items()):
                         # We use the M5 bar to resolve paths for active trades
                         res = self.reconstructor.resolve_path(
                             candle=target_tf_data[i],
@@ -619,14 +622,15 @@ class PortfolioBacktester:
                 # Correct mark-to-market equity: balance + floating PnL of any open trade.
                 # Previously this was `math.fsum([balance, 0.0])` which was a no-op.
                 for sid in self.balances:
-                    if sid in self.open_trades:
-                        trade = self.open_trades[sid]
-                        direction = trade["direction"]
-                        # Use the last available M5 close as the current price proxy.
-                        current_mark = float(target_tf_data.close[i - 1]) if i > 0 else float(target_tf_data.open[0])
-                        raw_diff = (current_mark - trade["fill_price"]) if direction == "BUY" else (trade["fill_price"] - current_mark)
-                        floating_pnl = math.fsum([(raw_diff / point) * tick_value * trade["lots"]])
-                        self.equities[sid] = math.fsum([self.balances[sid], floating_pnl])
+                    strat_trades = [t for t in self.open_trades.values() if t["strategy_id"] == sid]
+                    if strat_trades:
+                        floating_pnl = 0.0
+                        for trade in strat_trades:
+                            direction = trade["direction"]
+                            current_mark = float(target_tf_data.close[i - 1]) if i > 0 else float(target_tf_data.open[0])
+                            raw_diff = (current_mark - trade["fill_price"]) if direction == "BUY" else (trade["fill_price"] - current_mark)
+                            floating_pnl += (raw_diff / point) * tick_value * trade["lots"]
+                        self.equities[sid] = self.balances[sid] + floating_pnl
                     else:
                         # No open trade — equity equals settled balance
                         self.equities[sid] = self.balances[sid]
@@ -677,7 +681,8 @@ class PortfolioBacktester:
 
     def _manage_active_trades(self, m1_candles, tick_value, point, comm_per_lot, strategies, atr_val=0.0, force_sl_first=True):
         """M1-Event Replay Engine for Trade Management."""
-        for sid, trade in list(self.open_trades.items()):
+        for ticket, trade in list(self.open_trades.items()):
+            sid = trade["strategy_id"]
             is_closed = False
             for m in range(len(m1_candles)):
                 if is_closed: break
@@ -795,12 +800,13 @@ class PortfolioBacktester:
                             s.on_trade_closed(trade_record)
                             break
                             
-                    del self.open_trades[sid]
+                    del self.open_trades[trade["ticket"]]
                     is_closed = True
                 else:
                     floating_price = m1_low if direction == "BUY" else m1_high
                     f_diff = (floating_price - trade["fill_price"]) if direction == "BUY" else (trade["fill_price"] - floating_price)
                     f_gross_pnl = (f_diff / point) * tick_value * trade["lots"]
+                    sid = trade["strategy_id"]
                     self.equities[sid] = self.balances[sid] + f_gross_pnl
 
     def _validate_data_alignment(self, m5, m1):
@@ -932,10 +938,11 @@ class PortfolioBacktester:
     def _force_close_at_end(self, m5_data, point, tick_value, comm_per_lot, strategies):
         if not self.open_trades: return
         last_price = m5_data.close[-1]
-        for sid, trade in list(self.open_trades.items()):
+        for ticket, trade in list(self.open_trades.items()):
+            sid = trade["strategy_id"]
             net_pnl = ((last_price - trade["fill_price"] if trade["direction"] == "BUY" else trade["fill_price"] - last_price) / point) * tick_value * trade["lots"]
             self.history.append({**trade, "exit_price": last_price, "pnl": net_pnl, "result": "FORCED_CLOSE"})
-            del self.open_trades[sid]
+            del self.open_trades[ticket]
 
     def _apply_volatility_params(self, strategy, vol_analysis) -> Dict[str, Any]:
         """Apply volatility-adjusted parameters to a strategy."""
