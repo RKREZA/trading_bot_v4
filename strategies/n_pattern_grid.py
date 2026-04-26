@@ -23,13 +23,9 @@ class NPatternGridStrategy(BaseStrategy):
         self.body_size_mult = 1.5
 
     def _is_big_candle(self, open_p, high, low, close, avg_body, session="GLOBAL"):
-        # Dynamic Thresholds for different market regimes
-        if session in ["TOKYO", "ASIA", "ROLLOVER"]:
-            body_ratio_thresh = 0.50 # Relaxed for quiet markets
-            size_mult = 1.0 
-        else:
-            body_ratio_thresh = 0.60 # Optimized for London/NY momentum
-            size_mult = 1.2
+        
+        body_ratio_thresh = 0.90
+        size_mult = 1
             
         body_size = abs(close - open_p)
         candle_range = high - low
