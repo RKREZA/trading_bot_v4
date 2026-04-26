@@ -42,64 +42,85 @@ class NPatternGridStrategy(BaseStrategy):
         
         # 1. CLEANUP
         for pid, grid in list(self.active_grids.items()):
-            if grid['direction'] == 'BUY' and current_price >= grid['tp']:
+            if grid['direction'] == 'BUY' and (current_price >= grid['tp'] or current_price <= grid['sl']):
                 del self.active_grids[pid]
-            elif grid['direction'] == 'SELL' and current_price <= grid['tp']:
+            elif grid['direction'] == 'SELL' and (current_price <= grid['tp'] or current_price >= grid['sl']):
                 del self.active_grids[pid]
 
-        # 2. PATTERN DETECTION
+        # 2. PATTERN DETECTION (with Impulse Candle Fusion)
         avg_body = np.mean(np.abs(m1.o[-50:-1] - m1.c[-50:-1]))
         current_session = market_data.session
         
-        for i in range(len(m1) - 30, len(m1) - 1):
-            o, h, l_val, c_val = m1.o[i], m1.h[i], m1.l[i], m1.c[i]
-            if self._is_big_candle(o, h, l_val, c_val, avg_body, session=current_session):
-                is_bullish = c_val > o
-                c_range = h - l_val
-                pid = f"{'bull' if is_bullish else 'bear'}_{i}_{m1.time[i]}"
-                if pid in self.active_grids: continue
+        # We look for the most recent pattern ending at Bar -1 or -2
+        for i in range(len(m1) - 1, len(m1) - 15, -1):
+            # Check if Bar i is a big candle
+            if not self._is_big_candle(m1.o[i], m1.h[i], m1.l[i], m1.c[i], avg_body, session=current_session):
+                continue
                 
-                # V5-INSIGNIA PROFESSIONAL STANDARDS
-                if current_session in ["TOKYO", "ASIA", "ROLLOVER"]:
-                    r_pct = 0.80 # Deep snipe
-                    sl_div = 3.0 # High precision
+            is_bullish = m1.c[i] > m1.o[i]
+            
+            # --- IMPULSE CANDLE FUSION ---
+            # Group consecutive candles in the same direction
+            first_idx = i
+            while first_idx > 0:
+                prev = first_idx - 1
+                if (m1.c[prev] > m1.o[prev]) == is_bullish and \
+                   self._is_big_candle(m1.o[prev], m1.h[prev], m1.l[prev], m1.c[prev], avg_body, session=current_session):
+                    first_idx = prev
                 else:
-                    r_pct = 0.60 # Momentum capture
-                    sl_div = 1.5 # Volatility buffer
-                
-                if is_bullish:
-                    retrace_level = h - (c_range * r_pct)
-                    history_since = m1.l[i+1:-1]
-                    if m1.l[-1] <= retrace_level and (len(history_since) == 0 or not np.any(history_since <= retrace_level)):
-                        tp_dist = h - current_price
-                        sl = current_price - (tp_dist / sl_div)
-                        self.active_grids[pid] = {
-                            'direction': 'BUY', 'tp': h, 'sl': sl, 'last_entry': current_price, 'count': 1, 'symbol': market_data.symbol
-                        }
-                        logger.info(f"Signal: Bullish N ({current_session}) at {current_price}, TP: {h}, SL: {sl}")
-                        return TradeSignal(direction="BUY", confidence=1.0, price=current_price, stop_loss=sl, take_profit=h, volume=self.fixed_lot)
-                else:
-                    retrace_level = l_val + (c_range * r_pct)
-                    history_since = m1.h[i+1:-1]
-                    if m1.h[-1] >= retrace_level and (len(history_since) == 0 or not np.any(history_since >= retrace_level)):
-                        tp_dist = current_price - l_val
-                        sl = current_price + (tp_dist / sl_div)
-                        self.active_grids[pid] = {
-                            'direction': 'SELL', 'tp': l_val, 'sl': sl, 'last_entry': current_price, 'count': 1, 'symbol': market_data.symbol
-                        }
-                        logger.info(f"Signal: Bearish N ({current_session}) at {current_price}, TP: {l_val}, SL: {sl}")
-                        return TradeSignal(direction="SELL", confidence=1.0, price=current_price, stop_loss=sl, take_profit=l_val, volume=self.fixed_lot)
+                    break
+            
+            # Virtual Candle Construction
+            v_open = m1.o[first_idx]
+            v_close = m1.c[i]
+            v_high = np.max(m1.h[first_idx:i+1])
+            v_low = np.min(m1.l[first_idx:i+1])
+            v_range = v_high - v_low
+            
+            pid = f"{'bull' if is_bullish else 'bear'}_{first_idx}_{str(m1.time[first_idx])}"
+            if pid in self.active_grids: continue
+            
+            # Institutional Gating
+            r_pct = 0.80 if current_session in ["TOKYO", "ASIA", "ROLLOVER"] else 0.60
+            
+            if is_bullish:
+                retrace_level = v_high - (v_range * r_pct)
+                # Has it retraced since the end of the impulse?
+                history_since = m1.l[i+1:]
+                if len(history_since) > 0 and m1.l[-1] <= retrace_level and not np.any(history_since[:-1] <= retrace_level):
+                    tp_dist = v_high - current_price
+                    sl = current_price - tp_dist # 1:1
+                    self.active_grids[pid] = {
+                        'direction': 'BUY', 'tp': v_high, 'sl': sl, 'last_entry': current_price, 'count': 1, 'symbol': market_data.symbol
+                    }
+                    logger.info(f"Signal: Bullish N-Fusion ({current_session}) at {current_price}, TP: {v_high}, SL: {sl}")
+                    return TradeSignal(direction="BUY", confidence=1.0, price=current_price, stop_loss=sl, take_profit=v_high, volume=self.fixed_lot)
+            else:
+                retrace_level = v_low + (v_range * r_pct)
+                history_since = m1.h[i+1:]
+                if len(history_since) > 0 and m1.h[-1] >= retrace_level and not np.any(history_since[:-1] >= retrace_level):
+                    tp_dist = current_price - v_low
+                    sl = current_price + tp_dist # 1:1
+                    self.active_grids[pid] = {
+                        'direction': 'SELL', 'tp': v_low, 'sl': sl, 'last_entry': current_price, 'count': 1, 'symbol': market_data.symbol
+                    }
+                    logger.info(f"Signal: Bearish N-Fusion ({current_session}) at {current_price}, TP: {v_low}, SL: {sl}")
+                    return TradeSignal(direction="SELL", confidence=1.0, price=current_price, stop_loss=sl, take_profit=v_low, volume=self.fixed_lot)
 
-        # 3. GRID
+        # 3. GRID (with Safety SL)
         for pid, grid in self.active_grids.items():
             if grid['direction'] == 'BUY' and current_price <= grid['last_entry'] - 1.50:
                 grid['last_entry'] = current_price
                 grid['count'] += 1
-                return TradeSignal(direction="BUY", confidence=1.0, price=current_price, stop_loss=0, take_profit=grid['tp'], volume=self.fixed_lot)
+                tp_dist = grid['tp'] - current_price
+                sl = current_price - tp_dist # 1:1 Safety
+                return TradeSignal(direction="BUY", confidence=1.0, price=current_price, stop_loss=sl, take_profit=grid['tp'], volume=self.fixed_lot)
             elif grid['direction'] == 'SELL' and current_price >= grid['last_entry'] + 1.50:
                 grid['last_entry'] = current_price
                 grid['count'] += 1
-                return TradeSignal(direction="SELL", confidence=1.0, price=current_price, stop_loss=0, take_profit=grid['tp'], volume=self.fixed_lot)
+                tp_dist = current_price - grid['tp']
+                sl = current_price + tp_dist # 1:1 Safety
+                return TradeSignal(direction="SELL", confidence=1.0, price=current_price, stop_loss=sl, take_profit=grid['tp'], volume=self.fixed_lot)
 
         return None
 

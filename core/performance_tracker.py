@@ -93,7 +93,14 @@ class PerformanceTracker:
                 if holding_days > 0:
                     final_balance = initial_balance + net_profit
                     ratio = final_balance / initial_balance if initial_balance > 0 else 1.0
-                    cagr = (ratio ** (365.0 / holding_days) - 1.0) * 100  # as %
+                    if ratio > 0 and holding_days > 0:
+                        try:
+                            power = 365.0 / holding_days
+                            # Safety cap for extreme math results during account wipeouts
+                            if power < 1000:
+                                cagr = (ratio ** power - 1.0) * 100  # as %
+                        except (OverflowError, RuntimeWarning):
+                            cagr = 0.0
                     # Calmar = CAGR / Max Drawdown%  (higher is better)
                     calmar = (cagr / max_drawdown) if max_drawdown > 0 else 0.0
         except Exception:

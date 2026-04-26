@@ -91,7 +91,7 @@ class StochasticKernel:
         actual_slippage_pips = np.float64((total_friction / snapshot.point) if snapshot.point > 0 else 0.0)
 
         return ExecutionOutcome(
-            ticket=rng.integers(1000000, 9999999),
+            ticket=int(rng.integers(1000000, 9999999)),
             fill_price=float(fill_price),
             actual_slippage_pips=float(actual_slippage_pips),
             actual_latency_ms=float(latency_ms),
