@@ -1,8 +1,6 @@
 import os
 import time
 import pandas as pd
-import pyarrow
-import pyarrow.parquet
 import fastparquet
 import logging
 from typing import Optional, List
@@ -47,7 +45,7 @@ class ParquetStore:
             # Sort by time ensuring strict chronology
             df = df.sort_values("time").drop_duplicates("time")
             
-            df.to_parquet(temp_path, engine="pyarrow", index=False)
+            df.to_parquet(temp_path, engine="fastparquet", index=False)
             
             # Atomic swap on Windows with retry logic
             max_retries = 3
@@ -79,7 +77,7 @@ class ParquetStore:
             return None
             
         try:
-            df = pd.read_parquet(path, engine="pyarrow")
+            df = pd.read_parquet(path, engine="fastparquet")
             if df.empty:
                 return None
                 
@@ -104,7 +102,7 @@ class ParquetStore:
         try:
             # We use FastParquet to read only the metadata if possible, 
             # but reading the last few rows is also fast.
-            df = pd.read_parquet(path, columns=["time"], engine="pyarrow")
+            df = pd.read_parquet(path, columns=["time"], engine="fastparquet")
             return int(df["time"].max()) if not df.empty else 0
         except Exception:
             return 0

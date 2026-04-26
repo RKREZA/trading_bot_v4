@@ -14,4 +14,5 @@ hypothesis>=6.0.0
 pytest>=7.0.0
 optuna>=3.0.0
 pytz>=2023.3
-pyarrow>=10.0.0
+fastparquet>=2024.2.0
+cramjam>=2.8.0
