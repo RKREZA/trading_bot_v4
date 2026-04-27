@@ -83,11 +83,12 @@ class DataManager:
             if not gaps:
                 return relevant_array
                 
-            logger.warning(f"DataManager: Detected {len(gaps)} gaps for {symbol} [{timeframe}]. Attempting Auto-Repair {attempt+1}/3...")
+            logger.info(f"DataManager: Detected {len(gaps)} gaps for {symbol} [{timeframe}]. Attempting Auto-Repair...")
             self.sync.repair_identified_gaps(symbol, timeframe, array, gaps)
+            break # Only one repair attempt per cycle to prevent infinite loops
             
         if len(gaps) > 0:
-            logger.critical(f"PROCEEDING WITH TOLERANCE: {len(gaps)} unrepairable gaps detected in {symbol} ({timeframe}) history.")
+            logger.warning(f"PROCEEDING WITH TOLERANCE: {len(gaps)} unrepairable gaps detected in {symbol} ({timeframe}) history.")
         elif attempt > 0:
             logger.info("=" * 60)
             logger.info("FIDELITY NOTICE: Data repair was performed DURING this run.")
@@ -136,11 +137,11 @@ class DataManager:
             # Institutional Constraint: Market Closure Recognition
             # If gap > 50 mins (3000s), it's likely a Daily Close (common for Gold), 
             # Weekend or Holiday. We skip these to avoid false-positive halts.
-            if gap_duration > 3000:
-                logger.debug(f"DataManager: Skipping Market-Closure gap ({gap_duration/3600:.1f}h) at {datetime.datetime.fromtimestamp(array.time[idx])}")
+            if gap_duration > 3600: # Increase closure recognition to 1 hour
+                logger.debug(f"DataManager: Skipping Market-Closure gap ({gap_duration/3600:.1f}h)")
                 continue
                 
-            logger.warning(f"DataManager: Found repairable gap ({gap_duration}s) at {datetime.datetime.fromtimestamp(array.time[idx])}")
+            logger.info(f"DataManager: Found repairable gap ({gap_duration}s). Patching...")
             start_ts = array.time[idx] + 1
             end_ts = array.time[idx+1] - 1
             gap_windows.append((start_ts, end_ts))

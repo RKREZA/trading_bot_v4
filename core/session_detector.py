@@ -115,9 +115,12 @@ class SessionDetector:
             is_weekend = True
         elif weekday == 4 and hour >= 22:
             is_weekend = True
-        elif weekday == 6 and hour < 21:
+        elif weekday == 6 and hour < 22: # Gold opens at 22:00 UTC Sunday
             is_weekend = True
             
+        # Daily Break Logic (Gold usually 21:00 - 22:00 UTC)
+        is_daily_break = (hour == 21) and not is_weekend
+        
         eu_dst = SessionDetector._is_dst_active(utc_dt, "EU")
         us_dst = SessionDetector._is_dst_active(utc_dt, "US")
         
@@ -138,8 +141,25 @@ class SessionDetector:
         elif ny_close <= hour < 24:
             session = "ROLLOVER"
 
-        if is_weekend:
-            return f"{session} (CLOSED)"
+        if is_weekend or is_daily_break:
+            # Calculate time until next open
+            # Simplistic for Gold: next open is either 22:00 today or 22:00 Sunday
+            target_hour = 22
+            if is_weekend:
+                # If Saturday or Sunday before 22:00, target is Sunday 22:00
+                days_ahead = (6 - weekday) % 7
+                if weekday == 6: days_ahead = 0
+                target_dt = utc_dt.replace(hour=target_hour, minute=0, second=0, microsecond=0) + datetime.timedelta(days=days_ahead)
+            else:
+                target_dt = utc_dt.replace(hour=target_hour, minute=0, second=0, microsecond=0)
+                
+            diff = target_dt - utc_dt
+            hours, remainder = divmod(int(diff.total_seconds()), 3600)
+            minutes, _ = divmod(remainder, 60)
+            countdown = f"{hours:02d}h {minutes:02d}m"
+            
+            status = "CLOSED (Daily Break)" if is_daily_break else "CLOSED (Weekend)"
+            return f"{status} - Opens in {countdown}"
             
         return session
 
@@ -147,7 +167,8 @@ class SessionDetector:
     def get_session_info(dt: datetime.datetime) -> Dict[str, any]:
         """Returns comprehensive session information including scores."""
         session = SessionDetector.get_session(dt)
-        clean_session = session.replace(" (CLOSED)", "")
+        # Clean the session string for config lookup (remove all suffixes)
+        clean_session = session.split(" - ")[0].split(" (")[0]
         
         config = SessionDetector._SESSION_CONFIGS.get(clean_session)
         

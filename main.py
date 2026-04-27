@@ -724,7 +724,7 @@ class LiveOrchestrator:
             "ask": ask_now,
             "spread": spread_now,
             "pips": pips,
-            "session": SessionDetector.get_session(datetime.now().astimezone(), 0, symbol=self.symbol),
+            "session": SessionDetector.get_session(datetime.now().astimezone(), self.connection.server_utc_offset, symbol=self.symbol),
             "regime_type": status or "SYNCING...",
             "volatility": status or "SYNCING...",
             "equity_history": self.equity_history,
@@ -739,7 +739,7 @@ class LiveOrchestrator:
                 "session": md.session,
                 "timestamp": md.timestamp,
                 "local_time": datetime.now().astimezone().strftime("%d-%b-%Y %I:%M:%S %p %z"),
-                "server_time": self.connection.format_broker_time(md.timestamp.timestamp()),
+                "server_time": self.connection.format_broker_time(md.timestamp),
                 "rsi": md.m5_candles.get_indicator("rsi_14")[-1] if len(md.m5_candles.get_indicator("rsi_14")) > 0 else 0,
                 "atr": md.m5_candles.get_indicator("atr_14")[-1] if len(md.m5_candles.get_indicator("atr_14")) > 0 else 0,
                 "adx": md.m5_candles.get_indicator("adx_14")[-1] if len(md.m5_candles.get_indicator("adx_14")) > 0 else 0

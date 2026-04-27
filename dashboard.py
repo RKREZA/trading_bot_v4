@@ -34,31 +34,31 @@ class TradingDashboard:
         # The 'vacuum' absorbing everything else to ensure top-pinning
         self.layout.split_column(
             Layout(name="header", size=3),
-            Layout(name="body", size=12),
-            Layout(name="footer", size=5)
+            Layout(name="body", ratio=1),
+            Layout(name="logs_footer", size=10)
         )
         
-        # Footer Synchronization: Row-based horizontal split
-        self.layout["footer"].split_row(
-            Layout(name="footer_analysis", ratio=2),
-            Layout(name="footer_logs", ratio=3),
-            Layout(name="footer_calendar", ratio=3)
+        # Logs Footer: Split horizontally between Analysis and System Logs
+        self.layout["logs_footer"].split_row(
+            Layout(name="footer_analysis", ratio=1),
+            Layout(name="footer_logs", ratio=1)
         )
         
         # Body Refactor: Tiered Architecture
         self.layout["body"].split_column(
-            Layout(name="body_top", size=4),
-            Layout(name="body_middle", size=4),
-            Layout(name="setups", size=4)
+            Layout(name="body_top", size=8),
+            Layout(name="body_middle", size=8),
+            Layout(name="setups", size=5)
         )
         self.layout["body_top"].split_row(
-            Layout(name="environment", ratio=5),
-            Layout(name="risk", ratio=6),
-            Layout(name="exposure", ratio=6)
+            Layout(name="environment", ratio=1),
+            Layout(name="risk", ratio=1),
+            Layout(name="exposure", ratio=1)
         )
         self.layout["body_middle"].split_row(
-            Layout(name="performance", ratio=6),
-            Layout(name="trades", ratio=6)
+            Layout(name="performance", ratio=1),
+            Layout(name="trades", ratio=1),
+            Layout(name="calendar", ratio=1)
         )
 
     def _get_formatted_time(self) -> str:
@@ -80,7 +80,7 @@ class TradingDashboard:
         grid.add_column(justify="right", ratio=1)
         grid.add_row(
             Text(current_time, style="cyan"),
-            Text("V5-INSIGNIA PRODUCTION (LOCKED)", style="bold cyan"),
+            Text(f"V5-INSIGNIA", style="bold cyan"),
             Text(f"STATUS : {status_text}", style=status_color)
         )
         return Panel(grid, style="white on black")
@@ -100,7 +100,8 @@ class TradingDashboard:
         price_color = "bright_green" if price > self.prev_price else "bright_red" if price < self.prev_price else "white"
         self.prev_price = price
         
-        heartbeat = "[X]" if self.pulse_toggle else "[ ]"
+        heartbeat_icon = "●" if self.pulse_toggle else "○"
+        heartbeat = f"[bold bright_green blink]{heartbeat_icon}[/]"
         self.pulse_toggle = not self.pulse_toggle
         
         table = Table.grid(padding=0)
@@ -108,10 +109,12 @@ class TradingDashboard:
         table.add_column()
         table.add_row("SYMBOL  ", f"[bold yellow]{symbol}[/]")
         table.add_row("PRICE", f"[{price_color}]{ask:,.{digits}f} (ask) / {bid:,.{digits}f} (bid)[/]")
-        spread_display = f"[cyan]{spread_pts:,.0f}[/]" if spread > 0 else "[cyan]0[/]"
+        spread_pips = state.get("pips", 0.0)
+        spread_display = f"[cyan]{spread_pts:,.0f} pts ({spread_pips:.1f} pips)[/]" if spread > 0 else "[cyan]0[/]"
         table.add_row(f"SPREAD", spread_display)
         table.add_row("ALIVE", heartbeat)
-        table.add_row("SESSION", f"[blue]{session}[/]")
+        session_color = "red" if "CLOSED" in session else "bold bright_blue"
+        table.add_row("SESSION", f"[{session_color}]{session}[/]")
         table.add_row("VOL", f"[yellow]{volatility}[/]")
         
         return Panel(table, title="Environment Monitor", border_style="blue")
@@ -304,20 +307,26 @@ class TradingDashboard:
         news = state.get("news_list", [])
         
         grid = Table.grid(expand=True)
-        grid.add_column(ratio=1.0) # Analysis
-        grid.add_column(ratio=1.5) # Live Logs
-        grid.add_column(ratio=1.5) # Economic Calendar
+        grid.add_column(ratio=1) # Analysis
+        grid.add_column(ratio=1) # Live Logs
+        grid.add_column(ratio=1) # Economic Calendar
         
         # 1. ANALYSIS LOGS (Strategy heartbeats)
         analysis_text = Text()
-        for log in analysis_logs[-2:]:
-            analysis_text.append(f"> {log}\n", style="cyan")
+        if not analysis_logs:
+            analysis_text.append("> WAITING FOR STRATEGY SIGNAL...\n", style="dim cyan")
+        else:
+            for log in analysis_logs[-8:]:
+                analysis_text.append(f"> {log}\n", style="cyan")
             
         # 2. SYSTEM LOGS (Trades, Errors, Environment)
         system_text = Text()
-        for log in system_logs[-2:]:
-            color = "green" if "[TRADE]" in log else "red" if "[ERROR]" in log or "[FATAL]" in log else "white"
-            system_text.append(f"> {log}\n", style=color)
+        if not system_logs:
+            system_text.append("> INITIALIZING SYSTEM MODULES...\n", style="dim white")
+        else:
+            for log in system_logs[-8:]:
+                color = "green" if "[TRADE]" in log else "red" if "[ERROR]" in log or "[FATAL]" in log else "white"
+                system_text.append(f"> {log}\n", style=color)
             
         # 3. ECONOMIC CALENDAR
         news_text = Text()
@@ -403,8 +412,8 @@ class TradingDashboard:
         f_analysis, f_logs, f_calendar = self._make_footer(state)
         self.layout["footer_analysis"].update(f_analysis)
         self.layout["footer_logs"].update(f_logs)
-        self.layout["footer_calendar"].update(f_calendar)
+        self.layout["calendar"].update(f_calendar)
         return self.layout
 
 def start_dashboard(layout):
-    return Live(layout, auto_refresh=True, refresh_per_second=2, screen=False)
+    return Live(layout, auto_refresh=True, refresh_per_second=4, screen=True)
