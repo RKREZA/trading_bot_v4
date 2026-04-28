@@ -188,7 +188,7 @@ class PortfolioBacktester:
         self.max_drawdowns = state["max_drawdowns"]
         self.open_trades = state["open_trades"]
         self.history = state["history"]
-    def run(self, symbol: str, strategies: list, target_tf_data, h1_data, m15_data, m5_data, m1_data, d1_data=None, data_hashes: Dict[str, str] = None, resume: bool = False):
+    def run(self, symbol: str, strategies: list, target_tf_data, h1_data, m15_data, m5_data, m1_data, d1_data=None, data_hashes: Dict[str, str] = None, resume: bool = False, start_ts: float = 0):
         """
         V5-LOCKED Production Backtest Runner.
         Implements 'Step 15' development loop with Checkpoint support.
@@ -264,12 +264,15 @@ class PortfolioBacktester:
         self._validate_data_alignment(target_tf_data, m1_data)
 
         # V5-LOCKED: Ensure institutional warmup for HTF indicators (Step 9)
-        # RegimeDetector requires atr_14 with ≥100 values and adx_14 with ≥20 values.
-        # Minimum warmup reduced for N-Pattern Grid to capture the first Tokyo 
-        # session of the week.
-        start_idx = 50
+        # We start the simulation at the requested start_ts, but ensure we have 
+        # at least 50 bars of history for basic indicator stability.
+        if start_ts > 0:
+            start_idx = np.searchsorted(target_tf_data.time, start_ts)
+        else:
+            start_idx = 50
+            
         if start_idx >= len(target_tf_data.time):
-            start_idx = 0
+            start_idx = max(0, len(target_tf_data.time) - 1)
         
         if len(active_strategies) == 0:
             logger.warning(f"NO STRATEGIES LOADED - cannot run backtest")

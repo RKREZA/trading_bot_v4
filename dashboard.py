@@ -290,7 +290,7 @@ class TradingDashboard:
             for k, v in list(metrics.items())[:3]:
                 if not str(k).startswith("_"):
                     key_metrics.append(f"{k}:{v}")
-            req_str = ",".join([f"{k}:{v}" for k, v in list(thresholds.items())[:3]]) or "---"
+            req_str = " ".join([f"{k}:{v}" for k, v in list(thresholds.items())[:3]]) or "---"
             analysis_str = " ".join(key_metrics) if key_metrics else "N/A"
             
             bias_color = "bold green" if "BUY" in sig_dir.upper() else "bold red" if "SELL" in sig_dir.upper() else "dim white"

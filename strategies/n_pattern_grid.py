@@ -214,9 +214,9 @@ class NPatternGridStrategy(BaseStrategy):
     def get_thresholds(self) -> Dict[str, Any]:
         """Overrides BaseStrategy to show N-Pattern specific limits on dashboard."""
         return {
-            "lot": self.fixed_lot,
-            "max_grid": self.max_grid_size,
-            "max_bars": self.max_hold_bars
+            "grids": "-",
+            "pos": self.max_grid_size,
+            "bars": self.max_hold_bars
         }
 
     def on_trade_closed(self, trade_record: dict) -> None:

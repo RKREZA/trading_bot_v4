@@ -85,7 +85,9 @@ class DataManager:
                     continue 
 
             # Phase B: Extraction with Buffer
-            safe_idx_start = max(0, idx_start - 240) 
+            # Institutional Grade-A+: Buffer increased to 1500 bars to ensure 
+            # 24-hour indicators (like avg_body) are stable at simulation start.
+            safe_idx_start = max(0, idx_start - 1500) 
             relevant_array = array[safe_idx_start:]
             
             relevant_array = self._ensure_min_history(relevant_array, symbol, timeframe, start_date)

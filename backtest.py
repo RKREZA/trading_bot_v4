@@ -157,6 +157,9 @@ class BacktestCLI:
                 rprint(f"[bold red]CRITICAL DATA GAP:[/] M5 starts at {datetime.fromtimestamp(m5.time[0], tz=timezone.utc).date()}, but M1 starts later at {datetime.fromtimestamp(m1.time[0], tz=timezone.utc).date()}. Partial simulation rejected.")
                 return
 
+        rprint(f"[bold yellow]DEBUG:[/] M1 range: {datetime.fromtimestamp(m1.time[0], tz=timezone.utc)} to {datetime.fromtimestamp(m1.time[-1], tz=timezone.utc)}")
+        rprint(f"[bold yellow]DEBUG:[/] M1 last close: {m1.close[-1]}")
+
 
         # 3. Validation: Walk-Forward (Phase 15/16)
         if run_walk_forward:
@@ -202,7 +205,7 @@ class BacktestCLI:
                 dataset_hashes[tf] = DatasetFingerprinter.get_hash(p)
         
         # Full Simulation Run with V5 Lockdown Guards
-        backtester.run(symbol, strategies, primary_data, h1, m15, m5, m1, d1_data=d1, data_hashes=dataset_hashes, resume=resume)
+        backtester.run(symbol, strategies, primary_data, h1, m15, m5, m1, d1_data=d1, data_hashes=dataset_hashes, resume=resume, start_ts=dt_from.timestamp())
         history = backtester.history
         equity_history = backtester.equity_history
         
