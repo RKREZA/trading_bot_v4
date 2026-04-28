@@ -49,7 +49,7 @@ REM Default to XAUUSDm if no symbol provided
 set "SYMBOL=%~1"
 if "%SYMBOL%"=="" set "SYMBOL=XAUUSDm"
 set "STRATEGIES=%~2"
-if "%STRATEGIES%"=="" set "STRATEGIES=LiquiditySweepBreakout,RangeBounce"
+if "%STRATEGIES%"=="" set "STRATEGIES=NPatternGrid"
 
 echo Symbol: %SYMBOL%
 echo Strategies: %STRATEGIES%

@@ -94,7 +94,6 @@ class BacktestCLI:
         m15 = m15[m15.time < to_ts]
         
         # [ Institutional Warmup ]: Extend H1 to include historical warmup bars for strategy lookback
-        # LiquiditySweepBreakout needs 22+ H1 bars, and the set_limit logic reduces available bars
         # Extend H1 by 500 bars before test start to ensure strategies have sufficient historical data
         m5_start_ts = m5.time[0]
         h1_start_ts = h1.time[0]

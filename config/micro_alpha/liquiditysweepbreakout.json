@@ -1,9 +1,0 @@
-{
-  "lookback": 29,
-  "body_thresh": 0.3,
-  "h1_strength_thresh": 0.4,
-  "sl_atr": 1.1,
-  "tp_atr": 4.5,
-  "min_confidence": 0.30000000000000004,
-  "min_bars_between_signals": 11
-}

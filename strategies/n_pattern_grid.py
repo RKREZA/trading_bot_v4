@@ -30,7 +30,7 @@ class NPatternGridStrategy(BaseStrategy):
 
     def _is_big_candle(self, open_p, high, low, close, avg_body, session="GLOBAL"):
         threshold_map = {
-            "TOKYO": 0.94,
+            "TOKYO": 0.85,
             "LONDON/NY": 0.92,
             "LONDON": 0.90,
             "NEW_YORK": 0.87
@@ -206,9 +206,17 @@ class NPatternGridStrategy(BaseStrategy):
     def get_metrics(self, market_data: MarketData) -> Dict[str, Any]:
         """Required by BaseStrategy for dashboard reporting."""
         return {
-            "active_grids": len(self.active_grids), 
-            "total_positions": sum(g['count'] for g in self.active_grids.values()),
-            "avg_bars_held": float(np.mean([g['bars_held'] for g in self.active_grids.values()])) if self.active_grids else 0.0
+            "grids": len(self.active_grids), 
+            "pos": sum(g['count'] for g in self.active_grids.values()),
+            "bars": round(float(np.mean([g['bars_held'] for g in self.active_grids.values()])), 1) if self.active_grids else 0.0
+        }
+
+    def get_thresholds(self) -> Dict[str, Any]:
+        """Overrides BaseStrategy to show N-Pattern specific limits on dashboard."""
+        return {
+            "lot": self.fixed_lot,
+            "max_grid": self.max_grid_size,
+            "max_bars": self.max_hold_bars
         }
 
     def on_trade_closed(self, trade_record: dict) -> None:

@@ -193,9 +193,9 @@ class TestMagicNumberGeneration:
         not guaranteed uniqueness (which would require magic_number + sid registry).
         """
         rg = _make_rg()
-        id_a = "LiquiditySweepBreakout"
-        id_b = "SmartMeanReversion"
-        id_c = "TrendFollowing"
+        id_a = "NPatternGrid"
+        id_b = "NPatternGrid_v2"
+        id_c = "NPatternGrid_v3"
 
         # Determinism: same ID → same magic number on repeated calls
         assert rg.get_magic_number(id_a) == rg.get_magic_number(id_a)
@@ -206,16 +206,16 @@ class TestMagicNumberGeneration:
                   id_b: rg.get_magic_number(id_b),
                   id_c: rg.get_magic_number(id_c)}
         unique_vals = set(magics.values())
-        # All 3 production strategy IDs must produce distinct magic numbers
+        # All 3 strategy ID variations must produce distinct magic numbers
         assert len(unique_vals) == 3, (
-            f"Core strategy IDs must produce unique magic numbers. Got: {magics}"
+            f"Strategy ID variations must produce unique magic numbers. Got: {magics}"
         )
 
     def test_magic_number_determinism(self):
         """Same strategy_id must always return the same magic number."""
         rg = _make_rg()
-        m1 = rg.get_magic_number("LiquiditySweepBreakout")
-        m2 = rg.get_magic_number("LiquiditySweepBreakout")
+        m1 = rg.get_magic_number("NPatternGrid")
+        m2 = rg.get_magic_number("NPatternGrid")
         assert m1 == m2
 
 

@@ -60,9 +60,20 @@ class DataManager:
             
             # Phase A: Coverage Audit (Fidelity Check)
             tf_secs = {"M1": 60, "M5": 300, "M15": 900, "H1": 3600, "D1": 86400}.get(timeframe, 300)
-            days_requested = (now_ts - start_ts) / 86400
-            expected_bars = (days_requested * 86400 / tf_secs) * 0.7 
             
+            # Institutional Adjustment: Weekend-Aware Expectation
+            # If the period covers a weekend (~48h), we reduce expected bars by ~65%.
+            days_requested = (now_ts - start_ts) / 86400
+            wall_clock_expected = (days_requested * 86400 / tf_secs)
+            
+            # Simple heuristic: if days > 2, it likely spans a weekend. 
+            # Real institutional logic would use a holiday calendar.
+            if days_requested > 1.5:
+                # Reduce expectation by 48 hours worth of bars
+                weekend_bars = (48 * 3600 / tf_secs)
+                expected_bars = max(100, (wall_clock_expected - weekend_bars) * 0.8)
+            else:
+                expected_bars = wall_clock_expected * 0.8            
             idx_start = np.searchsorted(array.time, start_ts)
             current_slice = array[idx_start:]
             

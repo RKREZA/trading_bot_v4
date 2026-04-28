@@ -33,7 +33,7 @@ class TradingDashboard:
         # All functional tiers are set to exact content-height (fitting)
         # The 'vacuum' absorbing everything else to ensure top-pinning
         self.layout.split_column(
-            Layout(name="header", size=3),
+            Layout(name="header", size=4),
             Layout(name="body", ratio=1),
             Layout(name="logs_footer", size=10)
         )
@@ -64,24 +64,34 @@ class TradingDashboard:
     def _get_formatted_time(self) -> str:
         now = datetime.now().astimezone()
         tz_name = now.tzname() or "Local"
-        offset = now.strftime("%z")
-        # Format: 14-Apr-2026 07:54:30 (UTC+0600) BST
-        return now.strftime(f"%d-%b-%Y %H:%M:%S (UTC{offset}) {tz_name}")
+        offset_secs = now.utcoffset().total_seconds() if now.utcoffset() else 0
+        offset_hours = int(offset_secs / 3600)
+        sign = "+" if offset_hours >= 0 else ""
+        return now.strftime(f"%d-%b-%Y %I:%M:%S %p (UTC {sign}{offset_hours}) {tz_name}")
 
     def _make_header(self, state: dict) -> Panel:
         conn = state.get("connection", {}) or {}
         status_text = "ONLINE" if conn.get("connected") else "OFFLINE"
         status_color = "bold green" if conn.get("connected") else "bold red"
-        current_time = self._get_formatted_time()
+        
+        heartbeat_icon = "●" if self.pulse_toggle else "○"
+        heartbeat = f"[bold bright_green blink]{heartbeat_icon}[/]"
+        self.pulse_toggle = not self.pulse_toggle
+        
+        local_time = self._get_formatted_time()
+        server_time = state.get("server_time", "Syncing Server Time...")
         
         grid = Table.grid(expand=True)
         grid.add_column(justify="left", ratio=1)
         grid.add_column(justify="center", ratio=1)
         grid.add_column(justify="right", ratio=1)
+        
+        status_markup = f"\nSTATUS : [{status_color}]{status_text}[/]  {heartbeat}"
+        
         grid.add_row(
-            Text(current_time, style="cyan"),
-            Text(f"V5-INSIGNIA", style="bold cyan"),
-            Text(f"STATUS : {status_text}", style=status_color)
+            Text(f"LOCAL  : {local_time}\nSERVER : {server_time}", style="cyan"),
+            Text(f"\nV5-INSIGNIA", style="bold cyan"),
+            Text.from_markup(status_markup)
         )
         return Panel(grid, style="white on black")
 
@@ -100,10 +110,6 @@ class TradingDashboard:
         price_color = "bright_green" if price > self.prev_price else "bright_red" if price < self.prev_price else "white"
         self.prev_price = price
         
-        heartbeat_icon = "●" if self.pulse_toggle else "○"
-        heartbeat = f"[bold bright_green blink]{heartbeat_icon}[/]"
-        self.pulse_toggle = not self.pulse_toggle
-        
         table = Table.grid(padding=0)
         table.add_column(style="bold magenta")
         table.add_column()
@@ -112,7 +118,6 @@ class TradingDashboard:
         spread_pips = state.get("pips", 0.0)
         spread_display = f"[cyan]{spread_pts:,.0f} pts ({spread_pips:.1f} pips)[/]" if spread > 0 else "[cyan]0[/]"
         table.add_row(f"SPREAD", spread_display)
-        table.add_row("ALIVE", heartbeat)
         session_color = "red" if "CLOSED" in session else "bold bright_blue"
         table.add_row("SESSION", f"[{session_color}]{session}[/]")
         table.add_row("VOL", f"[yellow]{volatility}[/]")

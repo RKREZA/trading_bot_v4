@@ -56,10 +56,10 @@ def create_strategy(strategy_id: str, st_type: str = None, config: dict = None):
     
     # Auto-resolve type if not provided
     if not st_type:
-        # Heuristic resolution based on common ID patterns
-        if "pattern" in strategy_id.lower() or "grid" in strategy_id.lower(): st_type = "NPATTERNGRID"
+        if "pattern" in strategy_id.lower() or "grid" in strategy_id.lower() or strategy_id == "NPatternGrid":
+            st_type = "NPATTERNGRID"
         else:
-            raise ValueError(f"Could not auto-resolve strategy type for ID '{strategy_id}'. Please provide it explicitly.")
+            raise ValueError(f"Could not auto-resolve strategy type for ID '{strategy_id}'.")
 
     # Normalization
     st_type = st_type.upper().replace("_", "")
