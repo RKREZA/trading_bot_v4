@@ -90,14 +90,20 @@ class LiquidityPriceActionStrategy(BaseStrategy):
             self.last_rejection_reason = f"Session gated: {session}"
             return None
 
-        if not self.is_spread_safe(market_data):
-            return None
+        # =====================================================================
+        # STEP 1: D1 BIAS (BOS/CHoCH + EMA confirmation) or H1 fallback
+        # =====================================================================
+        bias = 0
+        if has_d1:
+            bias = self._get_daily_bias(d1)
+            
+        # THE FIX: If D1 is chopping/ranging (bias == 0) OR missing, drop down to H1 trend
+        if bias == 0:
+            bias = self._get_ema_trend(h1, fast=20, slow=50)
 
-        # --- Regime gate (Relaxed for high frequency, but high confidence required) ---
-        regime_allowed = market_data.regime in ["TRENDING", "STABLE", "LIQUIDITY_EVENT"]
-        is_high_conf_regime = market_data.regime in ["RANGING", "TRANSITION", "EXPANSION"]
-        
-        # We allow all regimes, but we'll score them differently in confluence
+        if bias == 0:
+            self.last_rejection_reason = "No directional bias"
+            return None
 
         # ATRs
         atr_h1 = h1.atr(14)
@@ -118,17 +124,7 @@ class LiquidityPriceActionStrategy(BaseStrategy):
         vol_spike = float(cfg.get("volume_spike_factor", 1.5))
         sl_mult = float(cfg.get("sl_atr_buffer_mult", 0.3))
 
-        # =====================================================================
-        # STEP 1: D1 BIAS (BOS/CHoCH + EMA confirmation) or H1 fallback
-        # =====================================================================
-        if has_d1:
-            bias = self._get_daily_bias(d1)
-        else:
-            # Fallback: use H1 EMA 20/50 for trend direction
-            bias = self._get_ema_trend(h1, fast=20, slow=50)
-        if bias == 0:
-            self.last_rejection_reason = "No directional bias"
-            return None
+
 
         # =====================================================================
         # STEP 2: H1 ZONE DISCOVERY
@@ -243,33 +239,41 @@ class LiquidityPriceActionStrategy(BaseStrategy):
         return 0
 
     # =========================================================================
-    # D1 BIAS: BOS/CHoCH + EMA 50/200
+    # D1 BIAS: BOS/CHoCH + EMA 20/50 (Relaxed Intraday Variant)
     # =========================================================================
     def _get_daily_bias(self, d1: CandleArray) -> int:
+        ema20 = d1.ema(20)
         ema50 = d1.ema(50)
-        ema200 = d1.ema(200)
-        if len(ema50) < 2 or len(ema200) < 2:
+        
+        if len(ema20) < 2 or len(ema50) < 2:
             return 0
-        e50, e200 = ema50[-1], ema200[-1]
-        if np.isnan(e50) or np.isnan(e200):
+            
+        e20, e50 = ema20[-1], ema50[-1]
+        if np.isnan(e20) or np.isnan(e50):
             return 0
 
-        # EMA alignment
+        # Faster EMA alignment
         ema_bias = 0
-        if e50 > e200:
+        if e20 > e50:
             ema_bias = 1
-        elif e50 < e200:
+        elif e20 < e50:
             ema_bias = -1
 
         # BOS/CHoCH: check last 20 daily swings
         struct_bias = self._detect_structure(d1, lookback=20)
 
-        # Both must agree (Rule 2.1: Absolute Agreement)
+        # SCENARIO A: Absolute Agreement (High Probability)
         if ema_bias == struct_bias and ema_bias != 0:
             return ema_bias
-        # If structure is strong, allow it alone only if price is aligned with EMA
-        if struct_bias != 0 and abs(e50 - e200) / max(e50, e200) < 0.002:
+            
+        # SCENARIO B: Structure overrides MA lag (CHoCH occurred, EMAs haven't crossed yet)
+        if struct_bias != 0:
             return struct_bias
+            
+        # SCENARIO C: Price is structurally ranging, but has short-term EMA momentum
+        if struct_bias == 0 and ema_bias != 0:
+            return ema_bias
+
         return 0
 
     def _detect_structure(self, candles: CandleArray, lookback: int = 20) -> int:
