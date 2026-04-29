@@ -183,7 +183,7 @@ class PerformanceTracker:
         sessions = portfolio_results.get('sessions', {})
         lines.append(f" SESSION PERFORMANCE HEATMAP:")
         for name, res in sessions.items():
-            lines.append(f" - {name:<15} Profit: ${res.get('net_profit', 0):<12} WR: {res.get('win_rate', '0%')}")
+            lines.append(f" - {name:<15} Profit: ${res.get('net_profit', 0):<12} WR: {res.get('win_rate', '0%')} TRADE COUNT: {res.get('total_trades', 0)}")
             
         lines.append("=" * 80)
         return "\n".join(lines)
