@@ -22,12 +22,9 @@ from core.common.types import TradeSignal, CandleArray
 
 logger = logging.getLogger("trading_bot.strategy.liquidity_price_action")
 
-# --- Killzone windows (UTC hours) ---
-KILLZONES = {
-    "LONDON_OPEN": (7, 9),
-    "NY_OPEN": (13, 15),
-    "LONDON_NY_OVERLAP": (12, 16),
-}
+# --- Liquidity Price Action Strategy ---
+# V6-INSIGNIA Institutional Gold Scalping Engine
+# ZERO HARDCODING: All parameters driven by config/symbols/XAUUSDm.json
 
 
 class LiquidityPriceActionStrategy(BaseStrategy):
@@ -38,29 +35,43 @@ class LiquidityPriceActionStrategy(BaseStrategy):
 
     def __init__(self, strategy_id: str, config: dict):
         super().__init__(strategy_id, config)
+        
+        # Load Strategy Configuration
         cfg = self.get_strat_config()
-
-        # VWAP
-        self.vwap_session_bars = cfg.get("vwap_session_bars", 96)
-        # Volume Profile
-        self.vp_lookback = cfg.get("volume_profile_lookback", 20)
-        self.vp_bins = cfg.get("volume_profile_bins", 50)
-        # Turtle Soup
-        self.ts_lookback = cfg.get("turtle_soup_lookback", 20)
-        self.ts_atr_mult = cfg.get("turtle_soup_threshold_atr_mult", 0.3)
-        # Zone proximity
-        self.zone_prox_mult = cfg.get("zone_proximity_atr_mult", 0.5)
-        # Volume spike
-        self.vol_spike_factor = cfg.get("volume_spike_factor", 1.5)
-        # ADX
-        self.adx_threshold = cfg.get("adx_trend_threshold", 25)
-        # SL buffer
-        self.sl_atr_mult = cfg.get("sl_atr_buffer_mult", 0.3)
-        # Min R:R
-        self.min_rr = float(cfg.get("min_rr", 2.5))
-        # FVG
-        self.fvg_min_atr_mult = cfg.get("fvg_min_atr_mult", 0.3)
-
+        lookbacks = cfg.get("lookbacks")
+        weights = cfg.get("weights")
+        
+        # Lookbacks
+        self.vwap_session_bars = lookbacks.get("vwap_session_bars")
+        self.vp_lookback = lookbacks.get("volume_profile_lookback")
+        self.vp_bins = lookbacks.get("volume_profile_bins")
+        self.ts_lookback = lookbacks.get("turtle_soup_lookback")
+        
+        # Weights (Base)
+        self.base_score = weights.get("base_score")
+        
+        # Killzones (from config)
+        self.killzones = cfg.get("killzones")
+        
+        # Weights & Logic blocks
+        self.weights = cfg.get("weights")
+        self.confirmation = cfg.get("confirmation")
+        self.strengths = cfg.get("strengths")
+        self.thresholds = cfg.get("thresholds")
+        
+        # State tracking
+        self.ts_atr_mult = cfg.get("turtle_soup_threshold_atr_mult")
+        self.zone_prox_mult = cfg.get("zone_proximity_atr_mult")
+        self.vol_spike_factor = cfg.get("volume_spike_factor")
+        self.adx_threshold = cfg.get("adx_trend_threshold")
+        self.sl_atr_mult = cfg.get("sl_atr_buffer_mult")
+        
+        self.fvg_lookback = lookbacks.get("fvg_lookback")
+        self.fib_lookback = lookbacks.get("fib_lookback")
+        self.struct_lookback = lookbacks.get("structure_lookback")
+        self.fvg_min_atr_mult = cfg.get("fvg_min_atr_mult")
+        self.min_rr = cfg.get("min_rr")
+        
         self.last_rejection_reason = None
 
     # =========================================================================
@@ -85,7 +96,9 @@ class LiquidityPriceActionStrategy(BaseStrategy):
         session = market_data.session
 
         # --- Session gate ---
-        allowed_sessions = self.get_strat_config().get("allowed_sessions", ["LONDON", "NEW_YORK", "LONDON/NY"])
+        strat_cfg = self.get_strat_config()
+        allowed_sessions = strat_cfg.get("allowed_sessions")
+            
         if session not in allowed_sessions:
             self.last_rejection_reason = f"Session gated: {session}"
             return None
@@ -115,14 +128,15 @@ class LiquidityPriceActionStrategy(BaseStrategy):
         if np.isnan(cur_atr_h1) or cur_atr_h1 == 0:
             return None
 
-        # --- Dynamic Parameter Resolution ---
+        # --- Dynamic Parameter Resolution (STRICT CONFIG) ---
         cfg = self.get_strat_config(session)
-        min_conf = float(cfg.get("min_confidence", self.min_confidence))
-        min_rr = float(cfg.get("min_rr", self.min_rr))
-        adx_thresh = float(cfg.get("adx_trend_threshold", 25))
-        zone_prox = float(cfg.get("zone_proximity_atr_mult", 0.5))
-        vol_spike = float(cfg.get("volume_spike_factor", 1.5))
-        sl_mult = float(cfg.get("sl_atr_buffer_mult", 0.3))
+        min_conf = float(cfg.get("min_confidence"))
+        min_rr = float(cfg.get("min_rr"))
+        adx_thresh = float(cfg.get("adx_trend_threshold"))
+        zone_prox = float(cfg.get("zone_proximity_atr_mult"))
+        vol_spike = float(cfg.get("volume_spike_factor"))
+        sl_mult = float(cfg.get("sl_atr_buffer_mult"))
+        fvg_min_atr = float(cfg.get("fvg_min_atr_mult"))
 
 
 
@@ -163,7 +177,7 @@ class LiquidityPriceActionStrategy(BaseStrategy):
         # =====================================================================
         # STEP 4: KILLZONE CHECK
         # =====================================================================
-        kz_bonus = self._is_killzone(market_data)
+        kz_bonus = self._is_killzone(market_data.timestamp.hour)
 
         # =====================================================================
         # STEP 5: CONFLUENCE SCORING
@@ -323,18 +337,18 @@ class LiquidityPriceActionStrategy(BaseStrategy):
         zones = []
 
         # 1. VWAP bands
-        vwap_bars = cfg.get("vwap_session_bars", 96)
+        vwap_bars = self.vwap_session_bars
         zones.extend(self._vwap_zones(m15, atr, bias, vwap_bars))
         # 2. Volume Profile
-        vp_lookback = cfg.get("volume_profile_lookback", 20)
-        vp_bins = cfg.get("volume_profile_bins", 50)
+        vp_lookback = self.vp_lookback
+        vp_bins = self.vp_bins
         zones.extend(self._volume_profile_zones(h1, atr, bias, vp_lookback, vp_bins))
         # 3. Turtle Soup
-        ts_lookback = cfg.get("turtle_soup_lookback", 20)
-        ts_atr_mult = cfg.get("turtle_soup_threshold_atr_mult", 0.3)
+        ts_lookback = self.ts_lookback
+        ts_atr_mult = self.ts_atr_mult
         zones.extend(self._turtle_soup_zones(h1, atr, bias, ts_lookback, ts_atr_mult))
         # 4. Fair Value Gaps
-        fvg_atr_mult = cfg.get("fvg_min_atr_mult", 0.3)
+        fvg_atr_mult = self.fvg_min_atr_mult
         zones.extend(self._fvg_zones(h1, atr, bias, fvg_atr_mult))
         # 5. Premium/Discount
         zones.extend(self._premium_discount_zones(h1, atr, bias))
@@ -349,7 +363,7 @@ class LiquidityPriceActionStrategy(BaseStrategy):
         for i, z in enumerate(zones):
             nearby_count = sum(
                 1 for oz in zones
-                if oz is not z and abs(oz["price"] - z["price"]) < atr * 0.3
+                if oz is not z and abs(oz["price"] - z["price"]) < atr * self.zone_prox_mult
             )
             z["confluence_count"] = nearby_count
 
@@ -364,14 +378,15 @@ class LiquidityPriceActionStrategy(BaseStrategy):
         if np.isnan(vwap[-1]):
             return zones
 
+        s = self.strengths
         if bias == 1:  # Bullish: look for support zones
-            zones.append({"price": float(l1[-1]), "type": "VWAP_-1SD", "tool": "vwap", "strength": 0.7})
-            zones.append({"price": float(l2[-1]), "type": "VWAP_-2SD", "tool": "vwap", "strength": 0.9})
-            zones.append({"price": float(vwap[-1]), "type": "VWAP", "tool": "vwap", "strength": 0.5})
+            zones.append({"price": float(l1[-1]), "type": "VWAP_-1SD", "tool": "vwap", "strength": s.get("vwap_sd1")})
+            zones.append({"price": float(l2[-1]), "type": "VWAP_-2SD", "tool": "vwap", "strength": s.get("vwap_sd2")})
+            zones.append({"price": float(vwap[-1]), "type": "VWAP", "tool": "vwap", "strength": s.get("vwap_base")})
         else:  # Bearish: look for resistance zones
-            zones.append({"price": float(u1[-1]), "type": "VWAP_+1SD", "tool": "vwap", "strength": 0.7})
-            zones.append({"price": float(u2[-1]), "type": "VWAP_+2SD", "tool": "vwap", "strength": 0.9})
-            zones.append({"price": float(vwap[-1]), "type": "VWAP", "tool": "vwap", "strength": 0.5})
+            zones.append({"price": float(u1[-1]), "type": "VWAP_+1SD", "tool": "vwap", "strength": s.get("vwap_sd1")})
+            zones.append({"price": float(u2[-1]), "type": "VWAP_+2SD", "tool": "vwap", "strength": s.get("vwap_sd2")})
+            zones.append({"price": float(vwap[-1]), "type": "VWAP", "tool": "vwap", "strength": s.get("vwap_base")})
         return zones
 
     def _volume_profile_zones(self, h1: CandleArray, atr: float, bias: int, vp_lookback: int, vp_bins: int) -> List[Dict]:
@@ -383,11 +398,12 @@ class LiquidityPriceActionStrategy(BaseStrategy):
         if np.isnan(vp["poc"]):
             return zones
 
-        zones.append({"price": vp["poc"], "type": "VP_POC", "tool": "volume_profile", "strength": 0.9})
+        s = self.strengths
+        zones.append({"price": vp["poc"], "type": "VP_POC", "tool": "volume_profile", "strength": s.get("vp_poc")})
         if bias == 1:
-            zones.append({"price": vp["val"], "type": "VP_VAL", "tool": "volume_profile", "strength": 0.8})
+            zones.append({"price": vp["val"], "type": "VP_VAL", "tool": "volume_profile", "strength": s.get("vp_val_vah")})
         else:
-            zones.append({"price": vp["vah"], "type": "VP_VAH", "tool": "volume_profile", "strength": 0.8})
+            zones.append({"price": vp["vah"], "type": "VP_VAH", "tool": "volume_profile", "strength": s.get("vp_val_vah")})
         return zones
 
     def _turtle_soup_zones(self, h1: CandleArray, atr: float, bias: int, lookback: int, atr_mult: float) -> List[Dict]:
@@ -417,7 +433,7 @@ class LiquidityPriceActionStrategy(BaseStrategy):
                     "price": float(swing_high),
                     "type": "TURTLE_SOUP_HIGH",
                     "tool": "turtle_soup",
-                    "strength": 0.85,
+                    "strength": self.strengths.get("turtle_soup"),
                     "sweep_wick": float(last_h),
                 })
 
@@ -429,7 +445,7 @@ class LiquidityPriceActionStrategy(BaseStrategy):
                     "price": float(swing_low),
                     "type": "TURTLE_SOUP_LOW",
                     "tool": "turtle_soup",
-                    "strength": 0.85,
+                    "strength": self.strengths.get("turtle_soup"),
                     "sweep_wick": float(last_l),
                 })
         return zones
@@ -442,8 +458,9 @@ class LiquidityPriceActionStrategy(BaseStrategy):
             return zones
 
         min_gap = atr * fvg_min_atr_mult
-        # Scan last 15 H1 bars for FVGs
-        for i in range(max(3, n - 15), n - 1):
+        # Scan configured lookback for FVGs
+        fvg_lookback = self.fvg_lookback
+        for i in range(max(3, n - fvg_lookback), n - 1):
             # Bullish FVG: candle[i-2].high < candle[i].low (gap up)
             if h1.h[i - 2] < h1.l[i] - min_gap:
                 fvg_mid = (h1.h[i - 2] + h1.l[i]) / 2.0
@@ -452,7 +469,7 @@ class LiquidityPriceActionStrategy(BaseStrategy):
                         "price": float(fvg_mid),
                         "type": "FVG_BULL",
                         "tool": "fvg",
-                        "strength": 0.75,
+                        "strength": self.strengths.get("fvg"),
                         "fvg_top": float(h1.l[i]),
                         "fvg_bot": float(h1.h[i - 2]),
                     })
@@ -464,7 +481,7 @@ class LiquidityPriceActionStrategy(BaseStrategy):
                         "price": float(fvg_mid),
                         "type": "FVG_BEAR",
                         "tool": "fvg",
-                        "strength": 0.75,
+                        "strength": self.strengths.get("fvg"),
                         "fvg_top": float(h1.l[i - 2]),
                         "fvg_bot": float(h1.h[i]),
                     })
@@ -478,7 +495,7 @@ class LiquidityPriceActionStrategy(BaseStrategy):
             return zones
 
         # Find last significant impulse (swing high to swing low or vice versa)
-        seg = 30
+        seg = self.fib_lookback
         highs = h1.h[-seg:]
         lows = h1.l[-seg:]
         swing_hi_idx = np.argmax(highs)
@@ -486,22 +503,22 @@ class LiquidityPriceActionStrategy(BaseStrategy):
         swing_hi = float(highs[swing_hi_idx])
         swing_lo = float(lows[swing_lo_idx])
         leg = swing_hi - swing_lo
-        if leg <= atr * 0.5:
+        if leg <= atr * self.thresholds.get("fib_min_leg_atr_mult"):
             return zones
 
         # Fib levels
         fib_50 = swing_lo + leg * 0.5
         fib_618 = swing_lo + leg * 0.618
-        fib_786 = swing_lo + leg * 0.786
-
+        
+        s = self.strengths
         if bias == 1 and swing_lo_idx < swing_hi_idx:
             # Bullish: discount zone is 50-79% retracement (lower prices)
-            zones.append({"price": float(fib_50), "type": "FIB_50_DISCOUNT", "tool": "fib", "strength": 0.65})
-            zones.append({"price": float(fib_618), "type": "FIB_618_DISCOUNT", "tool": "fib", "strength": 0.7})
+            zones.append({"price": float(fib_50), "type": "FIB_50_DISCOUNT", "tool": "fib", "strength": s.get("fib_50")})
+            zones.append({"price": float(fib_618), "type": "FIB_618_DISCOUNT", "tool": "fib", "strength": s.get("fib_618")})
         elif bias == -1 and swing_hi_idx < swing_lo_idx:
             # Bearish: premium zone is 50-79% retracement (higher prices)
-            zones.append({"price": float(fib_50), "type": "FIB_50_PREMIUM", "tool": "fib", "strength": 0.65})
-            zones.append({"price": float(fib_618), "type": "FIB_618_PREMIUM", "tool": "fib", "strength": 0.7})
+            zones.append({"price": float(fib_50), "type": "FIB_50_PREMIUM", "tool": "fib", "strength": s.get("fib_50")})
+            zones.append({"price": float(fib_618), "type": "FIB_618_PREMIUM", "tool": "fib", "strength": s.get("fib_618")})
         return zones
 
     # =========================================================================
@@ -523,13 +540,16 @@ class LiquidityPriceActionStrategy(BaseStrategy):
         upper_wick = h - max(o, c)
         lower_wick = min(o, c) - l
 
-        # M1 requirement: Wick must be at least 60% (surgical precision)
-        is_bull_reject = lower_wick > total * 0.6 and c > o
-        is_bear_reject = upper_wick > total * 0.6 and c < o
+        # M1 requirement: Wick/Engulfing (Config Driven)
+        wick_ratio = self.confirmation.get("m1_wick_ratio")
+        engulf_factor = self.confirmation.get("m1_engulf_factor")
+        
+        is_bull_reject = lower_wick > total * wick_ratio and c > o
+        is_bear_reject = upper_wick > total * wick_ratio and c < o
 
         # Full body engulfing on M1
-        is_bull_engulf = c > o and c > m1.h[-3] and pc < po and body > (abs(pc-po) * 1.5)
-        is_bear_engulf = c < o and c < m1.l[-3] and pc > po and body > (abs(pc-po) * 1.5)
+        is_bull_engulf = c > o and c > m1.h[-3] and pc < po and body > (abs(pc-po) * engulf_factor)
+        is_bear_engulf = c < o and c < m1.l[-3] and pc > po and body > (abs(pc-po) * engulf_factor)
 
         if bias == 1 and (is_bull_reject or is_bull_engulf):
             pattern = "M1_PIN_BAR" if is_bull_reject else "M1_ENGULFING"
@@ -556,9 +576,10 @@ class LiquidityPriceActionStrategy(BaseStrategy):
         upper_wick = h - max(o, c)
         lower_wick = min(o, c) - l
 
-        # Liquidity Sweep Requirement: M5 wick must exceed previous 3 bars
-        swept_low = l < min(m5.l[-5:-2]) if bias == 1 else False
-        swept_high = h > max(m5.h[-5:-2]) if bias == -1 else False
+        # Liquidity Sweep Requirement: M5 wick must exceed previous N bars (from config)
+        lookback = self.confirmation.get("m5_sweep_lookback")
+        swept_low = l < min(m5.l[-(lookback+2):-2]) if bias == 1 else False
+        swept_high = h > max(m5.h[-(lookback+2):-2]) if bias == -1 else False
 
         if bias == 1 and not swept_low and zone.get("tool") != "fvg":
             return False, ""
@@ -566,8 +587,9 @@ class LiquidityPriceActionStrategy(BaseStrategy):
             return False, ""
 
         # Pin bar / rejection
-        is_bull_reject = lower_wick > total * 0.5 and c > o
-        is_bear_reject = upper_wick > total * 0.5 and c < o
+        wick_ratio = self.confirmation.get("m5_wick_ratio")
+        is_bull_reject = lower_wick > total * wick_ratio and c > o
+        is_bear_reject = upper_wick > total * wick_ratio and c < o
 
         # Engulfing
         is_bull_engulf = c > o and c > m5.h[-3] and pc < po
@@ -585,15 +607,11 @@ class LiquidityPriceActionStrategy(BaseStrategy):
     # =========================================================================
     # KILLZONE
     # =========================================================================
-    def _is_killzone(self, md: MarketData) -> bool:
-        """Returns True if current time is within a killzone window."""
-        try:
-            hour = md.timestamp.hour
-            for _, (start, end) in KILLZONES.items():
-                if start <= hour < end:
-                    return True
-        except Exception:
-            pass
+    def _is_killzone(self, hour: int) -> bool:
+        """Checks if current hour is within any configured killzone."""
+        for name, (start, end) in self.killzones.items():
+            if start <= hour < end:
+                return True
         return False
 
     # =========================================================================
@@ -610,50 +628,53 @@ class LiquidityPriceActionStrategy(BaseStrategy):
     # =========================================================================
     # CONFLUENCE SCORING
     # =========================================================================
+    # CONFLUENCE SCORING
+    # =========================================================================
     def _calculate_confluence(self, zone: Dict, vol_confirmed: bool,
-                               adx: float, killzone: bool, pattern: str, adx_threshold: float) -> float:
-        score = 0.10  # base
+                                adx: float, killzone: bool, pattern: str, adx_threshold: float) -> float:
+        w = self.weights
+        score = w.get("base_score")
 
         # Zone tool weight
         tool = zone.get("tool", "")
         if tool == "vwap":
-            score += 0.15
+            score += w.get("vwap_weight")
         elif tool == "volume_profile":
-            score += 0.15
+            score += w.get("vp_weight")
         elif tool == "turtle_soup":
-            score += 0.20
+            score += w.get("ts_weight")
         elif tool == "fvg":
-            score += 0.15
+            score += w.get("fvg_weight")
         elif tool == "fib":
-            score += 0.10
+            score += w.get("fib_weight")
 
         # Zone strength
-        score += zone.get("strength", 0.5) * 0.10
+        score += zone.get("strength", 0.5) * w.get("strength_mult")
 
         # Multi-zone confluence
         confl = zone.get("confluence_count", 0)
         if confl >= 2:
-            score += 0.15
+            score += w.get("confluence_2_plus")
         elif confl >= 1:
-            score += 0.10
+            score += w.get("confluence_1_plus")
 
         # Volume confirmation
         if vol_confirmed:
-            score += 0.10
+            score += w.get("vol_spike_weight")
 
         # ADX trending
         if adx > adx_threshold:
-            score += 0.10
+            score += w.get("adx_weight")
 
         # Killzone bonus
         if killzone:
-            score += 0.10
+            score += w.get("killzone_weight")
 
         # Pattern bonus
         if pattern == "ENGULFING":
-            score += 0.05
+            score += w.get("engulfing_weight")
 
-        return min(score, 0.95)
+        return min(score, self.thresholds.get("max_confluence_score"))
 
     def _compute_sl_tp(self, direction: str, price: float, zone: Dict,
                         all_zones: List[Dict], atr: float,
