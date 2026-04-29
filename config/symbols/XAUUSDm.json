@@ -58,11 +58,24 @@
       "sl_atr_buffer_mult": 0.5,
       "max_spread_atr_ratio": 0.20,
       "allowed_sessions": [
+        "TOKYO",
         "LONDON",
         "NEW_YORK",
         "LONDON/NY"
       ],
       "session_overrides": {
+        "TOKYO": {
+          "min_confidence": 0.75,
+          "min_rr": 2.0,
+          "adx_trend_threshold": 12,
+          "sl_atr_buffer_mult": 0.4
+        },
+        "LONDON": {
+          "min_confidence": 0.65,
+          "min_rr": 1,
+          "adx_trend_threshold": 15,
+          "sl_atr_buffer_mult": 0.4
+        },
         "LONDON/NY": {
           "min_confidence": 0.60,
           "min_rr": 4.0,
