@@ -2,9 +2,9 @@
 LIQUIDITY PRICE ACTION (LPA) STRATEGY
 ======================================
 Institutional-grade Smart Money Concepts strategy using top-down analysis:
-  D1 (Bias via BOS/CHoCH + EMA) → H1 (Zone Discovery) → M15 (Execution)
+  H1 (Bias via BOS/CHoCH + EMA) → M15 (Zone Discovery) → M1 (Execution)
 
-Zone Detection Tools:
+Zone Detection Tools (M15):
   1. Session VWAP + σ bands
   2. Fixed Range Volume Profile (POC/VAH/VAL)
   3. Turtle Soup (false breakout detection)
@@ -32,7 +32,7 @@ KILLZONES = {
 
 class LiquidityPriceActionStrategy(BaseStrategy):
     """
-    Institutional LPA Strategy — M15 execution with D1→H1 top-down bias.
+    Institutional LPA Strategy — M1 execution with H1→M15 top-down bias.
     Symbol-agnostic: uses MarketData.point for all price calculations.
     """
 
@@ -67,18 +67,16 @@ class LiquidityPriceActionStrategy(BaseStrategy):
     # MAIN SIGNAL PIPELINE
     # =========================================================================
     def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
-        d1 = market_data.d1_candles
         h1 = market_data.htf_candles
         m15 = market_data.m15_candles
+        m1 = market_data.m1_candles
 
-        if h1 is None or m15 is None:
-            self.last_rejection_reason = "Missing MTF data (H1/M15)"
+        if h1 is None or m15 is None or m1 is None:
+            self.last_rejection_reason = "Missing MTF data (H1/M15/M1)"
             return None
-        if len(h1) < 30 or len(m15) < 30:
+        if len(h1) < 50 or len(m15) < 50 or len(m1) < 21:
             self.last_rejection_reason = "Insufficient history"
             return None
-            
-        has_d1 = d1 is not None and len(d1) >= 60
 
         price = market_data.bid if market_data.bid > 0 else market_data.current_price
         point = market_data.point or 0.01
@@ -100,11 +98,15 @@ class LiquidityPriceActionStrategy(BaseStrategy):
         # ATRs
         atr_h1 = h1.atr(14)
         atr_m15 = m15.atr(14)
-        if len(atr_h1) < 2 or len(atr_m15) < 2:
+        atr_m1 = m1.atr(14)
+        if len(atr_h1) < 2 or len(atr_m15) < 2 or len(atr_m1) < 2:
             return None
+            
         cur_atr_h1 = atr_h1[-1]
         cur_atr_m15 = atr_m15[-1]
-        if np.isnan(cur_atr_h1) or cur_atr_h1 == 0:
+        cur_atr_m1 = atr_m1[-1]
+        
+        if np.isnan(cur_atr_m15) or cur_atr_m15 == 0:
             return None
 
         # --- Dynamic Parameter Resolution ---
@@ -117,30 +119,24 @@ class LiquidityPriceActionStrategy(BaseStrategy):
         sl_mult = float(cfg.get("sl_atr_buffer_mult", 0.3))
 
         # =====================================================================
-        # STEP 1: D1 BIAS (BOS/CHoCH + EMA confirmation) or H1 fallback
+        # STEP 1: H1 BIAS (BOS/CHoCH + EMA 20/50 confirmation)
         # =====================================================================
-        bias = 0
-        if has_d1:
-            bias = self._get_daily_bias(d1)
-            
-        # THE FIX: If D1 is chopping/ranging (bias == 0) OR missing, drop down to H1 trend
-        if bias == 0:
-            bias = self._get_ema_trend(h1, fast=20, slow=50)
+        bias = self._get_htf_bias(h1)
 
         if bias == 0:
-            self.last_rejection_reason = "No directional bias"
+            self.last_rejection_reason = "No H1 directional bias"
             return None
 
         # =====================================================================
-        # STEP 2: H1 ZONE DISCOVERY
+        # STEP 2: M15 ZONE DISCOVERY
         # =====================================================================
-        zones = self._find_zones(h1, m15, cur_atr_h1, bias, price, cfg)
+        zones = self._find_zones(m15, cur_atr_m15, bias, price, cfg)
         if not zones:
-            self.last_rejection_reason = "No active zones"
+            self.last_rejection_reason = "No active M15 zones"
             return None
 
         # Find nearest zone within proximity
-        proximity = cur_atr_h1 * zone_prox
+        proximity = cur_atr_m15 * (zone_prox * 1.5)  # Relaxed proximity for HFT
         active_zone = None
         for z in zones:
             if abs(price - z["price"]) <= proximity:
@@ -148,21 +144,16 @@ class LiquidityPriceActionStrategy(BaseStrategy):
                 break
 
         if active_zone is None:
-            self.last_rejection_reason = "Price not at zone"
+            self.last_rejection_reason = "Price not at M15 zone"
             return None
 
         # =====================================================================
-        # STEP 3: M1 ULTRASONIC CONFIRMATION (Extreme Frequency)
+        # STEP 3: M1 HFT CONFIRMATION
         # =====================================================================
-        m1 = market_data.m1_candles
-        if m1 is None or len(m1) < 10:
-            # Fallback to M5 if M1 missing
-            confirmed, pattern = self._detect_m5_confirmation(market_data.m5_candles, active_zone, bias)
-        else:
-            confirmed, pattern = self._detect_m1_confirmation(m1, active_zone, bias)
+        confirmed, pattern = self._detect_m1_confirmation(m1, active_zone, bias)
 
         if not confirmed:
-            self.last_rejection_reason = f"No M1/M5 confirmation at {active_zone['type']}"
+            self.last_rejection_reason = f"No M1 confirmation at {active_zone['type']}"
             return None
 
         # =====================================================================
@@ -178,7 +169,7 @@ class LiquidityPriceActionStrategy(BaseStrategy):
         adx_prev = adx_series[-2] if len(adx_series) > 1 else 0
         adx_increasing = adx_val > adx_prev
         
-        vol_confirmed = self._is_volume_spike(m15, vol_spike)
+        vol_confirmed = self._is_volume_spike(m1, vol_spike)
         
         # RSI Filter (Institutional Reversal Confirmation)
         if m1 is not None and len(m1) >= 14:
@@ -226,27 +217,11 @@ class LiquidityPriceActionStrategy(BaseStrategy):
         )
 
     # =========================================================================
-    # EMA TREND HELPER (H1 fallback when D1 unavailable/ranging)
+    # H1 BIAS: BOS/CHoCH + EMA 20/50
     # =========================================================================
-    def _get_ema_trend(self, candles: CandleArray, fast: int = 20, slow: int = 50) -> int:
-        ema_f = candles.ema(fast)
-        ema_s = candles.ema(slow)
-        if len(ema_f) < 2 or len(ema_s) < 2:
-            return 0
-        if np.isnan(ema_f[-1]) or np.isnan(ema_s[-1]):
-            return 0
-        if ema_f[-1] > ema_s[-1]:
-            return 1
-        elif ema_f[-1] < ema_s[-1]:
-            return -1
-        return 0
-
-    # =========================================================================
-    # D1 BIAS: BOS/CHoCH + EMA 20/50 (Relaxed Intraday Variant)
-    # =========================================================================
-    def _get_daily_bias(self, d1: CandleArray) -> int:
-        ema20 = d1.ema(20)
-        ema50 = d1.ema(50)
+    def _get_htf_bias(self, h1: CandleArray) -> int:
+        ema20 = h1.ema(20)
+        ema50 = h1.ema(50)
         
         if len(ema20) < 2 or len(ema50) < 2:
             return 0
@@ -255,31 +230,27 @@ class LiquidityPriceActionStrategy(BaseStrategy):
         if np.isnan(e20) or np.isnan(e50):
             return 0
 
-        # Faster EMA alignment
+        # EMA alignment
         ema_bias = 0
         if e20 > e50:
             ema_bias = 1
         elif e20 < e50:
             ema_bias = -1
 
-        # BOS/CHoCH: check last 20 daily swings
-        struct_bias = self._detect_structure(d1, lookback=20)
+        # BOS/CHoCH: check H1 swings
+        struct_bias = self._detect_h1_structure(h1, lookback=30)
 
-        # SCENARIO A: Absolute Agreement (High Probability)
+        # High Probability Agreement
         if ema_bias == struct_bias and ema_bias != 0:
             return ema_bias
             
-        # SCENARIO B: Structure overrides MA lag (CHoCH occurred, EMAs haven't crossed yet)
+        # Structure overrides MA lag
         if struct_bias != 0:
             return struct_bias
             
-        # SCENARIO C: Price is structurally ranging, but has short-term EMA momentum
-        if struct_bias == 0 and ema_bias != 0:
-            return ema_bias
+        return ema_bias
 
-        return 0
-
-    def _detect_structure(self, candles: CandleArray, lookback: int = 20) -> int:
+    def _detect_h1_structure(self, candles: CandleArray, lookback: int = 30) -> int:
         if len(candles) < lookback + 5:
             return 0
         h = candles.h
@@ -302,37 +273,31 @@ class LiquidityPriceActionStrategy(BaseStrategy):
         ll = swing_lows[-1] < swing_lows[-2]
         lh = swing_highs[-1] < swing_highs[-2]
 
-        if hh and hl:
-            return 1
-        if ll and lh:
-            return -1
-        if ll and not lh:
-            return -1  
-        if hh and not hl:
-            return 1  
+        if hh and hl: return 1
+        if ll and lh: return -1
         return 0
 
     # =========================================================================
-    # ZONE DISCOVERY (H1 + M15)
+    # ZONE DISCOVERY (M15)
     # =========================================================================
-    def _find_zones(self, h1: CandleArray, m15: CandleArray, atr: float,
+    def _find_zones(self, m15: CandleArray, atr: float,
                     bias: int, price: float, cfg: Dict) -> List[Dict]:
         zones = []
         vwap_bars = cfg.get("vwap_session_bars", 96)
         zones.extend(self._vwap_zones(m15, atr, bias, vwap_bars))
         
-        vp_lookback = cfg.get("volume_profile_lookback", 20)
+        vp_lookback = cfg.get("volume_profile_lookback", 24)
         vp_bins = cfg.get("volume_profile_bins", 50)
-        zones.extend(self._volume_profile_zones(h1, atr, bias, vp_lookback, vp_bins))
+        zones.extend(self._volume_profile_zones(m15, atr, bias, vp_lookback, vp_bins))
         
         ts_lookback = cfg.get("turtle_soup_lookback", 20)
         ts_atr_mult = cfg.get("turtle_soup_threshold_atr_mult", 0.3)
-        zones.extend(self._turtle_soup_zones(h1, atr, bias, ts_lookback, ts_atr_mult))
+        zones.extend(self._turtle_soup_zones(m15, atr, bias, ts_lookback, ts_atr_mult))
         
         fvg_atr_mult = cfg.get("fvg_min_atr_mult", 0.3)
-        zones.extend(self._fvg_zones(h1, atr, bias, fvg_atr_mult))
+        zones.extend(self._fvg_zones(m15, atr, bias, fvg_atr_mult))
         
-        zones.extend(self._premium_discount_zones(h1, atr, bias))
+        zones.extend(self._premium_discount_zones(m15, atr, bias))
 
         if not zones:
             return []
@@ -366,11 +331,11 @@ class LiquidityPriceActionStrategy(BaseStrategy):
             zones.append({"price": float(vwap[-1]), "type": "VWAP", "tool": "vwap", "strength": 0.5})
         return zones
 
-    def _volume_profile_zones(self, h1: CandleArray, atr: float, bias: int, vp_lookback: int, vp_bins: int) -> List[Dict]:
+    def _volume_profile_zones(self, m15: CandleArray, atr: float, bias: int, vp_lookback: int, vp_bins: int) -> List[Dict]:
         zones = []
-        if len(h1) < vp_lookback:
+        if len(m15) < vp_lookback:
             return zones
-        vp = h1.volume_profile(vp_lookback, vp_bins)
+        vp = m15.volume_profile(vp_lookback, vp_bins)
         if np.isnan(vp["poc"]):
             return zones
 
@@ -381,18 +346,18 @@ class LiquidityPriceActionStrategy(BaseStrategy):
             zones.append({"price": vp["vah"], "type": "VP_VAH", "tool": "volume_profile", "strength": 0.8})
         return zones
 
-    def _turtle_soup_zones(self, h1: CandleArray, atr: float, bias: int, lookback: int, atr_mult: float) -> List[Dict]:
+    def _turtle_soup_zones(self, m15: CandleArray, atr: float, bias: int, lookback: int, atr_mult: float) -> List[Dict]:
         zones = []
-        n = len(h1)
+        n = len(m15)
         if n < lookback + 3:
             return zones
         threshold = atr * atr_mult
-        recent_h = h1.h[-(lookback + 3):-3]
-        recent_l = h1.l[-(lookback + 3):-3]
+        recent_h = m15.h[-(lookback + 3):-3]
+        recent_l = m15.l[-(lookback + 3):-3]
         swing_high = np.max(recent_h)
         swing_low = np.min(recent_l)
 
-        last_h, last_l, last_c = h1.h[-2], h1.l[-2], h1.c[-2]
+        last_h, last_l, last_c = m15.h[-2], m15.l[-2], m15.c[-2]
 
         if bias == -1 and last_h > swing_high and last_c < swing_high:
             sweep_dist = last_h - swing_high
@@ -417,45 +382,45 @@ class LiquidityPriceActionStrategy(BaseStrategy):
                 })
         return zones
 
-    def _fvg_zones(self, h1: CandleArray, atr: float, bias: int, fvg_min_atr_mult: float) -> List[Dict]:
+    def _fvg_zones(self, m15: CandleArray, atr: float, bias: int, fvg_min_atr_mult: float) -> List[Dict]:
         zones = []
-        n = len(h1)
+        n = len(m15)
         if n < 20:
             return zones
         min_gap = atr * fvg_min_atr_mult
         for i in range(max(3, n - 15), n - 1):
-            if h1.h[i - 2] < h1.l[i] - min_gap:
-                fvg_mid = (h1.h[i - 2] + h1.l[i]) / 2.0
+            if m15.h[i - 2] < m15.l[i] - min_gap:
+                fvg_mid = (m15.h[i - 2] + m15.l[i]) / 2.0
                 if bias == 1:
                     zones.append({
                         "price": float(fvg_mid),
                         "type": "FVG_BULL",
                         "tool": "fvg",
                         "strength": 0.75,
-                        "fvg_top": float(h1.l[i]),
-                        "fvg_bot": float(h1.h[i - 2]),
+                        "fvg_top": float(m15.l[i]),
+                        "fvg_bot": float(m15.h[i - 2]),
                     })
-            if h1.l[i - 2] > h1.h[i] + min_gap:
-                fvg_mid = (h1.l[i - 2] + h1.h[i]) / 2.0
+            if m15.l[i - 2] > m15.h[i] + min_gap:
+                fvg_mid = (m15.l[i - 2] + m15.h[i]) / 2.0
                 if bias == -1:
                     zones.append({
                         "price": float(fvg_mid),
                         "type": "FVG_BEAR",
                         "tool": "fvg",
                         "strength": 0.75,
-                        "fvg_top": float(h1.l[i - 2]),
-                        "fvg_bot": float(h1.h[i]),
+                        "fvg_top": float(m15.l[i - 2]),
+                        "fvg_bot": float(m15.h[i]),
                     })
         return zones
 
-    def _premium_discount_zones(self, h1: CandleArray, atr: float, bias: int) -> List[Dict]:
+    def _premium_discount_zones(self, m15: CandleArray, atr: float, bias: int) -> List[Dict]:
         zones = []
-        n = len(h1)
+        n = len(m15)
         if n < 30:
             return zones
 
         seg = 30
-        highs, lows = h1.h[-seg:], h1.l[-seg:]
+        highs, lows = m15.h[-seg:], m15.l[-seg:]
         swing_hi_idx, swing_lo_idx = np.argmax(highs), np.argmin(lows)
         swing_hi, swing_lo = float(highs[swing_hi_idx]), float(lows[swing_lo_idx])
         leg = swing_hi - swing_lo
@@ -488,10 +453,10 @@ class LiquidityPriceActionStrategy(BaseStrategy):
         upper_wick = h - max(o, c)
         lower_wick = min(o, c) - l
 
-        is_bull_reject = lower_wick > total * 0.6 and c > o
-        is_bear_reject = upper_wick > total * 0.6 and c < o
-        is_bull_engulf = c > o and c > m1.h[-3] and pc < po and body > (abs(pc-po) * 1.5)
-        is_bear_engulf = c < o and c < m1.l[-3] and pc > po and body > (abs(pc-po) * 1.5)
+        is_bull_reject = lower_wick > total * 0.45 and c > o
+        is_bear_reject = upper_wick > total * 0.45 and c < o
+        is_bull_engulf = c > o and c > m1.h[-3] and body > (abs(pc-po) * 1.1)
+        is_bear_engulf = c < o and c < m1.l[-3] and body > (abs(pc-po) * 1.1)
 
         if bias == 1 and (is_bull_reject or is_bull_engulf):
             return True, "M1_PIN_BAR" if is_bull_reject else "M1_ENGULFING"
@@ -499,36 +464,6 @@ class LiquidityPriceActionStrategy(BaseStrategy):
             return True, "M1_PIN_BAR" if is_bear_reject else "M1_ENGULFING"
         return False, ""
 
-    def _detect_m5_confirmation(self, m5: CandleArray, zone: Dict, bias: int) -> Tuple[bool, str]:
-        if len(m5) < 4:
-            return False, ""
-        o, h, l, c = m5.o[-2], m5.h[-2], m5.l[-2], m5.c[-2]
-        po, pc = m5.o[-3], m5.c[-3]
-        body, total = abs(c - o), h - l
-        if total == 0:
-            return False, ""
-
-        upper_wick = h - max(o, c)
-        lower_wick = min(o, c) - l
-
-        swept_low = l < min(m5.l[-5:-2]) if bias == 1 else False
-        swept_high = h > max(m5.h[-5:-2]) if bias == -1 else False
-
-        if bias == 1 and not swept_low and zone.get("tool") != "fvg":
-            return False, ""
-        if bias == -1 and not swept_high and zone.get("tool") != "fvg":
-            return False, ""
-
-        is_bull_reject = lower_wick > total * 0.5 and c > o
-        is_bear_reject = upper_wick > total * 0.5 and c < o
-        is_bull_engulf = c > o and c > m5.h[-3] and pc < po
-        is_bear_engulf = c < o and c < m5.l[-3] and pc > po
-
-        if bias == 1 and (is_bull_reject or is_bull_engulf):
-            return True, "PIN_BAR" if is_bull_reject else "ENGULFING"
-        if bias == -1 and (is_bear_reject or is_bear_engulf):
-            return True, "PIN_BAR" if is_bear_reject else "ENGULFING"
-        return False, ""
 
     def _is_killzone(self, md: MarketData) -> bool:
         try:
@@ -540,11 +475,11 @@ class LiquidityPriceActionStrategy(BaseStrategy):
             pass
         return False
 
-    def _is_volume_spike(self, m15: CandleArray, vol_spike_factor: float) -> bool:
-        if len(m15) < 21: return False
-        avg_vol = np.mean(m15.v[-21:-1])
+    def _is_volume_spike(self, m1: CandleArray, vol_spike_factor: float) -> bool:
+        if len(m1) < 21: return False
+        avg_vol = np.mean(m1.v[-21:-1])
         if avg_vol == 0: return False
-        return float(m15.v[-2]) > avg_vol * vol_spike_factor
+        return float(m1.v[-2]) > avg_vol * vol_spike_factor
 
     def _calculate_confluence(self, zone: Dict, vol_confirmed: bool, adx: float, 
                               killzone: bool, pattern: str, adx_threshold: float) -> float:
@@ -573,11 +508,11 @@ class LiquidityPriceActionStrategy(BaseStrategy):
 
         if direction == "BUY":
             sl = min(zone["price"], wick) - sl_buffer
-            tp_candidates = [z["price"] for z in all_zones if z["price"] > price and z.get("tool") != zone.get("tool")]
+            tp_candidates = [z["price"] for z in all_zones if z["price"] > price + atr * 2]
             tp = min(tp_candidates) if tp_candidates else price + (price - sl) * min_rr
         else:
             sl = max(zone["price"], wick) + sl_buffer
-            tp_candidates = [z["price"] for z in all_zones if z["price"] < price and z.get("tool") != zone.get("tool")]
+            tp_candidates = [z["price"] for z in all_zones if z["price"] < price - atr * 2]
             tp = max(tp_candidates) if tp_candidates else price - (sl - price) * min_rr
 
         risk = abs(price - sl)
