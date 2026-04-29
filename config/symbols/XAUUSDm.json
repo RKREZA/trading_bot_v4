@@ -73,11 +73,11 @@
         "LONDON": {
           "min_confidence": 0.65,
           "min_rr": 1,
-          "adx_trend_threshold": 15,
+          "adx_trend_threshold": 25,
           "sl_atr_buffer_mult": 0.4
         },
         "LONDON/NY": {
-          "min_confidence": 0.60,
+          "min_confidence": 0.65,
           "min_rr": 4.0,
           "adx_trend_threshold": 25,
           "sl_atr_buffer_mult": 0.4
