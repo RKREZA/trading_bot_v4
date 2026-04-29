@@ -29,28 +29,29 @@
     "phase1_close_pct": 50,
     "move_to_be_at_partial": true
   },
-  "portfolio_allocations": {
-    "NPatternGrid": 1.0
-  },
-  "backtest": {
+
+  "LiquidityPriceAction": {
     "enabled": true,
-    "initial_balance_per_strategy": 10000.0,
-    "random_seed": 42,
-    "deterministic": true,
-    "debug_signals": true,
-    "utc_offset": 2
-  },
-  "symbols_config": {
-    "XAUUSDm": {
-      "backtest_timeframe": "M1",
-      "point": 0.01,
-      "tick_value": 1.0,
-      "commission_per_lot": 0.0
-    }
-  },
-  "NPatternGrid": {
-    "enabled": true,
-    "symbols": ["XAUUSDm"],
-    "timeframe": "M1"
+    "symbols": [
+      "XAUUSDm",
+      "GBPJPYm",
+      "EURUSDm",
+      "USOILm"
+    ],
+    "timeframe": "M15",
+    "risk_per_trade_pct": 1.0,
+    "min_rr": 1.2,
+    "min_confidence": 0.55,
+    "vwap_session_bars": 96,
+    "volume_profile_lookback": 20,
+    "volume_profile_bins": 50,
+    "turtle_soup_lookback": 20,
+    "turtle_soup_threshold_atr_mult": 0.3,
+    "zone_proximity_atr_mult": 1.0,
+    "volume_spike_factor": 1.2,
+    "adx_trend_threshold": 15,
+    "sl_atr_buffer_mult": 1.0,
+    "fvg_min_atr_mult": 0.1,
+    "max_spread_atr_ratio": 0.30
   }
 }

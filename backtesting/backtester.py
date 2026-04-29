@@ -119,24 +119,52 @@ class PortfolioBacktester:
         
         self.dfs_score = 1.0 # Initial DFS
         self.dataset_hashes = {} # tf -> sha256
-        self.rejection_stats = {} # {sid: {reason: count}}
+        self.audit_summary = []
+        self._sequence_counter = 0
 
-    def reset(self, active_strategies: list):
+    def resolve_block(self, block_name: str, session: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Universal session-aware block resolution for Backtester components.
+        """
+        block = self.config.get(block_name, {})
+        if not block:
+            # Fallback to nested 'strategies' block
+            block = self.config.get("strategies", {}).get(block_name, {})
+            
+        if not block:
+            return {}
+
+        if session and "session_overrides" in block:
+            overrides = block["session_overrides"].get(session, {})
+            if overrides:
+                merged = block.copy()
+                merged.update(overrides)
+                return merged
+        return block
+
+    def reset(self, strategies: list):
         """Full reset of the simulation state with capital allocation (Step 9)."""
         self.current_index = 0
         self.history = []
         self.open_trades = {}
         self.pending_signals = {}
+        self.pending_queue = []
         
-        total_pool = len(active_strategies) * self.initial_partition_balance
+        # Rule 9.1: Proportional Capital Partitioning
+        total_pool = len(strategies) * self.initial_partition_balance
+        self.balances = {s.strategy_id: self.initial_partition_balance for s in strategies}
+        self.equities = dict(self.balances)
+        self.peak_equity = dict(self.balances)
+        self.max_drawdowns = {s.strategy_id: 0.0 for s in strategies}
+        self.equity_history = []
+        self.volatility_history = []
+        self.rejection_stats = {s.strategy_id: {} for s in strategies}
         
-        self.balances = {}
-        self.equities = {}
-        self.peak_equity = {}
-        self.max_drawdowns = {}
+        # Sync RiskGuardian to the total pool for global governance simulation
+        self.risk_guardian.reset_daily(total_pool)
         allocated_sum = 0.0
         
-        for strat in active_strategies:
+        for strat in strategies:
             sid = strat.strategy_id
             # [ Institutional Level ]: Scale bounds directly to portfolio micro-allocation rules.
             bal = self.initial_partition_balance
@@ -382,7 +410,7 @@ class PortfolioBacktester:
                     intent = pending_data["intent"]
                     sid = intent.strategy_id
                     
-                    if sid.lower() != "npatterngrid" and sid in self.open_trades:
+                    if sid in self.open_trades:
                         continue
                         
                     # Rule 5.1: Causality Monotonicity Law
@@ -393,6 +421,9 @@ class PortfolioBacktester:
                         continue
                         
                     # Step 4: Market Snapshot (Frozen State)
+                    current_session = market_data.session
+                    exec_conf = self.resolve_block("execution", current_session)
+                    
                     snapshot = MarketSnapshot(
                         timestamp=snapshot_t,
                         bid=np.float64(target_tf_data.open[i]),
@@ -404,7 +435,7 @@ class PortfolioBacktester:
                         metadata=MappingProxyType({
                             "obi": 0.0,
                             "liquidity_depth": 100.0,
-                            "base_slippage_points": 0.5
+                            "base_slippage_points": float(exec_conf.get("entry_slippage_points", 0.5))
                         })
                     )
                     
@@ -422,6 +453,7 @@ class PortfolioBacktester:
                             "initial_sl": intent.stop_loss,
                             "tp": intent.take_profit,
                             "strategy_id": sid,
+                            "symbol": symbol,
                             "lots": intent.volume,
                             "initial_lots": intent.volume,
                             "tp1_hit": False,
@@ -483,7 +515,8 @@ class PortfolioBacktester:
                     spread=spread_val,
                     point=point,
                     session=SessionDetector.get_session(dt, self.config.get("backtest", {}).get("utc_offset", 0)),
-                    timestamp=dt
+                    timestamp=dt,
+                    regime=regime.value
                 )
                 
                 # Run all active strategies (Parallel Portfolio Execution)
@@ -504,10 +537,10 @@ class PortfolioBacktester:
 
                     if RegimeGater.is_drawdown_gated(self.max_drawdowns.get(sid, 0)): continue
                     
-                    if sid.lower() != "npatterngrid" and not RegimeGater.is_strategy_allowed(strat.__class__.__name__, s_regime_info):
+                    if not RegimeGater.is_strategy_allowed(strat.__class__.__name__, s_regime_info):
                         continue
                         
-                    if sid.lower() != "npatterngrid" and any(t["strategy_id"] == sid for t in self.open_trades.values()):
+                    if any(t["strategy_id"] == sid for t in self.open_trades.values()):
                         continue
                     
                     # Apply volatility-adjusted parameters if available
@@ -601,7 +634,8 @@ class PortfolioBacktester:
                 atr_val = atr_vals[i] if i < len(atr_vals) else 0.0
 
                 if len(m1_slice) > 0:
-                    self._manage_active_trades(m1_slice, tick_value, point, comm_per_lot, active_strategies, atr_val=atr_val)
+                    strat_map = {s.strategy_id: s for s in active_strategies}
+                    self._manage_active_trades(m1_slice, tick_value, point, comm_per_lot, strat_map, atr_val=atr_val, session=market_data.session)
                 elif self.open_trades:
                     # Institutional Grade-A+: Volatility-Aware Path Reconstruction
                     for ticket, trade in list(self.open_trades.items()):
@@ -682,135 +716,105 @@ class PortfolioBacktester:
         self._print_rejection_summary()
         return self.history, self.equity_history
 
-    def _manage_active_trades(self, m1_candles, tick_value, point, comm_per_lot, strategies, atr_val=0.0, force_sl_first=True):
-        """M1-Event Replay Engine for Trade Management."""
+    def _manage_active_trades(self, m1_candles, tick_value, point, comm_per_lot, strategies, atr_val=0.0, session: str = "GLOBAL"):
+        """V5-LOCKED: Intrabar M1 Logic with Stochastic Slippage and Session Awareness."""
+        ts_conf = self.resolve_block("trailing_stop", session)
+        pp_conf = self.resolve_block("partial_profit", session)
+        ex_conf = self.resolve_block("execution", session)
+        force_sl_first = True # Institutional Conservatism: SL hits first on collision
+        
         for ticket, trade in list(self.open_trades.items()):
             sid = trade["strategy_id"]
+            direction = trade["direction"]
+            entry = trade["fill_price"]
+            
             is_closed = False
             for m in range(len(m1_candles)):
                 if is_closed: break
                 
+                # 1. Market Snapshot for this M1 bar
                 m1_high = m1_candles.high[m]
                 m1_low = m1_candles.low[m]
-                spread = m1_candles.spread[m] * point
-                direction = trade["direction"]
-
-                # --- V4-ULTRA Institutional Partial Exit & Trailing (Rule 3.1) ---
-                current_price = m1_candles.close[m]
-                entry = trade["fill_price"]
-                direction = trade["direction"]
-                initial_risk_price = abs(entry - trade["initial_sl"])
+                m1_close = m1_candles.close[m]
+                spread = (m1_candles.ask[m] - m1_candles.bid[m]) if hasattr(m1_candles, 'ask') else (2 * point)
                 
-                if initial_risk_price > 0:
-                    profit_price = (current_price - entry) if direction == "BUY" else (entry - current_price)
-                    current_rr = profit_price / initial_risk_price
-                    
-                    # [ Institutional Scale-Hardening ]: TP1 @ 1.2R (Partial Exit + Break-Even)
-                    if current_rr >= 1.2 and not trade.get("tp1_hit", False):
+                # 2. Institutional Strategy Sync
+                if sid in strategies:
+                    strategies[sid].on_trade_update(trade, m1_close)
+                
+                # 3. R:R Resolution
+                initial_sl = trade.get("initial_sl", trade.get("sl", 0))
+                initial_risk = abs(entry - initial_sl)
+                if initial_risk <= 0: initial_risk = point * 10 
+                
+                profit_points = (m1_close - entry) if direction == "BUY" else (entry - m1_close)
+                current_rr = profit_points / initial_risk
+                
+                # Phase 1: Partial Profit Taking
+                if pp_conf.get("enabled", False) and not trade.get("tp1_hit", False):
+                    rr_target = pp_conf.get("phase1_rr_target", 1.2)
+                    if current_rr >= rr_target:
                         partial_lots = trade["lots"] * 0.5
+                        raw_partial_diff = (m1_close - entry) if direction == "BUY" else (entry - m1_close)
+                        net_partial_pnl = (raw_partial_diff / point) * tick_value * partial_lots - (partial_lots * comm_per_lot)
                         
-                        # Realize 50% profit immediately
-                        raw_profit_pts = (current_price - entry) if direction == "BUY" else (entry - current_price)
-                        partial_pnl = (raw_profit_pts / point) * partial_lots * tick_value
-                        
-                        # Apply partial commission
-                        partial_comm = (partial_lots / trade["initial_lots"]) * trade["entry_comm"]
-                        net_partial_pnl = partial_pnl - partial_comm
-                        
-                        # Update balance and reduce volume
                         self.balances[sid] += net_partial_pnl
                         self.equities[sid] += net_partial_pnl
                         trade["lots"] -= partial_lots
                         trade["tp1_hit"] = True
                         
-                        # Lock in Risk: Move SL to Break-Even (plus small buffer for cost)
-                        be_buffer = 1.0 * point
-                        trade["sl"] = entry + be_buffer if direction == "BUY" else entry - be_buffer
-                        
-                        logger.info(f"[{m1_candles.time[m]}] [{sid}] PARTIAL EXIT: 50% @ 1.2R (Locked BE)")
+                        if pp_conf.get("move_to_be_at_partial", True):
+                            be_buffer = 1.0 * point
+                            trade["sl"] = entry + be_buffer if direction == "BUY" else entry - be_buffer
+                            logger.info(f"[{m1_candles.time[m]}] [{sid}] PARTIAL EXIT: Scaling @ {rr_target}R (Locked BE)")
 
-                    # Phase 2: ATR-based Trailing (at 3R+)
-                    if current_rr >= 3.0 and atr_val > 0:
-                        trail_mult = self.config.get("trailing_stop", {}).get("phase3_trail_mult", 1.5)
-                        trail_sl = current_price - (atr_val * trail_mult) if direction == "BUY" else current_price + (atr_val * trail_mult)
-                        # Only move if improves protection
-                        if direction == "BUY" and trail_sl > trade["sl"]:
-                            trade["sl"] = trail_sl
-                        elif direction == "SELL" and (trade["sl"] == 0 or trail_sl < trade["sl"]):
-                            trade["sl"] = trail_sl
+                # Phase 2: ATR-based Trailing
+                if ts_conf.get("enabled", False) and current_rr >= 3.0 and atr_val > 0:
+                    trail_mult = ts_conf.get("phase3_trail_mult", 1.5)
+                    trail_sl = m1_close - (atr_val * trail_mult) if direction == "BUY" else m1_close + (atr_val * trail_mult)
+                    if direction == "BUY" and trail_sl > trade["sl"]:
+                        trade["sl"] = trail_sl
+                    elif direction == "SELL" and (trade["sl"] == 0 or trail_sl < trade["sl"]):
+                        trade["sl"] = trail_sl
 
+                # Phase 3: Exit Detection
                 exit_price = None
                 event = None
-                
                 if direction == "BUY":
                     sl_hit = trade["sl"] > 0 and m1_low <= trade["sl"]
                     tp_hit = trade["tp"] > 0 and m1_high >= trade["tp"]
-                    
-                    if sl_hit and tp_hit:
-                        if force_sl_first: exit_price, event = trade["sl"], "sl"
-                        else: exit_price, event = trade["tp"], "tp"
+                    if sl_hit and tp_hit: exit_price, event = (trade["sl"], "sl") if force_sl_first else (trade["tp"], "tp")
                     elif sl_hit: exit_price, event = trade["sl"], "sl"
                     elif tp_hit: exit_price, event = trade["tp"], "tp"
-                else: # SELL
+                else:
                     sl_hit = trade["sl"] > 0 and m1_high + spread >= trade["sl"]
                     tp_hit = trade["tp"] > 0 and m1_low + spread <= trade["tp"]
-                    
-                    if sl_hit and tp_hit:
-                        if force_sl_first: exit_price, event = trade["sl"], "sl"
-                        else: exit_price, event = trade["tp"], "tp"
+                    if sl_hit and tp_hit: exit_price, event = (trade["sl"], "sl") if force_sl_first else (trade["tp"], "tp")
                     elif sl_hit: exit_price, event = trade["sl"], "sl"
                     elif tp_hit: exit_price, event = trade["tp"], "tp"
                 
                 if exit_price:
-                    exit_time = m1_candles.time[m]
                     exit_res = self.order_manager.simulate_exit(
-                        ticket=trade["ticket"], 
-                        exit_type=event, 
-                        price=exit_price, 
-                        point=point, 
-                        direction=direction, 
-                        volume=trade["lots"],
-                        exit_time=exit_time
+                        ticket=trade["ticket"], exit_type=event, price=exit_price, point=point, 
+                        direction=direction, volume=trade["lots"], exit_time=m1_candles.time[m],
+                        base_slippage_points=float(ex_conf.get("sl_exit_slippage_points", 0.5)) if event == "sl" else 0.1
                     )
                     final_exit = exit_res["exit_price"]
-                    exit_slip = abs(final_exit - exit_price)
+                    pnl = ((final_exit - entry) if direction == "BUY" else (entry - final_exit)) / point * tick_value * trade["lots"]
+                    net_pnl = pnl - (trade["lots"] * comm_per_lot) - trade.get("entry_comm", 0.0)
                     
-                    raw_diff = (final_exit - trade["fill_price"]) if direction == "BUY" else (trade["fill_price"] - final_exit)
-                    gross_pnl = (raw_diff / point) * tick_value * trade["lots"]
-                    exit_comm = trade["lots"] * comm_per_lot
-                    entry_comm = trade.get("entry_comm", 0.0)
-                    
-                    net_pnl = gross_pnl - entry_comm - exit_comm
-                    start_balance = self.balances[sid]
                     self.balances[sid] += net_pnl
                     self.equities[sid] = self.balances[sid]
-                    
-                    trade_record = {
-                        **trade,
-                        "exit_price": final_exit,
-                        "exit_time": m1_candles.time[m],
-                        "pnl": net_pnl,
-                        "exit_slippage": exit_slip / point,
-                        "result": event.upper(),
-                        "final_balance": self.balances[sid],
-                        "balance_at_start": start_balance
-                    }
-                    self.history.append(trade_record)
+                    rec = {**trade, "exit_price": final_exit, "exit_time": m1_candles.time[m], "pnl": net_pnl, "result": event.upper()}
+                    self.history.append(rec)
                     self.risk_guardian.record_trade_result(net_pnl, self.equities[sid])
-                    
-                    for s in strategies:
-                        if s.strategy_id == sid:
-                            s.on_trade_closed(trade_record)
-                            break
-                            
+                    if sid in strategies: strategies[sid].on_trade_closed(rec)
                     del self.open_trades[trade["ticket"]]
                     is_closed = True
                 else:
                     floating_price = m1_low if direction == "BUY" else m1_high
-                    f_diff = (floating_price - trade["fill_price"]) if direction == "BUY" else (trade["fill_price"] - floating_price)
-                    f_gross_pnl = (f_diff / point) * tick_value * trade["lots"]
-                    sid = trade["strategy_id"]
-                    self.equities[sid] = self.balances[sid] + f_gross_pnl
+                    f_pnl = ((floating_price - entry) if direction == "BUY" else (entry - floating_price)) / point * tick_value * trade["lots"]
+                    self.equities[sid] = self.balances[sid] + f_pnl - (trade["lots"] * comm_per_lot) - trade.get("entry_comm", 0.0)
 
     def _validate_data_alignment(self, m5, m1):
         """Ensures that M1 data covers the M5 range without gaps (Step 11)."""

@@ -1,0 +1,13 @@
+{
+  "portfolio_allocations": {
+    "LiquidityPriceAction": 1.0
+  },
+  "backtest": {
+    "enabled": true,
+    "initial_balance_per_strategy": 10000.0,
+    "random_seed": 42,
+    "deterministic": true,
+    "debug_signals": true,
+    "utc_offset": 0
+  }
+}

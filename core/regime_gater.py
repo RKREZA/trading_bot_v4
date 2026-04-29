@@ -15,19 +15,19 @@ class RegimeGater:
     # Strategies MUST match these class names exactly to execute under specific regimes
     REGIME_CONTRACT: Dict[MarketRegime, set] = {
         MarketRegime.TREND: {
-            "NPatternGrid", "NPatternGridStrategy"
+            "LiquidityPriceAction", "LiquidityPriceActionStrategy"
         },
         MarketRegime.RANGE: {
-            "NPatternGrid", "NPatternGridStrategy"
+            "LiquidityPriceAction", "LiquidityPriceActionStrategy"
         },
         MarketRegime.LIQUIDITY_EVENT: {
-            "NPatternGrid", "NPatternGridStrategy"
+            "LiquidityPriceAction", "LiquidityPriceActionStrategy"
         },
         MarketRegime.EXPANSION: {
-            "NPatternGrid", "NPatternGridStrategy"
+            "LiquidityPriceAction", "LiquidityPriceActionStrategy"
         },
         MarketRegime.TRANSITION: {
-            "NPatternGrid", "NPatternGridStrategy"
+            "LiquidityPriceAction", "LiquidityPriceActionStrategy"
         }
     }
 

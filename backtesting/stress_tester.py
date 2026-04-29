@@ -56,8 +56,7 @@ class StressTester:
         initial_balance = len(strategies) * float(
             self.config.get("backtest", {}).get("initial_balance_per_strategy", 10000.0))
         
-        baseline_result = self._run_scenario(symbol, strategies, data, "BASELINE", 
-                                       self.config, initial_balance)
+        baseline_result = self._run_scenario(symbol, strategies, data, "BASELINE", initial_balance)
         results["BASELINE"] = baseline_result
         baseline_profit = baseline_result["metrics"].get("net_profit", 0.0)
         

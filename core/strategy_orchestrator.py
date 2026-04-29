@@ -72,6 +72,22 @@ class StrategyOrchestrator:
         # Trailing stops and partials are now handled synchronously in execute_cycle
 
 
+    def resolve_block(self, block_name: str, session: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Universal session-aware block resolution for Orchestrator components.
+        """
+        block = self.config.get(block_name, {})
+        if not block:
+            return {}
+
+        if session and "session_overrides" in block:
+            overrides = block["session_overrides"].get(session, {})
+            if overrides:
+                merged = block.copy()
+                merged.update(overrides)
+                return merged
+        return block
+
     def _apply_wfo_gate(self):
         """
         Queries the WFO gate database and suspends any strategy whose
@@ -228,10 +244,12 @@ class StrategyOrchestrator:
         def _execute_runtime(args):
             runtime, r_regime_info = args
             sid = runtime.strategy_id
-            # Note: We pass the specific regime_info calculated for this strategy
-            # to accommodate per-strategy state drift.
-            sig = runtime.execute_cycle(market_data)
-            metrics = runtime.strategy.get_metrics(market_data)
+            
+            # [ Institutional Fidelity ]: Inject per-strategy regime into MarketData
+            strat_md = replace(market_data, regime=r_regime_info.market_type.value)
+            
+            sig = runtime.execute_cycle(strat_md)
+            metrics = runtime.strategy.get_metrics(strat_md)
             thresholds = runtime.strategy.get_thresholds()
             
             if sig and sig.direction != "NONE":
@@ -421,9 +439,14 @@ class StrategyOrchestrator:
                 market_data.current_price + (symbol_info.get("spread", 0) * symbol_info.get("point", 0.0001)), 
                 regime_info.atr, 
                 None, 
-                "GLOBAL"
+                market_data.session
             )
-            self.manage_partials(symbol, market_data.current_price, market_data.current_price + (symbol_info.get("spread", 0) * symbol_info.get("point", 0.0001)))
+            self.manage_partials(
+                symbol, 
+                market_data.current_price, 
+                market_data.current_price + (symbol_info.get("spread", 0) * symbol_info.get("point", 0.0001)),
+                market_data.session
+            )
             
         return pulse_report
 
@@ -473,10 +496,10 @@ class StrategyOrchestrator:
         Institutional Trailing Stop Logic.
         Moves SL based on R:R thresholds and ATR-based trailing.
         """
-        if not self.config.get("trailing_stop", {}).get("enabled", False):
+        conf = self.resolve_block("trailing_stop", session)
+        if not conf.get("enabled", False):
             return
 
-        conf = self.config["trailing_stop"]
         rr_threshold = conf.get("phase1_rr_threshold", 1.5)
         
         # Delegate to PositionManager for MT5 interaction
@@ -517,15 +540,15 @@ class StrategyOrchestrator:
             if new_sl:
                 self.connection.modify_sl_tp(pos.ticket, symbol, new_sl, pos.tp)
 
-    def manage_partials(self, symbol: str, bid: float, ask: float):
+    def manage_partials(self, symbol: str, bid: float, ask: float, session: str):
         """
         Handles partial profit taking scaling (Institutional Grade).
         Closes a percentage of volume when the initial R:R target is hit.
         """
-        if not self.config.get("partial_profit", {}).get("enabled", False):
+        conf = self.resolve_block("partial_profit", session)
+        if not conf.get("enabled", False):
             return
 
-        conf = self.config["partial_profit"]
         rr_target = conf.get("phase1_rr_target", 1.5)
         close_pct = conf.get("phase1_close_pct", 50)
         

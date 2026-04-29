@@ -56,10 +56,20 @@ def create_strategy(strategy_id: str, st_type: str = None, config: dict = None):
     
     # Auto-resolve type if not provided
     if not st_type:
-        if "pattern" in strategy_id.lower() or "grid" in strategy_id.lower() or strategy_id == "NPatternGrid":
-            st_type = "NPATTERNGRID"
+        st_id_upper = strategy_id.upper()
+        if st_id_upper in STRATEGY_REGISTRY:
+            st_type = st_id_upper
+        elif "LIQUIDITYPRICEACTION" in st_id_upper or "LPA" in st_id_upper:
+            st_type = "LIQUIDITYPRICEACTION"
         else:
-            raise ValueError(f"Could not auto-resolve strategy type for ID '{strategy_id}'.")
+            # Try to find a match in the registry
+            for reg_type in STRATEGY_REGISTRY:
+                if reg_type in st_id_upper:
+                    st_type = reg_type
+                    break
+            
+            if not st_type:
+                raise ValueError(f"Could not auto-resolve strategy type for ID '{strategy_id}'.")
 
     # Normalization
     st_type = st_type.upper().replace("_", "")

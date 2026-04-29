@@ -18,7 +18,7 @@ class PortfolioManager:
         
         # 1. Base Institutional Allocation Weights
         self.base_allocations = config.get("portfolio_allocations", {
-            "NPatternGrid": 1.0
+            "LiquidityPriceAction": 1.0
         })
         
         # 2. Performance Tracking (Institutional State)

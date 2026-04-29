@@ -11,10 +11,27 @@ class ConfigLoader:
     Implements a Global -> Symbol inheritance model.
     """
     
-    def __init__(self, global_path: str = "config/config.json", symbols_dir: str = "config/symbols"):
+    def __init__(self, global_path: str = "config/config.json", symbols_dir: str = "config/symbols", environment: str = "live"):
         self.global_path = global_path
         self.symbols_dir = symbols_dir
+        self.environment = environment
+        
+        # 1. Load base configuration
         self.global_config = self._load_json(global_path)
+        
+        # 2. Merge environment-specific configuration
+        if environment == "backtest":
+            backtest_path = "config/backtest.json"
+            backtest_cfg = self._load_json(backtest_path)
+            self._deep_update(self.global_config, backtest_cfg)
+            
+    def _deep_update(self, d: Dict, u: Dict):
+        for k, v in u.items():
+            if isinstance(v, dict):
+                d[k] = self._deep_update(d.get(k, {}), v)
+            else:
+                d[k] = v
+        return d
 
     def _load_json(self, path: str) -> Dict[str, Any]:
         if not os.path.exists(path):
@@ -50,20 +67,39 @@ class ConfigLoader:
                 merged["symbols_config"] = {}
             merged["symbols_config"][symbol] = symbol_spec["symbol_info"]
             
-        # 2. Strategies -> Root level (to maintain compatibility with existing strategy logic)
-        if "strategies" in symbol_spec:
-            for strat_name, strat_cfg in symbol_spec["strategies"].items():
-                merged[strat_name] = strat_cfg
+        # 2. Generic Block Merging (execution, trailing_stop, partial_profit, etc.)
+        for key, val in symbol_spec.items():
+            if key in ["symbol_info", "backtest"]:
+                continue
                 
-        # 3. Backtest -> backtest block
+            if key == "strategies":
+                # Strategies maintain dual mapping (root level + 'strategies' block)
+                for strat_name, strat_cfg in val.items():
+                    if strat_name not in merged:
+                        merged[strat_name] = {}
+                    merged[strat_name].update(strat_cfg)
+                    
+                if "strategies" not in merged:
+                    merged["strategies"] = {}
+                # Deep merge strategies block
+                for s_name, s_cfg in val.items():
+                    if s_name not in merged["strategies"]:
+                        merged["strategies"][s_name] = {}
+                    merged["strategies"][s_name].update(s_cfg)
+            else:
+                # Merge other blocks (execution, sessions, etc.)
+                if key not in merged:
+                    merged[key] = val
+                elif isinstance(val, dict) and isinstance(merged[key], dict):
+                    merged[key].update(val)
+                else:
+                    merged[key] = val
+        
+        # 3. Backtest -> specific block merge
         if "backtest" in symbol_spec:
             if "backtest" not in merged:
                 merged["backtest"] = {}
             merged["backtest"].update(symbol_spec["backtest"])
-            
-        # 4. Sessions -> sessions block (if exists)
-        if "sessions" in symbol_spec:
-            merged["sessions"] = symbol_spec["sessions"]
             
         return merged
 

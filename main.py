@@ -78,7 +78,7 @@ class LiveOrchestrator:
         self.kill_switch_active = False # Manual reset required in real prod
         
         # 1. LOAD CONFIGURATION (Hierarchical Global -> Symbol)
-        self.config_loader = ConfigLoader()
+        self.config_loader = ConfigLoader(environment="live")
         self.config = self.config_loader.get_symbol_config(symbol)
         self.config_stat = os.stat("config/config.json").st_mtime # Track global for hot-reload
 
@@ -827,7 +827,7 @@ class LiveOrchestrator:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="V5-INSIGNIA Institutional Trading Machine")
     parser.add_argument("--symbol", type=str, default="XAUUSDm")
-    parser.add_argument("--strategies", type=str, default="NPatternGrid")
+    parser.add_argument("--strategies", type=str, default="LiquidityPriceAction")
     
     args = parser.parse_args()
     setup_live_logging()

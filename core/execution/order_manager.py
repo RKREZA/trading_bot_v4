@@ -278,7 +278,7 @@ class OrderManager:
             "is_error": False
         }
 
-    def simulate_exit(self, ticket: int, exit_type: str, price: float, point: float, direction: str = "BUY", volume: float = 0.01, exit_time: float = None) -> Dict[str, Any]:
+    def simulate_exit(self, ticket: int, exit_type: str, price: float, point: float, direction: str = "BUY", volume: float = 0.01, exit_time: float = None, base_slippage_points: float = 0.5) -> Dict[str, Any]:
         """
         Simulates an exit event (SL/TP) utilizing the robust StochasticKernel.
         SLs are modeled as full market orders (impact + slippage).
@@ -290,7 +290,7 @@ class OrderManager:
         exit_dir = "SELL" if direction == "BUY" else "BUY"
         
         # Determine pseudo-metadata for realistic stochastic friction
-        base_slip = 1.0 if exit_type == "sl" else 0.1
+        base_slip = base_slippage_points if exit_type == "sl" else 0.1
         obi_val = self._rng.uniform(-0.5, 0.5) if exit_type == "sl" else 0.0 # TPs ignore OBI friction
         
         intent = ExecutionIntent(

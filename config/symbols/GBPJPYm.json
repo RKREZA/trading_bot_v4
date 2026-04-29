@@ -1,0 +1,33 @@
+{
+  "symbol_info": {
+    "point": 0.001,
+    "spread_pips": 27,
+    "tick_value": 0.62,
+    "contract_size": 100000.0,
+    "min_lot": 0.01,
+    "max_lot": 200.0,
+    "lot_step": 0.01,
+    "commission_per_lot": 7.0,
+    "backtest_timeframe": "M15",
+    "initial_balance_per_strategy": 10000.0
+  },
+  "strategies": {
+    "LiquidityPriceAction": {
+      "enabled": true,
+      "symbols": ["GBPJPYm"],
+      "timeframe": "M15",
+      "allowed_sessions": [
+        "LONDON",
+        "NEW_YORK",
+        "LONDON/NY"
+      ],
+      "min_confidence": 0.55,
+      "min_rr": 2.5
+    }
+  },
+  "backtest": {
+    "initial_balance_per_strategy": 10000.0,
+    "adaptive_strategy": false,
+    "debug_signals": false
+  }
+}

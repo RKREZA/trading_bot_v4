@@ -360,6 +360,153 @@ class CandleArray:
         lower = sma - (rolling_std * std_dev)
         return upper, lower, sma
 
+    def vwap(self, session_bars: int = 96) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Session VWAP with ±1σ and ±2σ Standard Deviation Bands.
+        Returns: (vwap, upper_1sd, lower_1sd, upper_2sd, lower_2sd)
+        
+        Args:
+            session_bars: Number of bars per session (96 for M15 = 24h, 288 for M5 = 24h).
+        """
+        key = f"vwap_{session_bars}"
+        if key in self._indicators:
+            vw = self.get_indicator(key)
+            return vw, self.get_indicator(f"{key}_u1"), self.get_indicator(f"{key}_l1"), self.get_indicator(f"{key}_u2"), self.get_indicator(f"{key}_l2")
+
+        n = self.limit
+        if n < 2:
+            nan_arr = np.full(n, np.nan)
+            return nan_arr, nan_arr, nan_arr, nan_arr, nan_arr
+
+        typical = (self.h + self.l + self.c) / 3.0
+        vol = self.v.astype(np.float64)
+        # Prevent zero-volume bars from breaking calculation
+        vol = np.where(vol == 0, 1.0, vol)
+
+        vwap_arr = np.full(n, np.nan)
+        u1 = np.full(n, np.nan)
+        l1 = np.full(n, np.nan)
+        u2 = np.full(n, np.nan)
+        l2 = np.full(n, np.nan)
+
+        # Rolling session-anchored VWAP
+        for i in range(n):
+            # Session start index
+            start = max(0, i - session_bars + 1)
+            seg_tp = typical[start:i+1]
+            seg_vol = vol[start:i+1]
+            cum_vol = np.sum(seg_vol)
+            if cum_vol == 0:
+                continue
+            vw = np.sum(seg_tp * seg_vol) / cum_vol
+            vwap_arr[i] = vw
+            # Variance = Σ(vol * (tp - vwap)^2) / Σ(vol)
+            variance = np.sum(seg_vol * (seg_tp - vw) ** 2) / cum_vol
+            sd = np.sqrt(variance)
+            u1[i] = vw + sd
+            l1[i] = vw - sd
+            u2[i] = vw + 2 * sd
+            l2[i] = vw - 2 * sd
+
+        self._indicators[key] = vwap_arr
+        self._indicators[f"{key}_u1"] = u1
+        self._indicators[f"{key}_l1"] = l1
+        self._indicators[f"{key}_u2"] = u2
+        self._indicators[f"{key}_l2"] = l2
+        return vwap_arr, u1, l1, u2, l2
+
+    def volume_profile(self, lookback: int = 20, bins: int = 50) -> Dict:
+        """
+        Fixed Range Volume Profile over the last `lookback` bars.
+        Returns dict with: poc (float), vah (float), val (float), profile (list of (price, volume)).
+        
+        POC = Point of Control (highest volume price level)
+        VAH = Value Area High (upper boundary of 70% volume concentration)
+        VAL = Value Area Low (lower boundary of 70% volume concentration)
+        """
+        key = f"vp_{lookback}_{bins}"
+        if key in self._indicators:
+            cached = self._indicators[key]
+            return cached
+
+        n = self.limit
+        if n < lookback:
+            result = {"poc": np.nan, "vah": np.nan, "val": np.nan, "profile": []}
+            self._indicators[key] = result
+            return result
+
+        start = n - lookback
+        highs = self.h[start:n]
+        lows = self.l[start:n]
+        closes = self.c[start:n]
+        volumes = self.v[start:n].astype(np.float64)
+
+        price_high = np.max(highs)
+        price_low = np.min(lows)
+        price_range = price_high - price_low
+
+        if price_range <= 0 or np.sum(volumes) == 0:
+            result = {"poc": np.nan, "vah": np.nan, "val": np.nan, "profile": []}
+            self._indicators[key] = result
+            return result
+
+        # Build volume distribution across price bins
+        bin_edges = np.linspace(price_low, price_high, bins + 1)
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
+        vol_dist = np.zeros(bins, dtype=np.float64)
+
+        for j in range(lookback):
+            # Distribute each bar's volume across bins it touches
+            bar_low = lows[j]
+            bar_high = highs[j]
+            bar_vol = volumes[j]
+            if bar_vol == 0:
+                bar_vol = 1.0
+            for b in range(bins):
+                # Check overlap between bar range and bin range
+                overlap_low = max(bar_low, bin_edges[b])
+                overlap_high = min(bar_high, bin_edges[b + 1])
+                if overlap_high > overlap_low:
+                    bar_range = bar_high - bar_low
+                    if bar_range > 0:
+                        proportion = (overlap_high - overlap_low) / bar_range
+                    else:
+                        proportion = 1.0 / bins
+                    vol_dist[b] += bar_vol * proportion
+
+        # POC: bin with highest volume
+        poc_idx = np.argmax(vol_dist)
+        poc = float(bin_centers[poc_idx])
+
+        # Value Area: 70% of total volume centered around POC
+        total_vol = np.sum(vol_dist)
+        target_vol = total_vol * 0.70
+        va_vol = vol_dist[poc_idx]
+        lo_idx = poc_idx
+        hi_idx = poc_idx
+
+        while va_vol < target_vol and (lo_idx > 0 or hi_idx < bins - 1):
+            expand_up = vol_dist[hi_idx + 1] if hi_idx < bins - 1 else 0
+            expand_down = vol_dist[lo_idx - 1] if lo_idx > 0 else 0
+            if expand_up >= expand_down and hi_idx < bins - 1:
+                hi_idx += 1
+                va_vol += vol_dist[hi_idx]
+            elif lo_idx > 0:
+                lo_idx -= 1
+                va_vol += vol_dist[lo_idx]
+            else:
+                hi_idx += 1
+                va_vol += vol_dist[hi_idx]
+
+        vah = float(bin_centers[hi_idx])
+        val = float(bin_centers[lo_idx])
+
+        profile = [(float(bin_centers[b]), float(vol_dist[b])) for b in range(bins)]
+
+        result = {"poc": poc, "vah": vah, "val": val, "profile": profile}
+        self._indicators[key] = result
+        return result
+
 @dataclass(frozen=True, slots=True)
 class ExecutionIntent:
     """

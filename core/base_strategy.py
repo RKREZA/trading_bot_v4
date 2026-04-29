@@ -35,6 +35,7 @@ class MarketData:
     point: float
     session: str
     timestamp: datetime
+    regime: str = "UNKNOWN"
     m1_candles: Optional[CandleArray] = None  # M1 data for scalping strategies
     preprocessed: Optional[dict] = None   # Precomputed indicators per M5 bar
 
@@ -84,30 +85,42 @@ class BaseStrategy(ABC):
         self.min_confidence = float(strat_cfg.get("min_confidence", config.get("risk_governance", {}).get("min_confidence", 0.5)))
         self.min_rr = float(strat_cfg.get("min_rr", config.get("risk_governance", {}).get("min_rr", 2.0)))
 
-    def get_strat_config(self) -> Dict[str, Any]:
-        """Ensures consistent access to the strategy-specific configuration block regardless of nesting."""
-        # Strip version suffix for config lookup
-        base_name = self.strategy_id.rsplit('_v', 1)[0] if '_v' in self.strategy_id else self.strategy_id
+    def resolve_block(self, block_name: str, session: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Universal session-aware block resolution.
+        Checks root-level and nested 'strategies' blocks, then applies session_overrides.
+        """
+        # 1. Fetch the base block
+        block = self.config.get(block_name, {})
         
-        # Check 'strategies' key first (Standard V5 structure)
-        strategies_block = self.config.get("strategies", {})
-        if self.strategy_id in strategies_block:
-            return strategies_block[self.strategy_id]
-        if base_name in strategies_block:
-            return strategies_block[base_name]
-            
-        # Fallback 1: Direct key at root (Legacy/Diagnostic support)
-        if self.strategy_id in self.config:
-            return self.config[self.strategy_id]
-        if base_name in self.config:
-            return self.config[base_name]
-            
-        # Fallback 2: Case-insensitive search
-        for key in self.config:
-            if key.lower() == self.strategy_id.lower() or key.lower() == base_name.lower():
-                return self.config[key]
-                
-        return {}
+        # 2. If it's a strategy and not found at root, check 'strategies' block
+        if not block and block_name == self.strategy_id:
+            block = self.config.get("strategies", {}).get(block_name, {})
+        
+        if not block:
+            return {}
+
+        # 3. Apply session overrides if they exist
+        if session and "session_overrides" in block:
+            overrides = block["session_overrides"].get(session, {})
+            if overrides:
+                # Return a deep-merged copy to avoid side effects
+                merged = block.copy()
+                merged.update(overrides)
+                return merged
+        
+        return block
+
+    def get_strat_config(self, session: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Resolves the strategy-specific configuration, including session overrides.
+        """
+        return self.resolve_block(self.strategy_id, session)
+
+    def resolve_param(self, name: str, default_val: Any, session: Optional[str] = None) -> Any:
+        """Resolves a parameter by checking session overrides, then strategy config, then global defaults."""
+        cfg = self.get_strat_config(session)
+        return cfg.get(name, default_val)
 
     @abstractmethod
     def generate_signal(self, market_data: MarketData) -> Optional[TradeSignal]:
@@ -165,6 +178,9 @@ class BaseStrategy(ABC):
         return targets
 
     def on_trade_closed(self, trade_record: dict) -> None:
+        pass
+
+    def on_trade_update(self, trade_record: dict, current_price: float) -> None:
         pass
 
     def reset_daily_stats(self) -> None:
@@ -226,7 +242,8 @@ class BaseStrategy(ABC):
         current_points = market_data.spread / point_val if point_val > 0 else 0
         
         # 2. Static Safety Ceiling (Hard Max)
-        max_points = self.config.get("max_spread_points", 100)
+        strat_cfg = self.get_strat_config()
+        max_points = strat_cfg.get("max_spread_points", self.config.get("max_spread_points", 100))
         if current_points > max_points:
             self.last_rejection_reason = f"Spread Gated (Hard Cap): {current_points:.1f} pts > {max_points}"
             return False
@@ -238,7 +255,7 @@ class BaseStrategy(ABC):
             current_atr = m15_atr[-1]
             if current_atr > 0:
                 cost_ratio = market_data.spread / current_atr
-                max_ratio = self.config.get("max_spread_atr_ratio", 0.15)
+                max_ratio = strat_cfg.get("max_spread_atr_ratio", self.config.get("max_spread_atr_ratio", 0.15))
                 
                 if cost_ratio > max_ratio:
                     self.last_rejection_reason = f"Spread Gated (ATR): Cost Ratio {cost_ratio:.1%} > {max_ratio:.1%}"

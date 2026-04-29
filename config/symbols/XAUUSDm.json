@@ -8,56 +8,80 @@
     "max_lot": 100.0,
     "lot_step": 0.01,
     "commission_per_lot": 7.0,
-    "backtest_timeframe": "M1",
+    "backtest_timeframe": "M15",
     "initial_balance_per_strategy": 10000.0
   },
-  "strategies": {
-    "TrendFollowing": {
-      "enabled": true,
-      "allowed_sessions": [
-        "LONDON",
-        "NEW_YORK",
-        "TOKYO",
-        "ROLLOVER",
-        "GLOBAL",
-        "LONDON/NY"
-      ],
-      "fvg_min_size": 0.4,
-      "poc_window": 100,
-      "displacement_threshold": 1.2,
-      "volume_spike_factor": 1.2,
-      "min_confidence": 0.55,
-      "adx_min_threshold": 22
-    },
-    "LiquiditySweepBreakout": {
-      "enabled": true,
-      "lookback": 120,
-      "wick_ratio_threshold": 0.3,
-      "adx_threshold": 20,
-      "london_start": 7,
-      "london_end": 12,
-      "max_trades_per_day": 5,
-      "cooldown_seconds": 900
-    },
-    "SmartMeanReversion": {
-      "enabled": true,
-      "va_lookback": 100,
-      "adx_max_threshold": 22,
-      "vol_climax_ratio": 1.15,
-      "min_bars_between_signals": 10,
-      "min_confidence": 0.65,
-      "allowed_sessions": [
-        "LONDON",
-        "NEW_YORK",
-        "LONDON/NY",
-        "GLOBAL",
-        "TOKYO"
-      ]
+  "execution": {
+    "phase1_lot_ceiling": 2.0,
+    "entry_slippage_points": 2.5,
+    "sl_exit_slippage_points": 3.5
+  },
+  "trailing_stop": {
+    "enabled": true,
+    "phase2_rr_threshold": 1.0,
+    "phase2_be_offset_pct": 0.1,
+    "phase3_trail_mult": 2.0,
+    "session_overrides": {
+      "LONDON/NY": {
+        "phase3_trail_mult": 1.0
+      }
     }
   },
-  "backtest": {
-    "initial_balance_per_strategy": 10000.0,
-    "adaptive_strategy": false,
-    "debug_signals": false
+  "partial_profit": {
+    "enabled": true,
+    "phase1_rr_target": 0.8,
+    "phase1_close_pct": 50,
+    "move_to_be_at_partial": true,
+    "session_overrides": {
+      "LONDON/NY": {
+        "phase1_rr_target": 1.2
+      }
+    }
+  },
+  "strategies": {
+    "LiquidityPriceAction": {
+      "enabled": true,
+      "symbols": [
+        "XAUUSDm",
+        "EURUSDm",
+        "GBPUSDm",
+        "US30m",
+        "NAS100m"
+      ],
+      "timeframe": "M15",
+      "min_confidence": 0.55,
+      "min_rr": 3.0,
+      "adx_trend_threshold": 20,
+      "zone_proximity_atr_mult": 0.5,
+      "fvg_min_atr_mult": 0.2,
+      "volume_spike_factor": 1.3,
+      "sl_atr_buffer_mult": 0.5,
+      "max_spread_atr_ratio": 0.20,
+      "allowed_sessions": [
+        "LONDON",
+        "NEW_YORK",
+        "LONDON/NY"
+      ],
+      "session_overrides": {
+        "LONDON/NY": {
+          "min_confidence": 0.60,
+          "min_rr": 4.0,
+          "adx_trend_threshold": 25,
+          "sl_atr_buffer_mult": 0.4
+        }
+      }
+    },
+    "partial_profit": {
+      "enabled": true,
+      "phase1_rr_target": 1.2,
+      "phase1_close_pct": 50,
+      "move_to_be_at_partial": true
+    },
+    "trailing_stop": {
+      "enabled": true,
+      "phase2_rr_threshold": 2.0,
+      "phase2_be_offset_pct": 0.2,
+      "phase3_trail_mult": 1.5
+    }
   }
 }
