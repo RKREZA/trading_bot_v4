@@ -11,26 +11,7 @@
     "backtest_timeframe": "M15",
     "initial_balance_per_strategy": 10000.0
   },
-  "strategies": {
-    "LiquidityPriceAction": {
-      "enabled": true,
-      "symbols": ["EURUSDm"],
-      "timeframe": "M15",
-      "allowed_sessions": [
-        "LONDON",
-        "NEW_YORK",
-        "LONDON/NY"
-      ],
-      "min_confidence": 0.55,
-      "min_rr": 1.2,
-      "adx_trend_threshold": 15,
-      "zone_proximity_atr_mult": 1.0,
-      "max_spread_atr_ratio": 0.25,
-      "sl_atr_buffer_mult": 1.0,
-      "fvg_min_atr_mult": 0.1,
-      "volume_spike_factor": 1.2
-    }
-  },
+  "strategies": {},
   "backtest": {
     "initial_balance_per_strategy": 10000.0,
     "adaptive_strategy": false,

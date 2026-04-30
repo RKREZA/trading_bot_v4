@@ -5,6 +5,7 @@
     "shadow_fill_audit": "logs/shadow_fill_audit.csv"
   },
   "magic_number": 234000,
+  "portfolio_allocations": {},
   "risk_governance": {
     "risk_per_trade_pct": 1.0,
     "max_daily_loss_pct": 5.0,

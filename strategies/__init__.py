@@ -54,13 +54,14 @@ def create_strategy(strategy_id: str, st_type: str = None, config: dict = None):
     """
     if config is None: config = {}
     
+    # Normalization
+    st_type = st_type.upper().replace("_", "") if st_type else None
+    
     # Auto-resolve type if not provided
     if not st_type:
-        st_id_upper = strategy_id.upper()
+        st_id_upper = strategy_id.upper().replace("_", "")
         if st_id_upper in STRATEGY_REGISTRY:
             st_type = st_id_upper
-        elif "LIQUIDITYPRICEACTION" in st_id_upper or "LPA" in st_id_upper:
-            st_type = "LIQUIDITYPRICEACTION"
         else:
             # Try to find a match in the registry
             for reg_type in STRATEGY_REGISTRY:
@@ -70,9 +71,6 @@ def create_strategy(strategy_id: str, st_type: str = None, config: dict = None):
             
             if not st_type:
                 raise ValueError(f"Could not auto-resolve strategy type for ID '{strategy_id}'.")
-
-    # Normalization
-    st_type = st_type.upper().replace("_", "")
     
     if st_type not in STRATEGY_REGISTRY:
         raise ValueError(f"Strategy Type '{st_type}' not found. Available: {list(STRATEGY_REGISTRY.keys())}")

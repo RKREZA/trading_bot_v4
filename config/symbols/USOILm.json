@@ -11,19 +11,7 @@
     "backtest_timeframe": "M15",
     "initial_balance_per_strategy": 10000.0
   },
-  "strategies": {
-    "LiquidityPriceAction": {
-      "enabled": true,
-      "symbols": ["USOILm"],
-      "timeframe": "M15",
-      "allowed_sessions": [
-        "NEW_YORK",
-        "LONDON/NY"
-      ],
-      "min_confidence": 0.55,
-      "min_rr": 2.5
-    }
-  },
+  "strategies": {},
   "backtest": {
     "initial_balance_per_strategy": 10000.0,
     "adaptive_strategy": false,

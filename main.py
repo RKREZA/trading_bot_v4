@@ -827,7 +827,7 @@ class LiveOrchestrator:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="V5-INSIGNIA Institutional Trading Machine")
     parser.add_argument("--symbol", type=str, default="XAUUSDm")
-    parser.add_argument("--strategies", type=str, default="LiquidityPriceAction")
+    parser.add_argument("--strategies", type=str, default="")
     
     args = parser.parse_args()
     setup_live_logging()

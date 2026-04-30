@@ -285,9 +285,8 @@ class BacktestCLI:
 
         for st_type, st_class in STRATEGY_REGISTRY.items():
             # 2. Define potential ID matches for this class (PascalCase Priority)
-            pascal_name = {
-                "LIQUIDITYPRICEACTION": "LiquidityPriceAction"
-            }.get(st_type, st_type.title().replace("_", ""))
+            pascal_name = st_type.title().replace("_", "")
+
 
             
             potential_ids = [
@@ -324,6 +323,7 @@ class BacktestCLI:
                 # [ Institutional Gate ]: Only load strategies explicitly enabled in config
                 if not strategy_obj.enabled:
                     continue
+
                     
                 if symbol and not strategy_obj.is_symbol_allowed(symbol):
                     continue
@@ -404,7 +404,7 @@ if __name__ == "__main__":
     parser.add_argument("--symbol", type=str, default="XAUUSDm")
     parser.add_argument("--from", dest="start_date", type=str, required=True)
     parser.add_argument("--to", dest="end_date", type=str, required=True)
-    parser.add_argument("--strategy", type=str, default="LiquidityPriceAction")
+    parser.add_argument("--strategy", type=str, default="")
     parser.add_argument("--monte-carlo", action="store_true")
     parser.add_argument("--walk-forward", action="store_true")
     parser.add_argument("--stress-test", action="store_true")
