@@ -1,0 +1,24 @@
+{
+    "version": "5.0",
+    "mt5_login": 0,
+    "mt5_password": "",
+    "mt5_server": "",
+    "broker_utc_offset": 0,
+    "risk": {
+        "max_drawdown": 0.24,
+        "daily_loss_limit": 0.03,
+        "max_concurrent_trades": 3,
+        "risk_per_trade": 0.01
+    },
+    "strategies": [
+        {
+            "name": "SMC",
+            "symbol": "XAUUSD",
+            "timeframe": 5,
+            "parameters": {
+                "lookback": 100
+            },
+            "enabled": true
+        }
+    ]
+}
