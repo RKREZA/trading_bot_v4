@@ -1,7 +1,7 @@
 """Trading Bot V5 - Institutional Core Package"""
 
 # Common Infrastructure
-from .common.types import CandleArray, TradeSignal, BotConfig, MarketRegime
+from .common.types import CandleArray, TradeSignal, MarketRegime
 
 # Institutional Packages
 from .risk.risk_guardian import RiskGuardian
@@ -26,7 +26,6 @@ __all__ = [
     "setup_logging",
     "CandleArray",
     "TradeSignal",
-    "BotConfig",
     "BaseStrategy",
     "MarketData",
 ]

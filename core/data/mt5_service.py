@@ -1,8 +1,9 @@
+import asyncio
 import MetaTrader5 as mt5
 import pandas as pd
 from datetime import datetime, timezone
 import logging
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, Tuple
 
 from core.time.time_service import time_service
 
@@ -138,6 +139,77 @@ class MT5Service:
         else:
             return bid, ask
 
-mt5_service = MT5Service()
+    async def async_get_tick(self, symbol: str) -> Optional[dict]:
+        return await asyncio.to_thread(self.get_tick, symbol)
+
+    async def async_get_symbol_info(self, symbol: str) -> Optional[dict]:
+        return await asyncio.to_thread(self.get_symbol_info, symbol)
+
+    async def async_copy_rates_range(self, symbol: str, timeframe: int,
+                                      date_from: datetime, date_to: datetime) -> Optional[pd.DataFrame]:
+        return await asyncio.to_thread(self.copy_rates_range, symbol, timeframe, date_from, date_to)
+
+    async def async_connect(self, **kwargs) -> bool:
+        return await asyncio.to_thread(self.connect, **kwargs)
+
+    async def async_disconnect(self):
+        return await asyncio.to_thread(self.disconnect)
+
+    def close_position(self, ticket: int) -> dict:
+        if not self.connected:
+            return {"success": False, "error": "MT5 not connected"}
+        position = mt5.positions_get(ticket=ticket)
+        if not position:
+            return {"success": False, "error": f"Position {ticket} not found"}
+        pos = position[0]
+        symbol = pos.symbol
+        order_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
+        tick = mt5.symbol_info_tick(symbol)
+        if not tick:
+            return {"success": False, "error": f"No tick data for {symbol}"}
+        price = tick.bid if pos.type == mt5.POSITION_TYPE_BUY else tick.ask
+        info = mt5.symbol_info(symbol)
+        filling = mt5.ORDER_FILLING_IOC
+        if info and info.filling_mode & mt5.SYMBOL_FILLING_FOK:
+            filling = mt5.ORDER_FILLING_FOK
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": symbol,
+            "volume": float(pos.volume),
+            "type": order_type,
+            "position": ticket,
+            "price": price,
+            "deviation": 20,
+            "magic": pos.magic,
+            "comment": "Dashboard close",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": filling,
+        }
+        result = mt5.order_send(request)
+        if result and result.retcode in [mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_DONE_PARTIAL]:
+            return {"success": True, "ticket": ticket}
+        return {"success": False, "error": result.comment if result else "order_send failed", "retcode": result.retcode if result else None}
+
+    async def async_close_position(self, ticket: int) -> dict:
+        return await asyncio.to_thread(self.close_position, ticket)
+
+    def modify_sl_tp(self, ticket: int, symbol: str, sl: float, tp: float) -> dict:
+        if not self.connected:
+            return {"success": False, "error": "MT5 not connected"}
+        request = {
+            "action": mt5.TRADE_ACTION_SLTP,
+            "position": ticket,
+            "symbol": symbol,
+            "sl": float(sl),
+            "tp": float(tp),
+        }
+        result = mt5.order_send(request)
+        if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+            return {"success": True, "ticket": ticket}
+        return {"success": False, "error": result.comment if result else "order_send failed", "retcode": result.retcode if result else None}
+
+    async def async_modify_sl_tp(self, ticket: int, symbol: str, sl: float, tp: float) -> dict:
+        return await asyncio.to_thread(self.modify_sl_tp, ticket, symbol, sl, tp)
+
 
 mt5_service = MT5Service()

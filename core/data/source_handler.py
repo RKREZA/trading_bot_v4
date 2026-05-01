@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 import datetime
@@ -226,6 +227,19 @@ class SourceHandler:
             self.logger.warning(f"Data Gaps detected in {timeframe}: {len(gaps)} gaps found.")
             return False
         return True
+
+    async def async_fetch_candles(self, symbol: str, timeframe: str,
+                                   count: int = 500, force_refresh: bool = False) -> CandleArray:
+        return await asyncio.to_thread(self.fetch_candles, symbol, timeframe, count, force_refresh)
+
+    async def async_fetch_candles_range(self, symbol: str, timeframe: str,
+                                         date_from: datetime.datetime,
+                                         date_to: datetime.datetime) -> CandleArray:
+        return await asyncio.to_thread(self.fetch_candles_range, symbol, timeframe, date_from, date_to)
+
+    async def async_get_symbol_info(self, symbol: str) -> Optional[dict]:
+        return await asyncio.to_thread(self.get_symbol_info, symbol)
+
 
 if __name__ == "__main__":
     # Standalone Simulation Mode

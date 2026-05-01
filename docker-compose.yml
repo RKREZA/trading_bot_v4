@@ -3,33 +3,43 @@ version: '3.8'
 services:
   trading-bot:
     build: .
-    container_name: trading_bot_v5
+    container_name: trading_bot_v6
     restart: unless-stopped
     environment:
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=INFO
+      - DATABASE_URL=postgresql+asyncpg://admin:adminpassword@postgres:5432/trading_bot
+      - REDIS_URL=redis://redis:6379/0
     volumes:
       - ./config:/app/config:ro
       - ./logs:/app/logs
       - ./data_cache:/app/data_cache
-      - ./state:/app/state
     depends_on:
-      - mt5-terminal
-    
-  mt5-terminal:
-    image: davidalber/headless-metatrader5:latest
-    container_name: mt5_terminal
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  api:
+    build: .
+    container_name: trading_api
     restart: unless-stopped
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000
     ports:
       - "8000:8000"
     environment:
-      - DISPLAY=:99
+      - PYTHONUNBUFFERED=1
+      - DATABASE_URL=postgresql+asyncpg://admin:adminpassword@postgres:5432/trading_bot
+      - REDIS_URL=redis://redis:6379/0
     volumes:
-      - mt5_data:/home/mt5
-
-volumes:
-  mt5_data:
-  pgdata:
+      - ./config:/app/config:ro
+      - ./logs:/app/logs
+      - ./data_cache:/app/data_cache
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   postgres:
     image: postgres:15-alpine
@@ -43,6 +53,11 @@ volumes:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d trading_bot"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   redis:
     image: redis:7-alpine
@@ -50,3 +65,11 @@ volumes:
     restart: unless-stopped
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:

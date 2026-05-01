@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 import random
@@ -5,57 +6,56 @@ import os
 import numpy as np
 from collections import deque
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any, List
-from core.common.types import TradeSignal, ExecutionIntent, MarketSnapshot, ExecutionOutcome
+from typing import Optional, Dict, Any
+from core.common.types import TradeSignal, ExecutionIntent, MarketSnapshot, OrderState
+from core.common.events import event_bus, TradeOpenedEvent
 from core.execution.stochastic_kernel import StochasticKernel
 from core.common.exceptions import CriticalRiskViolationError
 
 class OrderManager:
     """
-    V5-INSIGNIA Unified Execution Engine (v6-LIVE).
+    Unified Execution Engine.
     Handles both LIVE MT5 execution and high-fidelity SIMULATION.
-    Unifies the execution pipeline using the V5 Stochastic Kernel.
+    Features: StochasticKernel, ShadowFill audit, idempotency tracking, event emission.
     """
 
     def __init__(self, config: Dict[str, Any], connection=None):
         self.config = config
         self.connection = connection
         exe_cfg = config.get("execution", {})
-        
+
         self.latency_ms = int(exe_cfg.get("latency_ms", 150))
         self.max_spread_pts = float(exe_cfg.get("max_spread_points", 500.0))
-        
+
         bt_cfg = config.get("backtest", {})
         self.is_backtest = bt_cfg.get("enabled", False)
-        
-        # Rule 1.1: Force determinism if in backtest mode
+
         self.deterministic = bt_cfg.get("deterministic", False) or self.is_backtest
-        
+
         self.seed = bt_cfg.get("random_seed", 42)
         self._rng = random.Random(self.seed if self.deterministic else None)
-        
+
         if self.deterministic:
             np.random.seed(self.seed)
-        
+
         self.logger = logging.getLogger("trading_bot.execution")
-        
-        # Rule 3.1: ShadowFill Metrics & Audit
-        # INSTITUTIONAL DRY: Path driven from config, not hardcoded
+
+        # ShadowFill Metrics & Audit
         self.audit_log = config.get("paths", {}).get("shadow_fill_audit", "logs/shadow_fill_audit.csv")
         self._ensure_audit_log()
         self.slippage_diffs = []
         self.latency_diffs = []
-        self.recent_spreads = deque(maxlen=100) # For Z-Score
-        self.degradation_factor = 1.0 # 1.0 = Normal, 0.5 = Reduced
-        # P95 slippage drift threshold (in pips). Configurable per symbol.
-        # Default is 0.5 pips — suitable for gold (XAUUSDm). Override in config
-        # under execution.shadow_drift_p95_threshold for tighter FX pairs.
+        self.recent_spreads = deque(maxlen=100)
+        self.degradation_factor = 1.0
         self._drift_p95_threshold = float(
             exe_cfg.get("shadow_drift_p95_threshold", 0.5)
         )
-        
-        # Rule 1.1: Unified Execution Kernel
+
+        # Unified Execution Kernel
         self.kernel = StochasticKernel(global_seed=self.seed)
+
+        # Idempotency Tracking (merged from V5 execution_engine)
+        self._order_states: Dict[str, Dict[str, Any]] = {}
 
     def _ensure_audit_log(self):
         if not os.path.exists("logs"): os.makedirs("logs")
@@ -68,9 +68,45 @@ class OrderManager:
         """Rule 3.2: Auto-Degradation Logic."""
         return volume * self.degradation_factor
 
-    def execute_signal(self, 
-                       signal: TradeSignal, 
-                       symbol: str, 
+    def _check_idempotency(self, execution_id: str) -> Optional[Dict[str, Any]]:
+        if not execution_id:
+            return None
+        existing = self._order_states.get(execution_id)
+        if existing and existing["state"] in (OrderState.FILLED, OrderState.SENT):
+            self.logger.warning(f"Duplicate execution attempt for {execution_id}, state={existing['state'].value}")
+            return existing
+        return None
+
+    def _update_order_state(self, execution_id: str, state: OrderState, **kwargs) -> None:
+        if not execution_id:
+            return
+        if execution_id not in self._order_states:
+            self._order_states[execution_id] = {
+                "state": OrderState.PENDING,
+                "created_at": time.time(),
+            }
+        self._order_states[execution_id].update({"state": state, "updated_at": time.time(), **kwargs})
+
+    def get_order_state(self, execution_id: str) -> Optional[Dict[str, Any]]:
+        return self._order_states.get(execution_id)
+
+    def _emit_trade_opened(self, symbol: str, signal: TradeSignal, result: Dict[str, Any]) -> None:
+        try:
+            event_bus.publish_sync(TradeOpenedEvent(
+                execution_id=getattr(signal, "execution_id", ""),
+                symbol=symbol,
+                direction=signal.direction,
+                fill_price=result.get("price", result.get("fill_price", 0.0)),
+                volume=result.get("volume", result.get("lots", 0.0)),
+                ticket=result.get("ticket", 0),
+                strategy_id=getattr(signal, "strategy_id", ""),
+            ))
+        except Exception:
+            self.logger.debug("EventBus not running, skipping trade event")
+
+    def execute_signal(self,
+                       signal: TradeSignal,
+                       symbol: str,
                        price_data: Dict[str, float],
                        is_news_blocked: bool = False,
                        magic: int = None,
@@ -83,15 +119,22 @@ class OrderManager:
         if signal.direction == "NONE":
             return None
 
+        # Idempotency guard
+        exec_id = getattr(signal, "execution_id", "")
+        dup = self._check_idempotency(exec_id)
+        if dup:
+            return dup.get("result")
+
         # 1. News Blockade
         if is_news_blocked:
             self.logger.warning(f"Execution REJECTED: News Event Active for {symbol}")
             return None
 
+        self._update_order_state(exec_id, OrderState.PENDING)
+
         # 2. Institutional Live Path
-        # Rule 1.2: Hybrid-Mode Protection (Anti-Execution Guard)
         is_live = self.connection and not self.is_backtest
-        
+
         if is_live:
             # --- PHASE 1 HARD BLOCK (NON-BYPASSABLE) ---
             lot_to_execute = self.get_degraded_volume(getattr(signal, 'volume', 0.01))
@@ -148,6 +191,7 @@ class OrderManager:
             pre_positions = self.connection.get_positions(symbol=symbol)
             pre_tickets = {p.ticket for p in pre_positions if p.magic == eval_magic} if pre_positions else set()
             
+            self._update_order_state(exec_id, OrderState.SENT)
             result = None
             for attempt in range(max_retries):
                 result = self.connection.place_order(
@@ -231,9 +275,12 @@ class OrderManager:
                             f"{actual_fill},{signed_drift:.4f},{absolute_drift:.4f},"
                             f"{sim_outcome.actual_latency_ms:.1f},{latency:.1f},SUCCESS\n")
                 
-                result["outcome"] = sim_outcome # Attach for trace
+                result["outcome"] = sim_outcome
+                self._update_order_state(exec_id, OrderState.FILLED, result=result, ticket=result.get("ticket"))
+                self._emit_trade_opened(symbol, signal, result)
                 return result
-                    
+
+            self._update_order_state(exec_id, OrderState.REJECTED, reason="All retries exhausted")
             return None
 
         # 3. Unified Simulation Path (Rule 1.1: Hardware Parity)
@@ -263,8 +310,8 @@ class OrderManager:
         # Kernel Execution (Standardized)
         outcome = self.kernel.execute(intent, snapshot)
         
-        return {
-            "ticket": self._rng.randint(1000000, 9999999), 
+        result = {
+            "ticket": self._rng.randint(1000000, 9999999),
             "symbol": symbol,
             "direction": signal.direction,
             "fill_price": outcome.fill_price,
@@ -274,9 +321,12 @@ class OrderManager:
             "lots": intent.volume,
             "timestamp": outcome.timestamp,
             "execution_drag": outcome.execution_drag,
-            "outcome": outcome, # Preserve for Audit
+            "outcome": outcome,
             "is_error": False
         }
+        self._update_order_state(exec_id, OrderState.FILLED, result=result, ticket=result["ticket"])
+        self._emit_trade_opened(symbol, signal, result)
+        return result
 
     def simulate_exit(self, ticket: int, exit_type: str, price: float, point: float, direction: str = "BUY", volume: float = 0.01, exit_time: float = None, base_slippage_points: float = 0.5) -> Dict[str, Any]:
         """
@@ -324,6 +374,15 @@ class OrderManager:
             "execution_drag": outcome.execution_drag,
             "microstructure_loss": outcome.microstructure_loss
         }
+
+    async def async_execute_signal(self, signal: TradeSignal, symbol: str,
+                                    price_data: Dict[str, float], **kwargs) -> Optional[Dict[str, Any]]:
+        return await asyncio.to_thread(self.execute_signal, signal, symbol, price_data, **kwargs)
+
+    async def async_simulate_exit(self, ticket: int, exit_type: str, price: float,
+                                   point: float, **kwargs) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.simulate_exit, ticket, exit_type, price, point, **kwargs)
+
 
 if __name__ == "__main__":
     # Institutional Standalone Test

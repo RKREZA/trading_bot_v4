@@ -2,11 +2,10 @@ import logging
 import json
 import os
 import time
-import numpy as np
 from collections import deque
-from datetime import datetime, date
 from typing import Dict, Any, Optional, Tuple, List
 from ..common.types import VolatilityStatus
+from ..common.events import event_bus, RiskBreachEvent
 
 class RiskGuardian:
     """
@@ -250,6 +249,7 @@ class RiskGuardian:
             self.logger.critical(msg)
             if hasattr(self, 'alerter'):
                 self.alerter.send_emergency_alert(msg)
+            self._emit_risk_breach("MAX_DRAWDOWN", "CRITICAL", msg, total_dd, self.max_drawdown_halt_pct)
             return False, f"MAX_DRAWDOWN_REACHED ({total_dd:.1f}%)"
 
         # 2. Exposure Netting 2.0 Enforcement
@@ -276,12 +276,17 @@ class RiskGuardian:
                 limit = 2.0 * equity_10k_units * self.VOL_MULTIPLIERS.get(basket, 1.0)
                 if ccy_exposure[basket] > limit:
                     self.logger.warning(f"[RISK] Basket {basket} breach: {ccy_exposure[basket]:.2f} > {limit:.2f}")
+                    self._emit_risk_breach("EXPOSURE_NETTING", "WARNING",
+                                           f"Basket {basket}: {ccy_exposure[basket]:.2f} > {limit:.2f}",
+                                           ccy_exposure[basket], limit)
                     return False, f"EXPOSURE_NETTING_BREACH ({basket})"
 
-            # Rule 1.3: Global Cap (8.0 lots / $10k)
             global_cap = 8.0 * equity_10k_units
             if total_gross > global_cap:
                 self.logger.warning(f"[RISK] Global Exposure breach: {total_gross:.2f} > {global_cap:.2f}")
+                self._emit_risk_breach("GLOBAL_EXPOSURE", "WARNING",
+                                       f"Gross {total_gross:.2f} > cap {global_cap:.2f}",
+                                       total_gross, global_cap)
                 return False, f"GLOBAL_EXPOSURE_CAP_REACHED"
 
         return True, "OK"
@@ -380,9 +385,23 @@ class RiskGuardian:
             self.logger.critical(msg)
             if hasattr(self, 'alerter'):
                 self.alerter.send_risk_alert(f"Strategy Halted: {strategy_id}", f"Trailing 48h PnL: {total_pnl_pct:.2f}%")
+            self._emit_risk_breach("CIRCUIT_BREAKER", "CRITICAL", msg, total_pnl_pct, -limit)
             return False, f"CIRCUIT_BREAKER_TRIGGERED ({total_pnl_pct:.2f}%)"
 
         return True, "OK"
+
+    def _emit_risk_breach(self, breach_type: str, severity: str, message: str,
+                          current_value: float, threshold: float) -> None:
+        try:
+            event_bus.publish_sync(RiskBreachEvent(
+                breach_type=breach_type,
+                severity=severity,
+                message=message,
+                current_value=current_value,
+                threshold=threshold,
+            ))
+        except Exception:
+            self.logger.debug("EventBus not running, skipping risk breach event")
 
     def record_strategy_result(self, strategy_id: str, pnl_abs: float, alloc_balance: float):
         """Records strategy-specific result and calculates relative PnL%."""

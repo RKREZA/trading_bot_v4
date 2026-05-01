@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import datetime
 import numpy as np
@@ -164,3 +165,7 @@ class DataManager:
     def get_latest_m1(self, symbol: str) -> CandleArray:
         """Helper for M1-Event Replay in backtesting engine."""
         return self.store.load(symbol, "M1")
+
+    async def async_prepare_data(self, symbol: str, timeframe: str,
+                                  start_date: datetime.datetime) -> CandleArray:
+        return await asyncio.to_thread(self.prepare_data, symbol, timeframe, start_date)

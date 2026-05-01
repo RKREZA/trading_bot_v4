@@ -583,45 +583,104 @@ class ExecutionOutcome:
     is_error: bool = False
     error_msg: str = ""
 
-@dataclass(frozen=True)
-class FilteredSignal:
-    """
-    Immutable safe DTO returned by AI predictor shielding original evaluation logic.
-    """
-    original: 'TradeSignal'
-    approved: bool
-    confidence: float
-    comment: str = ""
+class OrderState(Enum):
+    PENDING = "PENDING"
+    SENT = "SENT"
+    FILLED = "FILLED"
+    REJECTED = "REJECTED"
+    EXPIRED = "EXPIRED"
+    CANCELLED = "CANCELLED"
 
-@dataclass(frozen=True)
-class TradeSignal:
-    """
-    V4 Institutional Trade Signal.
-    Confidence is a mandatory float between 0.0 and 1.0.
-    """
+
+class TradeSignal(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
     direction: str  # BUY | SELL | NONE
+    symbol: str = ""
     price: float = 0.0
-    confidence: float = 0.0  # Mandatory 0.0 to 1.0
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     timestamp: Optional[datetime] = None
     stop_loss: float = 0.0
     take_profit: float = 0.0
-    volume: float = 0.0  # Lot size (set by risk engine before execution)
+    volume: float = 0.0
     session: str = "GLOBAL"
     tp1_price: float = 0.0
     tp2_price: float = 0.0
     confluence_score: int = 0
-    reasons: List[str] = field(default_factory=list)
+    reasons: List[str] = Field(default_factory=list)
     rr_ratio: float = 2.0
     vol_ratio: float = 1.0
+    execution_id: str = ""
+    strategy_id: str = ""
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
-class RiskConfig(BaseModel):
-    model_config = ConfigDict(extra='allow')
-    risk_per_trade_pct: float = 0.5
-    max_daily_loss_pct: float = 5.0
-    max_drawdown_halt_pct: float = 20.0
 
-class BotConfig(BaseModel):
-    model_config = ConfigDict(extra='allow')
-    symbol: str = "XAUUSDm"
-    risk: RiskConfig = Field(default_factory=RiskConfig)
-    backtest: Dict[str, Any] = Field(default_factory=dict)
+@dataclass(frozen=True)
+class FilteredSignal:
+    original: TradeSignal
+    approved: bool
+    confidence: float
+    comment: str = ""
+
+
+class OrderEvent(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    execution_id: str
+    symbol: str
+    direction: str
+    state: OrderState
+    volume: float = 0.0
+    price: float = 0.0
+    sl: float = 0.0
+    tp: float = 0.0
+    strategy_id: str = ""
+    timestamp: datetime = Field(default_factory=lambda: datetime.now())
+    reason: str = ""
+
+
+class ExecutionReport(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    execution_id: str
+    symbol: str
+    direction: str
+    ticket: int = 0
+    fill_price: float = 0.0
+    slippage_pips: float = 0.0
+    latency_ms: float = 0.0
+    spread_at_entry: float = 0.0
+    strategy_id: str = ""
+    timestamp: datetime = Field(default_factory=lambda: datetime.now())
+    intent_hash: str = ""
+    is_error: bool = False
+    error_msg: str = ""
+
+
+class RiskAlert(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    alert_type: str  # KILL_SWITCH | MAX_DRAWDOWN | DAILY_LOSS | EXPOSURE
+    severity: str = "WARNING"  # WARNING | CRITICAL
+    message: str = ""
+    current_value: float = 0.0
+    threshold: float = 0.0
+    timestamp: datetime = Field(default_factory=lambda: datetime.now())
+
+
+class BacktestResult(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    status: str = "PENDING"  # PENDING | RUNNING | COMPLETED | FAILED
+    initial_balance: float = 0.0
+    final_balance: float = 0.0
+    net_profit: float = 0.0
+    total_trades: int = 0
+    win_rate: float = 0.0
+    max_drawdown: float = 0.0
+    profit_factor: float = 0.0
+    sharpe_ratio: float = 0.0
+    equity_curve: List[float] = Field(default_factory=list)
+    monte_carlo: Dict[str, Any] = Field(default_factory=dict)
+    trades: List[Dict[str, Any]] = Field(default_factory=list)
+    config_snapshot: Dict[str, Any] = Field(default_factory=dict)
