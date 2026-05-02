@@ -1,8 +1,5 @@
 # Python
 __pycache__/
-/__pycache__
-/core/__pycache__
-/tmp/__pycache__
 *.py[cod]
 *$py.class
 *.so
@@ -16,7 +13,6 @@ build/
 .venv/
 venv/
 env/
-myenv/
 
 # Logs
 logs/
@@ -33,21 +29,26 @@ logs/
 Thumbs.db
 .DS_Store
 
-# application data
-/tmp
-/backtest_results
-/.hypothesis
-ai_context.json
-bot_state.json
-wf_robustness.json
-performance_report.csv
+# Testing
+.hypothesis/
+.pytest_cache/
 
-# Root-level log files (not managed by RotatingFileHandler)
-br.log
-btr.log
-/data_cache
-/state
-state/backtest_state.json
+# Runtime data
 bot.lock
+trading_bot.db
+data_cache/
+backtest_results/
+backtests/
+state/
+tmp/
+scratch/
+
+# Config caches (regenerated at runtime)
 config/news_cache.json
-/.agent
+config/regime_state_v3.db
+config/wfo_gate.db
+config/strategy_health.json
+
+# Agent skills (not part of app)
+.agent/
+antigravity-skills/
