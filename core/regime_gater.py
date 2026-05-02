@@ -15,21 +15,30 @@ class RegimeGater:
     # Strategies MUST match these class names exactly to execute under specific regimes
     REGIME_CONTRACT: Dict[MarketRegime, set] = {
         MarketRegime.TREND: {
-            "LiquidityPriceAction", "LiquidityPriceActionStrategy", "MicrostructureScalping", "MicrostructureScalpingStrategy"
+            "LiquidityPriceAction", "LiquidityPriceActionStrategy",
+            "MicrostructureScalping", "MicrostructureScalpingStrategy",
+            "SMCStrategy",
         },
         MarketRegime.RANGE: {
-            "LiquidityPriceAction", "LiquidityPriceActionStrategy", "MicrostructureScalping", "MicrostructureScalpingStrategy"
+            "LiquidityPriceAction", "LiquidityPriceActionStrategy",
+            "MicrostructureScalping", "MicrostructureScalpingStrategy",
+            "SMCStrategy",
         },
         MarketRegime.LIQUIDITY_EVENT: {
-            "LiquidityPriceAction", "LiquidityPriceActionStrategy", "MicrostructureScalping", "MicrostructureScalpingStrategy"
+            "LiquidityPriceAction", "LiquidityPriceActionStrategy",
+            "MicrostructureScalping", "MicrostructureScalpingStrategy",
+            "SMCStrategy",
         },
         MarketRegime.EXPANSION: {
-            "LiquidityPriceAction", "LiquidityPriceActionStrategy", "MicrostructureScalping", "MicrostructureScalpingStrategy"
+            "LiquidityPriceAction", "LiquidityPriceActionStrategy",
+            "MicrostructureScalping", "MicrostructureScalpingStrategy",
+            "SMCStrategy",
         },
         MarketRegime.TRANSITION: {
-            "LiquidityPriceAction", "LiquidityPriceActionStrategy", "MicrostructureScalping", "MicrostructureScalpingStrategy"
-        }
-
+            "LiquidityPriceAction", "LiquidityPriceActionStrategy",
+            "MicrostructureScalping", "MicrostructureScalpingStrategy",
+            "SMCStrategy",
+        },
     }
 
     @classmethod

@@ -23,6 +23,9 @@ class MTAccount(Base):
     broker_utc_offset: Mapped[int] = mapped_column(Integer, default=0)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     label: Mapped[str] = mapped_column(String, default="")
+    max_drawdown_pct: Mapped[float] = mapped_column(Float, default=10.0)
+    risk_per_trade_pct: Mapped[float] = mapped_column(Float, default=1.0)
+    max_daily_drawdown_pct: Mapped[float] = mapped_column(Float, default=5.0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 

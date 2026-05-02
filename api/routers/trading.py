@@ -2,7 +2,7 @@ import os
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from core.data.mt5_service import mt5_service
 from core.observability.audit import audit_trail
@@ -15,6 +15,16 @@ class ModifySLTP(BaseModel):
     sl: float
     tp: float
     symbol: str
+
+
+class TradingConfig(BaseModel):
+    assignments: Dict[str, List[str]]
+    primarySymbol: str = ""
+    pairOptions: Dict[str, Dict[str, Any]] = {}
+
+
+class StartRequest(BaseModel):
+    assignments: Optional[Dict[str, List[str]]] = None
 
 
 async def _get_mt5_credentials(svc: AppServices) -> Dict[str, Any]:
@@ -50,21 +60,93 @@ async def _get_mt5_credentials(svc: AppServices) -> Dict[str, Any]:
     return creds
 
 
+async def _load_trading_config() -> dict:
+    from sqlalchemy import select
+    from core.common.models import SystemState
+    from core.common.database import async_session_factory
+
+    async with async_session_factory() as session:
+        result = await session.execute(select(SystemState).where(SystemState.key == "trading_config"))
+        row = result.scalar_one_or_none()
+    if row and row.value:
+        return row.value
+    return {"assignments": {}, "primarySymbol": ""}
+
+
+async def _save_trading_config(config: dict) -> None:
+    from sqlalchemy import select
+    from core.common.models import SystemState
+    from core.common.database import async_session_factory
+
+    async with async_session_factory() as session:
+        result = await session.execute(select(SystemState).where(SystemState.key == "trading_config"))
+        row = result.scalar_one_or_none()
+        if row:
+            row.value = config
+        else:
+            session.add(SystemState(key="trading_config", value=config))
+        await session.commit()
+
+
+def _apply_assignments(svc: AppServices, assignments: Dict[str, List[str]], pair_options: Dict[str, Any] = None) -> None:
+    svc.active_assignments = assignments
+    svc.pair_options = pair_options or {}
+    svc.config["pair_options"] = svc.pair_options
+    for sid, strategy in svc.strategies.items():
+        assigned_symbols = [sym for sym, strats in assignments.items() if sid in strats]
+        strategy.config["symbols"] = assigned_symbols
+        strategy.enabled = len(assigned_symbols) > 0
+
+
+@router.get("/trading-config")
+async def get_trading_config():
+    return await _load_trading_config()
+
+
+@router.put("/trading-config")
+async def put_trading_config(body: TradingConfig):
+    config = {
+        "assignments": body.assignments,
+        "primarySymbol": body.primarySymbol,
+        "pairOptions": body.pairOptions,
+    }
+    await _save_trading_config(config)
+    return config
+
+
 @router.post("/control/start")
-async def start_trading(svc: AppServices = Depends(get_services)):
+async def start_trading(body: Optional[StartRequest] = None, svc: AppServices = Depends(get_services)):
     if not mt5_service.connected:
         creds = await _get_mt5_credentials(svc)
         connected = await mt5_service.async_connect(**creds)
         if not connected:
             raise HTTPException(status_code=503, detail="Failed to connect to MT5")
+
+    assignments = (body.assignments if body and body.assignments else None)
+    pair_options = {}
+    if not assignments:
+        saved = await _load_trading_config()
+        assignments = saved.get("assignments", {})
+        pair_options = saved.get("pairOptions", {})
+    else:
+        saved = await _load_trading_config()
+        pair_options = saved.get("pairOptions", {})
+
+    valid = {sym: strats for sym, strats in assignments.items() if strats}
+    if not valid:
+        raise HTTPException(status_code=400, detail="No symbol-strategy assignments configured")
+
+    _apply_assignments(svc, valid, pair_options)
     svc.is_trading = True
-    audit_trail.log_system("Trading started", data={"strategies": list(svc.strategies.keys())})
-    return {"status": "started", "strategies": list(svc.strategies.keys())}
+
+    audit_trail.log_system("Trading started", data={"assignments": valid})
+    return {"status": "started", "assignments": valid}
 
 
 @router.post("/control/stop")
 async def stop_trading(svc: AppServices = Depends(get_services)):
     svc.is_trading = False
+    svc.active_assignments = {}
     audit_trail.log_system("Trading stopped")
     return {"status": "stopped"}
 
@@ -76,6 +158,14 @@ async def kill_switch(svc: AppServices = Depends(get_services)):
         svc.risk_engine.kill_switch_active = True
     audit_trail.log_system("KILL SWITCH activated", level="CRITICAL")
     return {"status": "killed", "message": "Kill switch activated. All trading halted."}
+
+
+@router.post("/control/kill/reset")
+async def reset_kill_switch(svc: AppServices = Depends(get_services)):
+    if svc.risk_engine:
+        svc.risk_engine.kill_switch_active = False
+    audit_trail.log_system("Kill switch deactivated", level="WARNING")
+    return {"status": "reset", "message": "Kill switch deactivated. Trading can resume."}
 
 
 @router.get("/positions")

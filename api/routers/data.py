@@ -1,11 +1,14 @@
 import os
 import asyncio
+import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from typing import Dict, Any, List
 
 from api.dependencies import get_services, AppServices
 from core.data.mt5_service import mt5_service
+
+logger = logging.getLogger("trading_bot.api.data")
 
 router = APIRouter(prefix="/api/data", tags=["data"])
 
@@ -87,6 +90,30 @@ async def trigger_sync(
         return {"status": "ok", "symbol": symbol, "timeframe": timeframe}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/sync/all")
+async def sync_all_timeframes(
+    body: Dict[str, Any],
+    background_tasks: BackgroundTasks,
+    svc: AppServices = Depends(get_services),
+):
+    symbol = body.get("symbol")
+    if not symbol:
+        raise HTTPException(status_code=400, detail="symbol is required")
+
+    timeframes = ["M1", "M5", "M15", "H1", "H4", "D1"]
+
+    def _sync_all():
+        for tf in timeframes:
+            try:
+                svc.data_manager.sync.update_incremental(symbol, tf)
+                logger.info(f"Synced {symbol} {tf}")
+            except Exception as e:
+                logger.warning(f"Sync failed {symbol} {tf}: {e}")
+
+    background_tasks.add_task(asyncio.to_thread, _sync_all)
+    return {"status": "syncing", "symbol": symbol, "timeframes": timeframes}
 
 
 @router.get("/sync/status")

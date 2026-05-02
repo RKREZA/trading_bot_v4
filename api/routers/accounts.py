@@ -13,6 +13,9 @@ class AccountCreate(BaseModel):
     server: str
     broker_utc_offset: int = 0
     label: str = ""
+    max_drawdown_pct: float = 10.0
+    risk_per_trade_pct: float = 1.0
+    max_daily_drawdown_pct: float = 5.0
 
 
 class AccountUpdate(BaseModel):
@@ -20,6 +23,9 @@ class AccountUpdate(BaseModel):
     is_active: Optional[bool] = None
     broker_utc_offset: Optional[int] = None
     label: Optional[str] = None
+    max_drawdown_pct: Optional[float] = None
+    risk_per_trade_pct: Optional[float] = None
+    max_daily_drawdown_pct: Optional[float] = None
 
 
 @router.get("/")
@@ -38,6 +44,9 @@ async def list_accounts(db=Depends(get_db)):
             "is_active": a.is_active,
             "label": a.label,
             "has_password": bool(a.password),
+            "max_drawdown_pct": a.max_drawdown_pct,
+            "risk_per_trade_pct": a.risk_per_trade_pct,
+            "max_daily_drawdown_pct": a.max_daily_drawdown_pct,
         }
         for a in accounts
     ]
@@ -53,6 +62,9 @@ async def create_account(body: AccountCreate, db=Depends(get_db)):
         server=body.server,
         broker_utc_offset=body.broker_utc_offset,
         label=body.label,
+        max_drawdown_pct=body.max_drawdown_pct,
+        risk_per_trade_pct=body.risk_per_trade_pct,
+        max_daily_drawdown_pct=body.max_daily_drawdown_pct,
     )
     db.add(account)
     await db.commit()
@@ -78,6 +90,12 @@ async def update_account(account_id: int, body: AccountUpdate, db=Depends(get_db
         account.broker_utc_offset = body.broker_utc_offset
     if body.label is not None:
         account.label = body.label
+    if body.max_drawdown_pct is not None:
+        account.max_drawdown_pct = body.max_drawdown_pct
+    if body.risk_per_trade_pct is not None:
+        account.risk_per_trade_pct = body.risk_per_trade_pct
+    if body.max_daily_drawdown_pct is not None:
+        account.max_daily_drawdown_pct = body.max_daily_drawdown_pct
 
     await db.commit()
     return {"status": "updated", "id": account_id}

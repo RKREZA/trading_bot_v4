@@ -1,7 +1,3 @@
 {
-  "/trading/page": "app/trading/page.js",
-  "/logs/page": "app/logs/page.js",
-  "/admin/page": "app/admin/page.js",
-  "/data/page": "app/data/page.js",
-  "/dashboard/page": "app/dashboard/page.js"
+  "/backtesting/page": "app/backtesting/page.js"
 }

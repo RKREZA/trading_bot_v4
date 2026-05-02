@@ -5,17 +5,58 @@
     "shadow_fill_audit": "logs/shadow_fill_audit.csv"
   },
   "magic_number": 234000,
-  "portfolio_allocations": {},
+  "portfolio_allocations": {"SMC": 1.0},
+  "symbols": ["XAUUSDm"],
+  "symbols_config": {
+    "XAUUSDm": {
+      "point": 0.01,
+      "tick_value": 1.0,
+      "tick_size": 0.01,
+      "spread_pips": 3,
+      "commission_per_lot": 7.0,
+      "min_lot": 0.01,
+      "max_lot": 100.0,
+      "lot_step": 0.01,
+      "contract_size": 100
+    },
+    "EURUSD": {
+      "point": 0.00001,
+      "tick_value": 10.0,
+      "tick_size": 0.00001,
+      "spread_pips": 1,
+      "commission_per_lot": 7.0,
+      "min_lot": 0.01,
+      "max_lot": 100.0,
+      "lot_step": 0.01,
+      "contract_size": 100000
+    },
+    "GBPUSD": {
+      "point": 0.00001,
+      "tick_value": 10.0,
+      "tick_size": 0.00001,
+      "spread_pips": 2,
+      "commission_per_lot": 7.0,
+      "min_lot": 0.01,
+      "max_lot": 100.0,
+      "lot_step": 0.01,
+      "contract_size": 100000
+    }
+  },
   "risk_governance": {
     "risk_per_trade_pct": 1.0,
     "max_daily_loss_pct": 5.0,
     "max_drawdown_halt_pct": 15.0,
     "max_consecutive_losses": 10,
-    "max_cost_ratio": 0.9
+    "max_cost_ratio": 0.9,
+    "min_confidence": 0.45,
+    "min_rr": 2.0,
+    "min_tick_density": 15
   },
   "execution": {
     "phase1_lot_ceiling": 2.0,
     "entry_slippage_points": 2.5,
     "sl_exit_slippage_points": 3.5
-  }
+  },
+  "min_atr_spread_ratio": 3.0,
+  "max_spread_points": 50
 }

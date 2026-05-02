@@ -52,3 +52,5 @@ config/strategy_health.json
 # Agent skills (not part of app)
 .agent/
 antigravity-skills/
+/frontend/.next/cache
+/frontend/.next/cache

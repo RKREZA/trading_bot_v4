@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useAppStore } from "@/lib/store";
@@ -9,26 +9,47 @@ import { SelectionPanel } from "./_components/SelectionPanel";
 import { ChartContainer } from "./_components/ChartContainer";
 import { PositionsTable } from "./_components/PositionsTable";
 
+type Assignments = Record<string, string[]>;
+type PairOptions = Record<string, Record<string, any>>;
+
 export default function TradingPage() {
   const store = useAppStore();
   const [symbols, setSymbols] = useState<string[]>([]);
-  const [selectedSymbols, setSelectedSymbols] = useState<string[]>([]);
+  const [assignments, setAssignments] = useState<Assignments>({});
+  const [pairOptions, setPairOptions] = useState<PairOptions>({});
   const [primarySymbol, setPrimarySymbol] = useState("");
   const [positions, setPositions] = useState<any[]>([]);
   const [account, setAccount] = useState<any>(null);
   const [strategies, setStrategies] = useState<any[]>([]);
+  const [configLoaded, setConfigLoaded] = useState(false);
+
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const selectedSymbols = Object.keys(assignments);
 
   const loadSymbols = useCallback(() => {
     api.getSymbols().then((s) => {
       setSymbols(s);
-      if (s.length > 0 && !primarySymbol) {
-        setPrimarySymbol(s[0]);
-        setSelectedSymbols((prev) => prev.length === 0 ? [s[0]] : prev);
-      }
     }).catch(() => {});
-  }, [primarySymbol]);
+  }, []);
 
-  useEffect(() => { loadSymbols(); }, []);
+  useEffect(() => {
+    api.getTradingConfig().then((cfg) => {
+      if (cfg.assignments && Object.keys(cfg.assignments).length > 0) {
+        setAssignments(cfg.assignments);
+      }
+      if (cfg.primarySymbol) {
+        setPrimarySymbol(cfg.primarySymbol);
+      }
+      if (cfg.pairOptions) {
+        setPairOptions(cfg.pairOptions);
+      }
+      setConfigLoaded(true);
+    }).catch(() => {
+      setConfigLoaded(true);
+    });
+    loadSymbols();
+  }, []);
 
   useEffect(() => {
     const poll = () => {
@@ -41,17 +62,26 @@ export default function TradingPage() {
     return () => clearInterval(interval);
   }, []);
 
-  const handleToggleSymbol = (sym: string) => {
-    setSelectedSymbols((prev) =>
-      prev.includes(sym) ? prev.filter((s) => s !== sym) : [...prev, sym]
-    );
+  const saveConfig = useCallback((a: Assignments, ps: string, po: PairOptions) => {
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => {
+      api.saveTradingConfig({ assignments: a, primarySymbol: ps, pairOptions: po }).catch(() => {});
+    }, 500);
+  }, []);
+
+  const handleAssignmentsChange = (a: Assignments) => {
+    setAssignments(a);
+    saveConfig(a, primarySymbol, pairOptions);
+  };
+
+  const handlePairOptionsChange = (po: PairOptions) => {
+    setPairOptions(po);
+    saveConfig(assignments, primarySymbol, po);
   };
 
   const handleSetPrimary = (sym: string) => {
     setPrimarySymbol(sym);
-    if (!selectedSymbols.includes(sym)) {
-      setSelectedSymbols((prev) => [...prev, sym]);
-    }
+    saveConfig(assignments, sym, pairOptions);
   };
 
   const handleToggleStrategy = async (id: string) => {
@@ -62,20 +92,9 @@ export default function TradingPage() {
     } catch {}
   };
 
-  const handleSetSL = async (ticket: number, symbol: string, price: number) => {
-    const pos = positions.find((p) => p.ticket === ticket);
-    if (!pos) return;
+  const handleModifySLTP = async (ticket: number, symbol: string, sl: number, tp: number) => {
     try {
-      await api.modifyPosition(ticket, price, pos.tp ?? 0, symbol);
-      api.getPositions().then(setPositions).catch(() => {});
-    } catch {}
-  };
-
-  const handleSetTP = async (ticket: number, symbol: string, price: number) => {
-    const pos = positions.find((p) => p.ticket === ticket);
-    if (!pos) return;
-    try {
-      await api.modifyPosition(ticket, pos.sl ?? 0, price, symbol);
+      await api.modifyPosition(ticket, sl, tp, symbol);
       api.getPositions().then(setPositions).catch(() => {});
     } catch {}
   };
@@ -86,7 +105,7 @@ export default function TradingPage() {
         <h2 className="text-xl font-semibold">Trading</h2>
       </div>
 
-      <ConnectionControls onConnected={loadSymbols} />
+      <ConnectionControls onConnected={loadSymbols} assignments={assignments} />
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
         {/* MT5 Account */}
@@ -119,9 +138,10 @@ export default function TradingPage() {
         <SelectionPanel
           strategies={strategies}
           symbols={symbols}
-          selectedSymbols={selectedSymbols}
-          onToggleSymbol={handleToggleSymbol}
-          onToggleStrategy={handleToggleStrategy}
+          assignments={assignments}
+          onAssignmentsChange={handleAssignmentsChange}
+          pairOptions={pairOptions}
+          onPairOptionsChange={handlePairOptionsChange}
           primarySymbol={primarySymbol}
           onSetPrimary={handleSetPrimary}
         />
@@ -170,8 +190,7 @@ export default function TradingPage() {
         symbols={symbols}
         onSymbolChange={handleSetPrimary}
         positions={positions}
-        onSetSL={handleSetSL}
-        onSetTP={handleSetTP}
+        onModifySLTP={handleModifySLTP}
       />
 
       {/* Positions */}

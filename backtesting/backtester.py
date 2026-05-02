@@ -216,7 +216,7 @@ class PortfolioBacktester:
         self.max_drawdowns = state["max_drawdowns"]
         self.open_trades = state["open_trades"]
         self.history = state["history"]
-    def run(self, symbol: str, strategies: list, target_tf_data, h1_data, m15_data, m5_data, m1_data, d1_data=None, data_hashes: Dict[str, str] = None, resume: bool = False, start_ts: float = 0):
+    def run(self, symbol: str, strategies: list, target_tf_data, h1_data, m15_data, m5_data, m1_data, d1_data=None, h4_data=None, data_hashes: Dict[str, str] = None, resume: bool = False, start_ts: float = 0):
         """
         V5-LOCKED Production Backtest Runner.
         Implements 'Step 15' development loop with Checkpoint support.
@@ -233,19 +233,18 @@ class PortfolioBacktester:
         
         # Institutional Gating Filter: Must be enabled AND have an allocation > 0
         active_strategies = []
+        bypass_allocation = len(strategies) > 0
         for s in strategies:
-            # 1. Check logical enabled flag
             if not getattr(s, "enabled", True):
                 continue
-            
-            # 2. Check symbol allowance
+
             if not s.is_symbol_allowed(symbol):
                 continue
-                
-            # 3. Check allocation > 0 (via PortfolioManager logic)
-            if self.portfolio_manager.get_strategy_balance(100.0, s.strategy_id) <= 0:
-                continue
-                
+
+            if not bypass_allocation:
+                if self.portfolio_manager.get_strategy_balance(100.0, s.strategy_id) <= 0:
+                    continue
+
             active_strategies.append(s)
             
         sid_list = [s.strategy_id for s in active_strategies]
@@ -443,6 +442,19 @@ class PortfolioBacktester:
                     outcome = self.kernel.execute(intent, snapshot)
                     
                     if outcome and not outcome.is_error:
+                        sig_price = pending_data.get("signal_price", outcome.fill_price)
+                        orig_risk = abs(sig_price - intent.stop_loss)
+                        orig_reward = abs(intent.take_profit - sig_price)
+                        rr = orig_reward / orig_risk if orig_risk > 0 else 0
+                        new_risk = abs(outcome.fill_price - intent.stop_loss)
+                        if rr > 0 and new_risk > 0:
+                            new_reward = new_risk * rr
+                            if intent.direction == "BUY":
+                                adj_tp = outcome.fill_price + new_reward
+                            else:
+                                adj_tp = outcome.fill_price - new_reward
+                        else:
+                            adj_tp = intent.take_profit
                         fill = {
                             "ticket": outcome.ticket,
                             "direction": intent.direction,
@@ -451,7 +463,7 @@ class PortfolioBacktester:
                             "actual_latency_ms": outcome.actual_latency_ms,
                             "sl": intent.stop_loss,
                             "initial_sl": intent.stop_loss,
-                            "tp": intent.take_profit,
+                            "tp": adj_tp,
                             "strategy_id": sid,
                             "symbol": symbol,
                             "lots": intent.volume,
@@ -621,7 +633,8 @@ class PortfolioBacktester:
                             {
                                 "intent": intent,
                                 "point": point,
-                                "spread_val": spread_val
+                                "spread_val": spread_val,
+                                "signal_price": signal.price,
                             }
                         ))
                         logger.info(f"[{dt}] [{sid}] INTENT QUEUED (Seq: {self._sequence_counter}): {intent.intent_hash[:8]}")
@@ -637,9 +650,8 @@ class PortfolioBacktester:
                     strat_map = {s.strategy_id: s for s in active_strategies}
                     self._manage_active_trades(m1_slice, tick_value, point, comm_per_lot, strat_map, atr_val=atr_val, session=market_data.session)
                 elif self.open_trades:
-                    # Institutional Grade-A+: Volatility-Aware Path Reconstruction
+                    target_tf_data.set_limit(i + 1)
                     for ticket, trade in list(self.open_trades.items()):
-                        # We use the M5 bar to resolve paths for active trades
                         res = self.reconstructor.resolve_path(
                             candle=target_tf_data[i],
                             sl=trade["sl"],
@@ -647,13 +659,12 @@ class PortfolioBacktester:
                             direction=trade["direction"],
                             volatility_regime=regime_info.volatility.value
                         )
-                        
+
                         if res["p_sl"] > 0.5:
-                            # SL Hit is most probable
                             self._close_trade(trade, target_tf_data.l[i] if trade["direction"] == "BUY" else target_tf_data.h[i], "sl", t, point, tick_value, comm_per_lot)
                         elif res["p_tp"] > 0.5:
-                            # TP Hit is most probable
                             self._close_trade(trade, target_tf_data.h[i] if trade["direction"] == "BUY" else target_tf_data.l[i], "tp", t, point, tick_value, comm_per_lot)
+                    target_tf_data.set_limit(i)
                 
                 # 5. Equity Sampling & Drawdown Track (Rule 6.1)
                 # Correct mark-to-market equity: balance + floating PnL of any open trade.
@@ -941,6 +952,19 @@ class PortfolioBacktester:
             )
         
         return result
+
+    def _close_trade(self, trade, exit_price, event, timestamp, point, tick_value, comm_per_lot):
+        sid = trade["strategy_id"]
+        direction = trade["direction"]
+        entry = trade["fill_price"]
+        raw_pnl = ((exit_price - entry) if direction == "BUY" else (entry - exit_price)) / point * tick_value * trade["lots"]
+        net_pnl = raw_pnl - (trade["lots"] * comm_per_lot) - trade.get("entry_comm", 0.0)
+        self.balances[sid] += net_pnl
+        self.equities[sid] = self.balances[sid]
+        rec = {**trade, "exit_price": float(exit_price), "exit_time": timestamp, "pnl": net_pnl, "result": event.upper()}
+        self.history.append(rec)
+        self.risk_guardian.record_trade_result(net_pnl, self.equities[sid])
+        del self.open_trades[trade["ticket"]]
 
     def _force_close_at_end(self, m5_data, point, tick_value, comm_per_lot, strategies):
         if not self.open_trades: return

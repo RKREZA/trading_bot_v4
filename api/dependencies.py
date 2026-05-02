@@ -2,7 +2,6 @@
 Dependency injection for FastAPI routes.
 Provides access to core services without global singletons in route modules.
 """
-import os
 from typing import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,6 +27,8 @@ class AppServices:
         self.data_manager: DataManager = None
         self.is_trading: bool = False
         self.strategies: dict = {}
+        self.active_assignments: dict = {}
+        self.pair_options: dict = {}
 
     async def initialize(self) -> None:
         self.config = load_config()

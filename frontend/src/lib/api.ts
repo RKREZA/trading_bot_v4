@@ -16,9 +16,14 @@ export const api = {
   getStatus: () => request<any>("/api/status"),
   getHealth: () => request<any>("/api/health"),
 
-  startTrading: () => request<any>("/api/control/start", { method: "POST" }),
+  startTrading: (assignments?: Record<string, string[]>) =>
+    request<any>("/api/control/start", {
+      method: "POST",
+      body: assignments ? JSON.stringify({ assignments }) : undefined,
+    }),
   stopTrading: () => request<any>("/api/control/stop", { method: "POST" }),
   killSwitch: () => request<any>("/api/control/kill", { method: "POST" }),
+  resetKillSwitch: () => request<any>("/api/control/kill/reset", { method: "POST" }),
 
   connectMT5: () => request<any>("/api/mt5/connect", { method: "POST" }),
   disconnectMT5: () => request<any>("/api/mt5/disconnect", { method: "POST" }),
@@ -28,6 +33,17 @@ export const api = {
     request<any>(`/api/positions/${ticket}/modify`, {
       method: "PUT",
       body: JSON.stringify({ sl, tp, symbol }),
+    }),
+
+  getTradingConfig: () => request<any>("/api/trading-config"),
+  saveTradingConfig: (config: {
+    assignments: Record<string, string[]>;
+    primarySymbol: string;
+    pairOptions?: Record<string, Record<string, any>>;
+  }) =>
+    request<any>("/api/trading-config", {
+      method: "PUT",
+      body: JSON.stringify(config),
     }),
 
   getPositions: () => request<any[]>("/api/positions"),
@@ -58,11 +74,18 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ symbol, timeframe: tf }),
     }),
+  syncAllData: (symbol: string) =>
+    request<any>("/api/data/sync/all", {
+      method: "POST",
+      body: JSON.stringify({ symbol }),
+    }),
   getSyncStatus: () => request<any>("/api/data/sync/status"),
 
   getAccounts: () => request<any[]>("/api/accounts/"),
   createAccount: (data: any) =>
     request<any>("/api/accounts/", { method: "POST", body: JSON.stringify(data) }),
+  updateAccount: (id: number, data: any) =>
+    request<any>(`/api/accounts/${id}`, { method: "PUT", body: JSON.stringify(data) }),
   deleteAccount: (id: number) =>
     request<any>(`/api/accounts/${id}`, { method: "DELETE" }),
 
@@ -78,4 +101,11 @@ export const api = {
     request<any[]>(`/api/backtest/runs?limit=${limit}`),
   getBacktestStatus: (id: number) => request<any>(`/api/backtest/${id}/status`),
   getBacktestResults: (id: number) => request<any>(`/api/backtest/${id}/results`),
+  exportBacktestCsv: (id: number) =>
+    `${API_BASE}/api/backtest/${id}/export`,
+  getAvailableStrategies: () => request<any[]>("/api/backtest/strategies/available"),
+  deleteBacktestRun: (id: number) =>
+    request<any>(`/api/backtest/${id}`, { method: "DELETE" }),
+  deleteAllBacktestRuns: () =>
+    request<any>("/api/backtest/runs/all", { method: "DELETE" }),
 };

@@ -72,13 +72,21 @@ class StrategyOrchestrator:
         # Trailing stops and partials are now handled synchronously in execute_cycle
 
 
-    def resolve_block(self, block_name: str, session: Optional[str] = None) -> Dict[str, Any]:
+    def resolve_block(self, block_name: str, session: Optional[str] = None, symbol: Optional[str] = None) -> Dict[str, Any]:
         """
         Universal session-aware block resolution for Orchestrator components.
+        Supports per-pair overrides from DB via config["pair_options"].
         """
-        block = self.config.get(block_name, {})
+        block = dict(self.config.get(block_name, {}))
         if not block:
-            return {}
+            block = {}
+
+        if symbol:
+            pair_options = self.config.get("pair_options", {})
+            for key, opts in pair_options.items():
+                if key.startswith(f"{symbol}:") and block_name in opts:
+                    block = {**block, **opts[block_name]}
+                    break
 
         if session and "session_overrides" in block:
             overrides = block["session_overrides"].get(session, {})
@@ -496,7 +504,7 @@ class StrategyOrchestrator:
         Institutional Trailing Stop Logic.
         Moves SL based on R:R thresholds and ATR-based trailing.
         """
-        conf = self.resolve_block("trailing_stop", session)
+        conf = self.resolve_block("trailing_stop", session, symbol)
         if not conf.get("enabled", False):
             return
 
@@ -545,7 +553,7 @@ class StrategyOrchestrator:
         Handles partial profit taking scaling (Institutional Grade).
         Closes a percentage of volume when the initial R:R target is hit.
         """
-        conf = self.resolve_block("partial_profit", session)
+        conf = self.resolve_block("partial_profit", session, symbol)
         if not conf.get("enabled", False):
             return
 

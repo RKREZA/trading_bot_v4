@@ -4,12 +4,18 @@ import { Badge } from "@/components/ui/badge";
 import { useAppStore } from "@/lib/store";
 import { api } from "@/lib/api";
 
-export function ConnectionControls({ onConnected }: { onConnected?: () => void }) {
+interface Props {
+  onConnected?: () => void;
+  assignments?: Record<string, string[]>;
+}
+
+export function ConnectionControls({ onConnected, assignments }: Props) {
   const store = useAppStore();
   const [error, setError] = useState("");
   const [loading, setLoading] = useState("");
 
   const handleConnect = async () => {
+    if (!confirm("Connect to MT5 terminal?")) return;
     setError("");
     setLoading("connect");
     try {
@@ -24,6 +30,7 @@ export function ConnectionControls({ onConnected }: { onConnected?: () => void }
   };
 
   const handleDisconnect = async () => {
+    if (!confirm("Disconnect from MT5? This will also stop trading.")) return;
     setLoading("disconnect");
     try {
       await api.disconnectMT5();
@@ -34,11 +41,18 @@ export function ConnectionControls({ onConnected }: { onConnected?: () => void }
     }
   };
 
+  const validAssignments = assignments
+    ? Object.fromEntries(Object.entries(assignments).filter(([, strats]) => strats.length > 0))
+    : {};
+  const hasValidAssignments = Object.keys(validAssignments).length > 0;
+
   const handleStart = async () => {
+    if (!hasValidAssignments) return;
+    if (!confirm("Start live trading?")) return;
     setError("");
     setLoading("start");
     try {
-      await api.startTrading();
+      await api.startTrading(validAssignments);
       store.setTrading(true);
     } catch (e: any) {
       setError(e.message || "Failed to start");
@@ -48,6 +62,7 @@ export function ConnectionControls({ onConnected }: { onConnected?: () => void }
   };
 
   const handleStop = async () => {
+    if (!confirm("Stop live trading?")) return;
     setLoading("stop");
     try {
       await api.stopTrading();
@@ -58,12 +73,28 @@ export function ConnectionControls({ onConnected }: { onConnected?: () => void }
   };
 
   const handleKill = async () => {
-    if (!confirm("Activate kill switch? This will halt ALL trading.")) return;
+    if (!confirm("ACTIVATE KILL SWITCH?\n\nThis will immediately halt ALL trading and prevent new trades until manually reset.")) return;
+    setLoading("kill");
     try {
       await api.killSwitch();
       store.setTrading(false);
       store.setKillSwitch(true);
-    } catch {}
+    } catch {} finally {
+      setLoading("");
+    }
+  };
+
+  const handleResetKill = async () => {
+    if (!confirm("Deactivate kill switch?\n\nThis will allow trading to resume.")) return;
+    setLoading("resetkill");
+    try {
+      await api.resetKillSwitch();
+      store.setKillSwitch(false);
+    } catch (e: any) {
+      setError(e.message || "Failed to reset");
+    } finally {
+      setLoading("");
+    }
   };
 
   return (
@@ -80,7 +111,7 @@ export function ConnectionControls({ onConnected }: { onConnected?: () => void }
               disabled={loading === "connect"}
               className="rounded bg-emerald-600 px-3 py-1 text-xs font-medium hover:bg-emerald-500 disabled:opacity-50"
             >
-              {loading === "connect" ? "Connecting…" : "Connect"}
+              {loading === "connect" ? "Connecting..." : "Connect"}
             </button>
           ) : (
             <button
@@ -89,7 +120,7 @@ export function ConnectionControls({ onConnected }: { onConnected?: () => void }
               className="rounded bg-zinc-700 px-3 py-1 text-xs font-medium hover:bg-zinc-600 disabled:opacity-50"
               title={store.isTrading ? "Stop trading first" : undefined}
             >
-              {loading === "disconnect" ? "…" : "Disconnect"}
+              {loading === "disconnect" ? "..." : "Disconnect"}
             </button>
           )}
         </div>
@@ -102,10 +133,17 @@ export function ConnectionControls({ onConnected }: { onConnected?: () => void }
           {!store.isTrading ? (
             <button
               onClick={handleStart}
-              disabled={!store.mt5Connected || !!loading}
+              disabled={!store.mt5Connected || !!loading || store.killSwitch || !hasValidAssignments}
               className="rounded bg-emerald-600 px-3 py-1 text-xs font-medium hover:bg-emerald-500 disabled:opacity-50"
+              title={
+                store.killSwitch
+                  ? "Reset kill switch first"
+                  : !hasValidAssignments
+                    ? "Select at least one symbol with a strategy"
+                    : undefined
+              }
             >
-              {loading === "start" ? "Starting…" : "Start"}
+              {loading === "start" ? "Starting..." : "Start"}
             </button>
           ) : (
             <button
@@ -113,16 +151,26 @@ export function ConnectionControls({ onConnected }: { onConnected?: () => void }
               disabled={!!loading}
               className="rounded bg-zinc-700 px-3 py-1 text-xs font-medium hover:bg-zinc-600 disabled:opacity-50"
             >
-              {loading === "stop" ? "…" : "Stop"}
+              {loading === "stop" ? "..." : "Stop"}
             </button>
           )}
-          <button
-            onClick={handleKill}
-            disabled={!store.mt5Connected}
-            className="rounded bg-red-700 px-3 py-1 text-xs font-medium hover:bg-red-600 disabled:opacity-50"
-          >
-            Kill
-          </button>
+          {!store.killSwitch ? (
+            <button
+              onClick={handleKill}
+              disabled={!store.mt5Connected || !!loading}
+              className="rounded bg-red-700 px-3 py-1 text-xs font-medium hover:bg-red-600 disabled:opacity-50"
+            >
+              {loading === "kill" ? "..." : "Kill"}
+            </button>
+          ) : (
+            <button
+              onClick={handleResetKill}
+              disabled={!!loading}
+              className="animate-pulse rounded bg-amber-600 px-3 py-1 text-xs font-medium hover:bg-amber-500 disabled:opacity-50"
+            >
+              {loading === "resetkill" ? "..." : "Reset Kill Switch"}
+            </button>
+          )}
           {store.killSwitch && <Badge variant="danger">KILL ACTIVE</Badge>}
         </div>
       </div>

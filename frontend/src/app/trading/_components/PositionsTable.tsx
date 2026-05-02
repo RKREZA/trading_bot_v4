@@ -24,10 +24,13 @@ export function PositionsTable({ positions, onRefresh }: Props) {
   };
 
   const handleModify = async (ticket: number, symbol: string) => {
+    const newSL = parseFloat(editSL);
+    const newTP = parseFloat(editTP);
+    if (!confirm(`Modify position #${ticket}?\n\nNew SL: ${newSL.toFixed(5)}\nNew TP: ${newTP.toFixed(5)}`)) return;
     setLoadingTicket(ticket);
     setError(null);
     try {
-      await api.modifyPosition(ticket, parseFloat(editSL), parseFloat(editTP), symbol);
+      await api.modifyPosition(ticket, newSL, newTP, symbol);
       setEditingTicket(null);
       onRefresh();
     } catch (e: any) {

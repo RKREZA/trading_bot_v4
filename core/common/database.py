@@ -39,10 +39,27 @@ def async_session_factory():
     return _get_session_factory()()
 
 
+async def _migrate_mt_accounts(conn) -> None:
+    """Add risk columns to mt_accounts if missing (SQLite won't add via create_all)."""
+    import sqlalchemy as sa
+    result = await conn.execute(sa.text("PRAGMA table_info(mt_accounts)"))
+    existing = {row[1] for row in result}
+    migrations = [
+        ("max_drawdown_pct", "REAL DEFAULT 10.0"),
+        ("risk_per_trade_pct", "REAL DEFAULT 1.0"),
+        ("max_daily_drawdown_pct", "REAL DEFAULT 5.0"),
+    ]
+    for col, typedef in migrations:
+        if col not in existing:
+            await conn.execute(sa.text(f"ALTER TABLE mt_accounts ADD COLUMN {col} {typedef}"))
+            logger.info(f"Added column mt_accounts.{col}")
+
+
 async def init_db() -> None:
     engine = _get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await _migrate_mt_accounts(conn)
     logger.info("Database tables initialized")
 
 
